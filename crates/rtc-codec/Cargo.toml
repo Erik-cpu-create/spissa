@@ -1,0 +1,12 @@
+[package]
+name = "rtc-codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RTC - Rama Tensor Codec: lossless tensor compression codecs"
+
+[dependencies]
+serde = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }

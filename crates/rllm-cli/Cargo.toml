@@ -1,0 +1,22 @@
+[package]
+name = "rllm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for RLLM - Runtime-compressed Local LLM"
+
+[[bin]]
+name = "rllm"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+sha2 = { workspace = true }
+
+# Internal crates
+rllm-container = { path = "../rllm-container" }
+rtc-codec = { path = "../rtc-codec" }
+rllm-import = { path = "../rllm-import" }

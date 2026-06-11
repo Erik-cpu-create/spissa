@@ -1,0 +1,13 @@
+[package]
+name = "rllm-container"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RLLM binary container format (.rllm) parser and writer"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
