@@ -1,5 +1,7 @@
 # Rust build outputs
+/target/
 target/
+debug/
 
 # Local model/data artifacts (large, reproducible downloads)
 models/
@@ -22,11 +24,18 @@ Thumbs.db
 *.swp
 *.swo
 
-# Native build artifacts
+# Rustfmt backups
+**/*.rs.bk
+
+# Native/debug build artifacts
 *.o
 *.a
 *.so
 *.dylib
+*.pdb
+
+# Cargo mutants
+**/mutants.out*/
 
 # Logs
 *.log
