@@ -1,64 +1,90 @@
-# RLLM — Runtime-compressed Local LLM
+# Runtime-compressed Local LLM (RLLM)
+
+Brain-inspired compressed runtime for local LLMs.
 
 RLLM is an experimental local LLM runtime built around **lossless compressed model storage**. It stores model tensors in a chunked compressed container (`.rllm`) and aims to run inference by decoding only the tensor blocks needed at runtime.
 
-**Core positioning:**
-
-> Run local LLMs from compressed weights without changing the model.
+> Run local LLMs from compressed weights without changing model weights.
 
 ## What RLLM Does
 
 - Stores model tensors in a chunked compressed container format (`.rllm`)
-- Uses **RTC (Rama Tensor Codec)** — a library of lossless tensor compression codecs
-- Verifies that decoded weights are **bit-identical** to the originals
-- Supports runtime modes that decode only what's needed (layer-wise, tile-wise)
-- Provides honest compression metrics — no magic claims
+- Uses **RTC (Rama Tensor Codec)** — in-house lossless tensor compression codecs
+- Verifies decoded weights are **bit-identical** to originals
+- Imports safetensors model files into `.rllm`
+- Reports honest compression metrics — no magic claims
 
 ## What RLLM Does NOT Do
 
-- ❌ Claim magical compression (e.g., "7.6GB → 500MB with same quality")
-- ❌ Perform lossy quantization (unless explicitly labeled as `lossy-optimize`)
-- ❌ Wrap Ollama, llama.cpp, or any existing runtime
+- ❌ Claim magical compression (for example, “7.6GB → 500MB with same quality”)
+- ❌ Perform lossy quantization unless explicitly labeled as a lossy optimization
+- ❌ Wrap Ollama, llama.cpp, or another existing runtime
 - ❌ Change model weights in any way
+- ❌ Use external generic compression libraries by default; RTC codecs are custom/in-house unless explicitly approved
+
+## Current Status
+
+Implemented:
+
+- Cargo workspace with four crates
+- `.rllm` v1 container reader/writer
+- Safetensors import
+- CLI commands: `pack`, `inspect`, `verify`, `doctor`
+- Stubbed future commands: `run`, `import`, `benchmark`
+- RTC codecs:
+  - `rtc-raw-v1`
+  - `rtc-rle-v1`
+  - `rtc-huff-v1` (custom byte-level Huffman)
+- Per-chunk SHA-256 verification
+- Multi-tensor safetensors verification
+
+Not yet implemented:
+
+- Real inference runtime
+- Layer/tile decode runtime
+- Multi-tensor unpack back to safetensors layout
+- Tokenizer/model execution
 
 ## Quick Start
 
 ```bash
 # Build
-cargo build --release
+cargo build
 
-# Check system
+# Run tests
+cargo test
+
+# Check CLI/system info
 cargo run -- doctor
 
-# Pack a model (Phase 1+)
-cargo run -- pack ./model_dir --out model.rllm --codec rtc-lossless-v1
+# Pack a safetensors model into .rllm
+cargo run -- pack ./models/pythia-70m/model.safetensors \
+  --out ./models/pythia-70m.rllm \
+  --chunk-size 32mb
 
-# Inspect
-cargo run -- inspect model.rllm
+# Inspect metadata and compression stats
+cargo run -- inspect ./models/pythia-70m.rllm
 
-# Verify lossless
-cargo run -- verify ./model_dir model.rllm
-
-# Unpack
-cargo run -- unpack model.rllm --out ./restored_model
-
-# Run inference (Phase 5+)
-cargo run -- run model.rllm --prompt "Hello"
+# Verify lossless round-trip against the original safetensors file
+cargo run -- verify ./models/pythia-70m/model.safetensors ./models/pythia-70m.rllm
 ```
+
+`models/` is ignored because model files and `.rllm` outputs are large reproducible local artifacts.
 
 ## Architecture
 
-```
+```text
 rllm/
 ├── crates/
-│   ├── rllm-cli/        # CLI binary
+│   ├── rllm-cli/        # CLI binary (`rllm`)
 │   ├── rllm-container/  # .rllm binary format parser/writer
-│   └── rtc-codec/       # Lossless tensor compression codecs
+│   ├── rllm-import/     # Safetensors import
+│   └── rtc-codec/       # In-house lossless tensor compression codecs
 ├── docs/
 │   ├── format-rllm-v1.md
 │   ├── codec-rtc-v1.md
 │   └── roadmap.md
-└── tests/
+└── rllm_ai_agent_spec.md
 ```
 
 ### Components
@@ -67,37 +93,53 @@ rllm/
 |-------|---------|
 | `rllm-cli` | Command-line interface (`rllm` binary) |
 | `rllm-container` | `.rllm` file format: header, metadata, tensor/chunk directories |
-| `rtc-codec` | Lossless tensor codecs: `rtc-raw-v1`, `rtc-rle-v1`, and more |
+| `rllm-import` | External format import, currently safetensors |
+| `rtc-codec` | Lossless tensor codecs: raw, RLE, Huffman |
 
 ## File Format
 
 The `.rllm` format is a single-file container with:
 
-- **Magic header** — "RLLM" + version + endian marker
-- **Global metadata** — model name, architecture, codec, etc.
-- **Tensor directory** — metadata for each tensor (name, shape, dtype, checksums)
-- **Chunk directory** — metadata for each compressed chunk (offsets, sizes, codec ID)
-- **Compressed data** — tensor chunks encoded with RTC codecs
-- **Footer checksum** — integrity verification
+- **Header** — `RLLM` magic + version + endian marker + directory offsets
+- **Compressed chunk data** — tensor chunks encoded with RTC codecs
+- **Global metadata** — model name, architecture, codec, tokenizer type
+- **Tensor directory** — tensor metadata: name, shape, dtype, checksums
+- **Chunk directory** — chunk metadata: offsets, sizes, codec ID, checksums
 
 See [docs/format-rllm-v1.md](docs/format-rllm-v1.md) for the full specification.
 
 ## Codecs
 
-RTC (Rama Tensor Codec) provides lossless compression codecs:
+Every RTC codec must satisfy:
+
+```text
+decode(encode(input)) == input
+```
 
 | Codec | Description | Status |
 |-------|-------------|--------|
-| `rtc-raw-v1` | Identity (no compression) — fallback/baseline | ✅ Implemented |
+| `rtc-raw-v1` | Identity/no compression; baseline fallback | ✅ Implemented |
 | `rtc-rle-v1` | Run-length encoding | ✅ Implemented |
 | `rtc-huff-v1` | In-house byte-level Huffman entropy codec | ✅ Implemented |
 | `rtc-delta-v1` | Delta encoding | 🔜 Future |
 | `rtc-bitplane-v1` | Bitplane packing | 🔜 Future |
 | `rtc-entropy-v1` | Advanced entropy coding beyond Huffman | 🔜 Future |
 
-Every codec must satisfy: `decode(encode(input)) == input` (bit-identical).
-
 See [docs/codec-rtc-v1.md](docs/codec-rtc-v1.md) for codec design details.
+
+## Verified Example: Pythia-70M
+
+Local verification with EleutherAI Pythia-70M safetensors:
+
+- 94 tensors imported
+- 166,019,180 tensor bytes verified
+- Best local output with `raw + rle + huff`, `--chunk-size 32mb`:
+  - original safetensors file: 166,029,852 bytes / 158.34 MiB
+  - `.rllm`: 126,456,271 bytes / 120.60 MiB
+  - ratio: 76.16% of original file size
+- `rllm verify`: `[OK] LOSSLESS VERIFIED`
+
+The model files are not committed to this repository.
 
 ## Runtime Modes
 
@@ -108,72 +150,28 @@ See [docs/codec-rtc-v1.md](docs/codec-rtc-v1.md) for codec design details.
 | `tile-decode` | Decode tiles during matmul | 🔜 Phase 7 |
 | `fused-decode-matmul` | Decode + multiply in one step | 🔜 Future |
 
-## Roadmap
-
-### Phase 0 — Project Skeleton ✅
-- [x] Cargo workspace
-- [x] CLI skeleton with clap
-- [x] Basic structs (Header, TensorMeta, ChunkMeta)
-- [x] Unit test setup
-- [x] `rtc-raw-v1` codec with round-trip verification
-
-### Phase 1 — RLLM Container v1
-- [ ] Write .rllm header
-- [ ] Write metadata (JSON)
-- [ ] Write tensor directory
-- [ ] Write chunk directory
-- [ ] Write raw chunks
-- [ ] Read .rllm back
-- [ ] `rllm inspect` command
-
-### Phase 2 — RTC Codec v1
-- [x] `rtc-rle-v1` codec
-- [x] `rtc-huff-v1` byte-level Huffman codec
-- [x] Codec selection (try multiple, pick best)
-- [x] Per-chunk verification
-
-### Phase 3 — Pack/Unpack/Verify
-- [ ] `rllm pack` with real tensor input
-- [ ] `rllm unpack`
-- [ ] `rllm verify` with bit-identical check
-
-### Phase 4 — Safetensors Import
-- [ ] Read safetensors metadata
-- [ ] Read tensor bytes
-- [ ] Pack/unpack safetensors losslessly
-
-### Phase 5 — Toy Inference Runtime
-- [ ] Minimal tensor operations
-- [ ] Embedding, linear, attention, MLP
-- [ ] Sampling and streaming output
-
-### Phase 6-7 — Layer/Tile Decode
-- [ ] Layer-wise decode runtime
-- [ ] Tile-wise decode with fused matmul
-- [ ] Memory tracking and cache
-
-### Phase 8 — Real Model Support
-- [ ] Small real transformer model
-- [ ] Tokenizer support
-- [ ] Logit comparison with reference
-
 ## Development
 
 ```bash
+# Format
+cargo fmt --all
+
 # Build
 cargo build
 
-# Run tests
+# Test
 cargo test
 
-# Run with verbose logging
-cargo run -- --verbose doctor
+# CLI help
+cargo run -- --help
+cargo run -- pack --help
+```
 
-# Format code (when rustfmt is available)
-cargo fmt
+Before committing:
 
-# Lint
-cargo clippy
+```bash
+git diff --check
+cargo test
 ```
 
 ## Design Principles
@@ -181,9 +179,10 @@ cargo clippy
 1. **Lossless by default** — decoded weights must be bit-identical to originals
 2. **Honest metrics** — report actual compression ratios, never overclaim
 3. **From scratch** — no wrapping Ollama/llama.cpp
-4. **Incremental** — build phase by phase, verify each step
-5. **Test everything** — round-trip tests for every codec, checksums everywhere
+4. **Custom codecs** — compression codecs are in-house RTC codecs unless explicitly approved otherwise
+5. **Incremental** — build phase by phase, verify each step
+6. **Test everything** — round-trip tests for every codec, checksums everywhere
 
 ## License
 
-MIT
+CC0-1.0. See [LICENSE](LICENSE).
