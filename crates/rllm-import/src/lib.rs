@@ -4,5 +4,7 @@
 //! - Safetensors format
 
 mod safetensors;
+mod tokenizer;
 
 pub use safetensors::*;
+pub use tokenizer::*;

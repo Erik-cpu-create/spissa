@@ -23,6 +23,55 @@ pub fn run(file: &str) -> Result<()> {
     println!("Lossless: {}", metadata.lossless);
     println!("Created by: {}", metadata.created_by);
     println!("Codec: {}", metadata.codec);
+    if let Some(config) = &metadata.model_config {
+        println!("Model config:");
+        if let Some(architecture_type) = &config.architecture_type {
+            println!("  Architecture type: {}", architecture_type);
+        }
+        if let Some(layers) = config.num_hidden_layers {
+            println!("  Layers: {}", layers);
+        }
+        if let Some(hidden_size) = config.hidden_size {
+            println!("  Hidden size: {}", hidden_size);
+        }
+        if let Some(num_heads) = config.num_attention_heads {
+            println!("  Attention heads: {}", num_heads);
+        }
+        if let Some(intermediate_size) = config.intermediate_size {
+            println!("  Intermediate size: {}", intermediate_size);
+        }
+        if let Some(max_positions) = config.max_position_embeddings {
+            println!("  Max positions: {}", max_positions);
+        }
+        if let Some(rotary_pct) = config.rotary_pct {
+            println!("  Rotary pct: {}", rotary_pct);
+        }
+        if let Some(rotary_base) = config.rotary_emb_base {
+            println!("  Rotary base: {}", rotary_base);
+        }
+        if let Some(layer_norm_eps) = config.layer_norm_eps {
+            println!("  LayerNorm eps: {}", layer_norm_eps);
+        }
+        if let Some(vocab_size) = config.vocab_size {
+            println!("  Vocab size: {}", vocab_size);
+        }
+    }
+    if let Some(tokenizer) = &metadata.tokenizer {
+        println!("Tokenizer:");
+        if let Some(tokenizer_type) = &tokenizer.tokenizer_type {
+            println!("  Type: {}", tokenizer_type);
+        }
+        println!("  Vocab size: {}", tokenizer.id_to_token.len());
+        if let Some(unk_token_id) = tokenizer.unk_token_id {
+            println!("  UNK token id: {}", unk_token_id);
+        }
+        if let Some(bos_token_id) = tokenizer.bos_token_id {
+            println!("  BOS token id: {}", bos_token_id);
+        }
+        if let Some(eos_token_id) = tokenizer.eos_token_id {
+            println!("  EOS token id: {}", eos_token_id);
+        }
+    }
     println!();
 
     let tensors = reader.list_tensors();

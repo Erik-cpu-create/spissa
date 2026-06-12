@@ -1,15 +1,31 @@
 # Runtime-compressed Local LLM (RLLM)
 
-Brain-inspired compressed runtime for local LLMs.
+Brain-inspired compressed runtime for local LLMs, guided by RAMA: Rama Active Memory Architecture.
 
 RLLM is an experimental local LLM runtime built around **lossless compressed model storage**. It stores model tensors in a chunked compressed container (`.rllm`) and aims to run inference by decoding only the tensor blocks needed at runtime.
 
 > Run local LLMs from compressed weights without changing model weights.
 
+## Architecture Direction
+
+RLLM uses **RAMA**: **Rama Active Memory Architecture**.
+
+RAMA frames RLLM as a memory-first runtime:
+
+- compressed `.rllm` tensors are dormant long-term memory
+- chunk/layer/tile decode is selective recall
+- `MemoryBudget` is bounded working memory
+- KV-cache is short-term context memory
+- streaming inference is the active thought loop
+
+The future focused recall subsystem name is reserved as **ERIK**: **Episodic Recall Inference Kernel**.
+
+See [`docs/rllm-rama-architecture.md`](docs/rllm-rama-architecture.md) for the Phase 5D.5 architecture boundary, originality doctrine, and RAMA/ERIK naming contract. The previous ECHO/EMBER doc is retained only as a superseded compatibility pointer.
+
 ## What RLLM Does
 
 - Stores model tensors in a chunked compressed container format (`.rllm`)
-- Uses **RTC (Rama Tensor Codec)** — in-house lossless tensor compression codecs
+- Uses **RTC (RLLM Tensor Codec)** — in-house lossless tensor compression codecs
 - Verifies decoded weights are **bit-identical** to originals
 - Imports safetensors model files into `.rllm`
 - Reports honest compression metrics — no magic claims
@@ -21,29 +37,51 @@ RLLM is an experimental local LLM runtime built around **lossless compressed mod
 - ❌ Wrap Ollama, llama.cpp, or another existing runtime
 - ❌ Change model weights in any way
 - ❌ Use external generic compression libraries by default; RTC codecs are custom/in-house unless explicitly approved
+- ❌ Claim to simulate a biological brain, consciousness, or self-learning cognition
 
 ## Current Status
 
 Implemented:
 
-- Cargo workspace with four crates
+- Cargo workspace with five crates
 - `.rllm` v1 container reader/writer
 - Safetensors import
-- CLI commands: `pack`, `inspect`, `verify`, `doctor`
-- Stubbed future commands: `run`, `import`, `benchmark`
+- CLI commands: `pack`, `inspect`, `verify`, `run`, `doctor`
+- Stubbed future commands: `import`, `benchmark`
 - RTC codecs:
   - `rtc-raw-v1`
   - `rtc-rle-v1`
   - `rtc-huff-v1` (custom byte-level Huffman)
 - Per-chunk SHA-256 verification
 - Multi-tensor safetensors verification
+- Phase 5A runtime foundation:
+  - full-decode `.rllm` loader
+  - fp16/bf16/f32/int runtime conversion to f32
+  - basic tensor ops: embedding lookup, matmul, linear, layernorm, RMSNorm, GELU, softmax, attention, MLP, argmax/top-p sampling
+- Phase 5B low-memory runtime planning:
+  - metadata-only `.rllm` open path
+  - memory budget accounting
+  - layer-stream/tile-stream dry-run planner
+  - `rllm run --memory-budget --ctx --mode tile-stream`
+  - chunk-scoped streaming linear kernel (`decode chunk → f32 scratch → accumulate → release`)
+  - streaming MLP sub-block (`linear → GELU → linear`) with budgeted intermediate activation
+  - streaming attention/QKV sub-block (`QKV projection → split heads → attention → output projection`)
+  - streaming pre-norm transformer block skeleton (`LN → attention → residual → LN → MLP → residual`)
+  - tiny end-to-end next-token smoke path (`embedding → one block → final LN → lm_head → sample`)
+  - GPT-NeoX/Pythia-style rotary embeddings and KV-cache attention primitives
+  - RAMA architecture spec for memory-first, brain-inspired runtime direction
+  - first executable cached generation loop: tiny multi-step token-ID generation with explicit prefill/decode-step paths and ContextEcho KV-cache state
+  - multi-layer token-ID stack: per-layer ContextEcho KV caches, prefill/decode/generate over all configured streaming blocks, and logits checked against full-context recomputation
+  - GPT-NeoX/Pythia adapter that infers standard tensor names/shapes from `.rllm` metadata and decodes small norm/bias tensors into an owned prepared stack
+  - optional original `config.json` metadata persistence for GPT-NeoX/Pythia fields (`num_attention_heads`, rotary settings, layer norm eps, context length) plus runtime auto-prepare from that metadata
+  - optional tokenizer vocabulary/config metadata persistence from `tokenizer.json`, plus tokenizer-backed text smoke generation via `rllm run --prompt ...`
+  - Phase 6 RAMA layer-decode GPT-NeoX/Pythia path: keeps only names + final params resident, decodes per-layer norm/bias vectors just-in-time, budgets active layer params, and matches the prepared stack baseline
 
 Not yet implemented:
 
-- Real inference runtime
-- Layer/tile decode runtime
+- Production-grade tokenizer fidelity (full BPE/normalizer behavior)
 - Multi-tensor unpack back to safetensors layout
-- Tokenizer/model execution
+- Tile-decode / fused decode+matmul runtime execution
 
 ## Quick Start
 
@@ -67,6 +105,15 @@ cargo run -- inspect ./models/pythia-70m.rllm
 
 # Verify lossless round-trip against the original safetensors file
 cargo run -- verify ./models/pythia-70m/model.safetensors ./models/pythia-70m.rllm
+
+# Full-decode runtime smoke test (loads tensors into f32 runtime memory)
+cargo run -- run ./models/pythia-70m.rllm
+
+# Low-RAM tile-stream planning (metadata only; no full tensor decode)
+cargo run -- run ./models/pythia-70m.rllm \
+  --memory-budget 100mb \
+  --ctx 1024 \
+  --mode tile-stream
 ```
 
 `models/` is ignored because model files and `.rllm` outputs are large reproducible local artifacts.
@@ -79,6 +126,7 @@ rllm/
 │   ├── rllm-cli/        # CLI binary (`rllm`)
 │   ├── rllm-container/  # .rllm binary format parser/writer
 │   ├── rllm-import/     # Safetensors import
+│   ├── rllm-runtime/    # Full-decode runtime loader + tensor ops
 │   └── rtc-codec/       # In-house lossless tensor compression codecs
 ├── docs/
 │   ├── format-rllm-v1.md
@@ -94,6 +142,7 @@ rllm/
 | `rllm-cli` | Command-line interface (`rllm` binary) |
 | `rllm-container` | `.rllm` file format: header, metadata, tensor/chunk directories |
 | `rllm-import` | External format import, currently safetensors |
+| `rllm-runtime` | Full-decode loader, memory-budgeted lazy runtime planner, tensor ops |
 | `rtc-codec` | Lossless tensor codecs: raw, RLE, Huffman |
 
 ## File Format
@@ -146,7 +195,7 @@ The model files are not committed to this repository.
 | Mode | Description | Status |
 |------|-------------|--------|
 | `full-decode` | Decode all tensors to RAM | 🔜 Phase 5 |
-| `layer-decode` | Decode layer-by-layer, release after use | 🔜 Phase 6 |
+| `layer-decode` | Decode GPT-NeoX/Pythia layer params just-in-time, release after each layer | ✅ Phase 6 partial |
 | `tile-decode` | Decode tiles during matmul | 🔜 Phase 7 |
 | `fused-decode-matmul` | Decode + multiply in one step | 🔜 Future |
 

@@ -90,6 +90,58 @@ pub struct ChunkMeta {
     pub chunk_sha256_compressed: [u8; 32],
 }
 
+/// Architecture/config fields imported from an original model `config.json`.
+///
+/// This stays optional so older `.rllm` files continue to deserialize. Runtime
+/// adapters should still validate tensor shapes because config metadata is a
+/// hint/contract, not a replacement for container truth.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ModelConfigMetadata {
+    /// Normalized architecture/model type, e.g. `gpt_neox`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_hidden_layers: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intermediate_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_attention_heads: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_position_embeddings: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotary_pct: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotary_emb_base: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_norm_eps: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocab_size: Option<u64>,
+}
+
+/// Minimal tokenizer vocabulary/config metadata persisted in `.rllm` global metadata.
+///
+/// This intentionally stores a runtime-ready `id_to_token` table instead of a
+/// full HuggingFace tokenizer graph. Phase 5E uses it for a narrow text smoke
+/// boundary over token-ID generation; richer BPE/normalizer fidelity can remain a
+/// later tokenizer crate concern.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TokenizerMetadata {
+    /// Normalized tokenizer source/type, e.g. `hf-bpe` or `hf-wordlevel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_type: Option<String>,
+    /// Token strings indexed by token ID.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub id_to_token: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unk_token_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bos_token_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eos_token_id: Option<u64>,
+}
+
 /// Global metadata for the model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalMetadata {
@@ -109,6 +161,12 @@ pub struct GlobalMetadata {
     pub created_by: String,
     /// Codec used for compression
     pub codec: String,
+    /// Optional original architecture config fields needed by runtime adapters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_config: Option<ModelConfigMetadata>,
+    /// Optional tokenizer vocabulary/config fields needed by text-boundary runtime adapters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer: Option<TokenizerMetadata>,
 }
 
 impl GlobalMetadata {
@@ -123,6 +181,8 @@ impl GlobalMetadata {
             tokenizer_type: "none".to_string(),
             created_by: "rllm-pack".to_string(),
             codec: "rtc-raw-v1".to_string(),
+            model_config: None,
+            tokenizer: None,
         }
     }
 }
@@ -172,5 +232,80 @@ mod tests {
 
         assert_eq!(decoded.model_name, "test-model");
         assert!(decoded.lossless);
+    }
+
+    #[test]
+    fn test_global_metadata_preserves_optional_model_config_and_reads_legacy_json() {
+        let legacy_json = r#"{
+            "model_name": "legacy",
+            "architecture": "gpt_neox",
+            "source_format": "safetensors",
+            "lossless": true,
+            "default_context_length": 2048,
+            "tokenizer_type": "none",
+            "created_by": "rllm-cli",
+            "codec": "auto"
+        }"#;
+        let legacy: GlobalMetadata = serde_json::from_str(legacy_json).unwrap();
+        assert!(legacy.model_config.is_none());
+
+        let mut meta = GlobalMetadata::new_test();
+        meta.model_config = Some(ModelConfigMetadata {
+            architecture_type: Some("gpt_neox".to_string()),
+            num_hidden_layers: Some(2),
+            hidden_size: Some(128),
+            intermediate_size: Some(512),
+            num_attention_heads: Some(4),
+            max_position_embeddings: Some(4096),
+            rotary_pct: Some(0.25),
+            rotary_emb_base: Some(10_000.0),
+            layer_norm_eps: Some(1e-5),
+            vocab_size: Some(50_432),
+        });
+
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("model_config"));
+        let decoded: GlobalMetadata = serde_json::from_str(&json).unwrap();
+        let decoded_config = decoded.model_config.unwrap();
+        assert_eq!(
+            decoded_config.architecture_type.as_deref(),
+            Some("gpt_neox")
+        );
+        assert_eq!(decoded_config.num_attention_heads, Some(4));
+        assert_eq!(decoded_config.rotary_pct, Some(0.25));
+    }
+
+    #[test]
+    fn test_global_metadata_preserves_optional_tokenizer_metadata_and_reads_legacy_json() {
+        let legacy_json = r#"{
+            "model_name": "legacy",
+            "architecture": "gpt_neox",
+            "source_format": "safetensors",
+            "lossless": true,
+            "default_context_length": 2048,
+            "tokenizer_type": "none",
+            "created_by": "rllm-cli",
+            "codec": "auto"
+        }"#;
+        let legacy: GlobalMetadata = serde_json::from_str(legacy_json).unwrap();
+        assert!(legacy.tokenizer.is_none());
+
+        let mut meta = GlobalMetadata::new_test();
+        meta.tokenizer_type = "hf-wordlevel".to_string();
+        meta.tokenizer = Some(TokenizerMetadata {
+            tokenizer_type: Some("hf-wordlevel".to_string()),
+            id_to_token: vec!["A".to_string(), " B".to_string(), "<unk>".to_string()],
+            unk_token_id: Some(2),
+            bos_token_id: None,
+            eos_token_id: None,
+        });
+
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("tokenizer"));
+        let decoded: GlobalMetadata = serde_json::from_str(&json).unwrap();
+        let tokenizer = decoded.tokenizer.unwrap();
+        assert_eq!(tokenizer.tokenizer_type.as_deref(), Some("hf-wordlevel"));
+        assert_eq!(tokenizer.id_to_token[1], " B");
+        assert_eq!(tokenizer.unk_token_id, Some(2));
     }
 }

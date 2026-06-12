@@ -1,4 +1,4 @@
-# RTC — Rama Tensor Codec
+# RTC — RLLM Tensor Codec
 
 ## Overview
 

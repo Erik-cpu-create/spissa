@@ -35,6 +35,18 @@ enum Commands {
         /// Chunk size (e.g., "1mb", "256kb", "4mb")
         #[arg(long, default_value = "1mb")]
         chunk_size: String,
+
+        /// Optional HuggingFace config.json path. Defaults to sibling config.json when present.
+        #[arg(long)]
+        config: Option<String>,
+
+        /// Optional HuggingFace tokenizer.json path. Defaults to sibling tokenizer.json when present.
+        #[arg(long)]
+        tokenizer: Option<String>,
+
+        /// Do not auto-embed sibling tokenizer.json metadata.
+        #[arg(long)]
+        no_tokenizer: bool,
     },
 
     /// Inspect a .rllm file
@@ -62,10 +74,34 @@ enum Commands {
         out: String,
     },
 
-    /// Run inference from a .rllm file (not yet implemented)
+    /// Run inference or low-memory runtime planning from a .rllm file
     Run {
         /// Path to .rllm file
         file: String,
+
+        /// Runtime mode: full-decode, layer-stream, tile-stream
+        #[arg(long, default_value = "full-decode")]
+        mode: String,
+
+        /// Context length used for runtime memory planning
+        #[arg(long, default_value_t = 1024)]
+        ctx: usize,
+
+        /// Memory budget for low-RAM modes (e.g., "100mb", "512mb")
+        #[arg(long)]
+        memory_budget: Option<String>,
+
+        /// Only plan/check memory usage; do not execute token generation
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Prompt text for Phase 5E tokenizer-backed RAMA generation
+        #[arg(long)]
+        prompt: Option<String>,
+
+        /// Number of new tokens to generate when --prompt is provided
+        #[arg(long, default_value_t = 8)]
+        max_new_tokens: usize,
     },
 
     /// Import a model from external format (not yet implemented)
@@ -99,14 +135,40 @@ fn main() -> Result<()> {
             input,
             out,
             chunk_size,
-        } => commands::pack::run(&input, &out, &chunk_size),
+            config,
+            tokenizer,
+            no_tokenizer,
+        } => commands::pack::run(
+            &input,
+            &out,
+            &chunk_size,
+            config.as_deref(),
+            tokenizer.as_deref(),
+            no_tokenizer,
+        ),
         Commands::Inspect { file } => commands::inspect::run(&file),
         Commands::Verify {
             original,
             compressed,
         } => commands::verify::run(&original, &compressed),
         Commands::Unpack { file, out } => commands::unpack::run(&file, &out),
-        Commands::Run { file } => commands::run::run(&file),
+        Commands::Run {
+            file,
+            mode,
+            ctx,
+            memory_budget,
+            dry_run,
+            prompt,
+            max_new_tokens,
+        } => commands::run::run(
+            &file,
+            &mode,
+            ctx,
+            memory_budget.as_deref(),
+            dry_run,
+            prompt.as_deref(),
+            max_new_tokens,
+        ),
         Commands::Import { input } => commands::import::run(&input),
         Commands::Benchmark { file } => commands::benchmark::run(&file),
         Commands::Doctor => commands::doctor::run(),

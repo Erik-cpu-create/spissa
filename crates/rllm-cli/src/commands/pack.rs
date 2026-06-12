@@ -1,11 +1,18 @@
 use crate::commands::common::parse_size;
 use anyhow::{Context, Result};
 use rllm_container::{GlobalMetadata, RllmWriter};
-use rllm_import::SafetensorsReader;
+use rllm_import::{read_model_config_metadata, read_tokenizer_metadata, SafetensorsReader};
 use rtc_codec::{EncodeMeta, HuffmanCodec, RawCodec, RleCodec, TensorCodec};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub fn run(input: &str, output: &str, chunk_size: &str) -> Result<()> {
+pub fn run(
+    input: &str,
+    output: &str,
+    chunk_size: &str,
+    config: Option<&str>,
+    tokenizer: Option<&str>,
+    no_tokenizer: bool,
+) -> Result<()> {
     let chunk_size_bytes = parse_size(chunk_size)?;
     let input_path = Path::new(input);
 
@@ -33,15 +40,46 @@ pub fn run(input: &str, output: &str, chunk_size: &str) -> Result<()> {
         .unwrap_or("unknown")
         .to_string();
 
+    let config_path = resolve_model_config_path(input_path, config);
+    let model_config = match config_path {
+        Some(path) => Some(
+            read_model_config_metadata(&path)
+                .with_context(|| format!("Failed to read model config: {}", path.display()))?,
+        ),
+        None => None,
+    };
+    let architecture = model_config
+        .as_ref()
+        .and_then(|config| config.architecture_type.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let default_context_length = model_config
+        .as_ref()
+        .and_then(|config| config.max_position_embeddings)
+        .unwrap_or(0);
+    let tokenizer_path = resolve_tokenizer_path(input_path, tokenizer, no_tokenizer);
+    let tokenizer = match tokenizer_path {
+        Some(path) => Some(
+            read_tokenizer_metadata(&path)
+                .with_context(|| format!("Failed to read tokenizer: {}", path.display()))?,
+        ),
+        None => None,
+    };
+    let tokenizer_type = tokenizer
+        .as_ref()
+        .and_then(|tokenizer| tokenizer.tokenizer_type.clone())
+        .unwrap_or_else(|| "none".to_string());
+
     let metadata = GlobalMetadata {
         model_name: model_name.clone(),
-        architecture: "unknown".to_string(),
+        architecture,
         source_format: "safetensors".to_string(),
         lossless: true,
-        default_context_length: 0,
-        tokenizer_type: "none".to_string(),
+        default_context_length,
+        tokenizer_type,
         created_by: "rllm-cli".to_string(),
         codec: "auto".to_string(),
+        model_config,
+        tokenizer,
     };
 
     let mut writer = RllmWriter::new(output, metadata)?;
@@ -132,4 +170,27 @@ pub fn run(input: &str, output: &str, chunk_size: &str) -> Result<()> {
     println!("Written to: {}", output);
 
     Ok(())
+}
+
+fn resolve_model_config_path(input_path: &Path, explicit_config: Option<&str>) -> Option<PathBuf> {
+    if let Some(config) = explicit_config {
+        return Some(PathBuf::from(config));
+    }
+    let sibling = input_path.parent()?.join("config.json");
+    sibling.exists().then_some(sibling)
+}
+
+fn resolve_tokenizer_path(
+    input_path: &Path,
+    explicit_tokenizer: Option<&str>,
+    no_tokenizer: bool,
+) -> Option<PathBuf> {
+    if no_tokenizer {
+        return None;
+    }
+    if let Some(tokenizer) = explicit_tokenizer {
+        return Some(PathBuf::from(tokenizer));
+    }
+    let sibling = input_path.parent()?.join("tokenizer.json");
+    sibling.exists().then_some(sibling)
 }
