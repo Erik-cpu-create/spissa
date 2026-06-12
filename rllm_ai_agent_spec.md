@@ -19,7 +19,9 @@ Nama sementara:
 
 ```text
 RLLM = Runtime-compressed Local LLM
-RTC  = Rama Tensor Codec
+RTC  = RLLM Tensor Codec
+RAMA = Rama Active Memory Architecture
+ERIK = Episodic Recall Inference Kernel (reserved future subsystem)
 ```
 
 Core positioning:
@@ -365,7 +367,7 @@ MVP bisa mulai dari:
 
 ---
 
-## 5. RTC: Rama Tensor Codec
+## 5. RTC: RLLM Tensor Codec
 
 ### 5.1 Tujuan RTC
 

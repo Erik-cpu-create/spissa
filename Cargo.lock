@@ -328,6 +328,7 @@ dependencies = [
  "log",
  "rllm-container",
  "rllm-import",
+ "rllm-runtime",
  "rtc-codec",
  "sha2",
 ]
@@ -351,6 +352,17 @@ dependencies = [
  "rllm-container",
  "serde",
  "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "rllm-runtime"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "rllm-container",
+ "rtc-codec",
  "sha2",
  "thiserror",
 ]

@@ -5,6 +5,7 @@ members = [
     "crates/rllm-container",
     "crates/rtc-codec",
     "crates/rllm-import",
+    "crates/rllm-runtime",
 ]
 
 [workspace.package]

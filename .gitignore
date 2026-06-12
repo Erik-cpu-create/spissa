@@ -14,6 +14,9 @@ models/
 .env.*
 !.env.example
 
+# Local Hermes GUI/session artifacts
+.hermes/
+
 # OS
 .DS_Store
 Thumbs.db

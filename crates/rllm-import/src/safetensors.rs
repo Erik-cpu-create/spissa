@@ -6,11 +6,11 @@
 //! - N bytes: JSON header (metadata about tensors)
 //! - Rest: raw tensor data
 
-use rllm_container::{DType, TensorMeta};
+use rllm_container::{DType, ModelConfigMetadata, TensorMeta};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use thiserror::Error;
@@ -31,9 +31,67 @@ pub enum SafetensorsError {
 
     #[error("Unsupported dtype: {0}")]
     UnsupportedDtype(String),
+
+    #[error("Invalid tokenizer metadata: {0}")]
+    InvalidTokenizer(String),
 }
 
 pub type Result<T> = std::result::Result<T, SafetensorsError>;
+
+#[derive(Debug, Clone, Deserialize)]
+struct HuggingFaceModelConfig {
+    architectures: Option<Vec<String>>,
+    model_type: Option<String>,
+    #[serde(alias = "n_layer")]
+    num_hidden_layers: Option<u64>,
+    #[serde(alias = "n_embd")]
+    hidden_size: Option<u64>,
+    intermediate_size: Option<u64>,
+    #[serde(alias = "n_head")]
+    num_attention_heads: Option<u64>,
+    #[serde(alias = "n_positions")]
+    max_position_embeddings: Option<u64>,
+    rotary_pct: Option<f32>,
+    rotary_emb_base: Option<f32>,
+    layer_norm_eps: Option<f32>,
+    vocab_size: Option<u64>,
+}
+
+pub fn read_model_config_metadata(path: impl AsRef<Path>) -> Result<ModelConfigMetadata> {
+    let json = fs::read_to_string(path)?;
+    model_config_metadata_from_json_str(&json)
+}
+
+pub fn model_config_metadata_from_json_str(json: &str) -> Result<ModelConfigMetadata> {
+    let config: HuggingFaceModelConfig = serde_json::from_str(json)?;
+    let architecture_type = config
+        .model_type
+        .as_deref()
+        .or_else(|| config.architectures.as_ref()?.first().map(String::as_str))
+        .map(normalize_architecture_type);
+
+    Ok(ModelConfigMetadata {
+        architecture_type,
+        num_hidden_layers: config.num_hidden_layers,
+        hidden_size: config.hidden_size,
+        intermediate_size: config.intermediate_size,
+        num_attention_heads: config.num_attention_heads,
+        max_position_embeddings: config.max_position_embeddings,
+        rotary_pct: config.rotary_pct,
+        rotary_emb_base: config.rotary_emb_base,
+        layer_norm_eps: config.layer_norm_eps,
+        vocab_size: config.vocab_size,
+    })
+}
+
+fn normalize_architecture_type(value: &str) -> String {
+    let normalized = value.to_ascii_lowercase().replace('-', "_");
+    if normalized == "gpt_neox" || normalized.contains("gptneox") {
+        "gpt_neox".to_string()
+    } else {
+        normalized
+    }
+}
 
 /// Metadata for a single tensor in safetensors format
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +236,7 @@ impl SafetensorsReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokenizer_metadata_from_json_str;
 
     #[test]
     fn test_dtype_conversion() {
@@ -194,5 +253,64 @@ mod tests {
             DType::Fp32
         );
         assert!(SafetensorsReader::convert_dtype("INVALID").is_err());
+    }
+
+    #[test]
+    fn parses_gpt_neox_config_json_into_model_config_metadata() {
+        let json = r#"{
+            "architectures": ["GPTNeoXForCausalLM"],
+            "model_type": "gpt_neox",
+            "num_hidden_layers": 2,
+            "hidden_size": 128,
+            "intermediate_size": 512,
+            "num_attention_heads": 4,
+            "max_position_embeddings": 4096,
+            "rotary_pct": 0.25,
+            "rotary_emb_base": 10000,
+            "layer_norm_eps": 0.00001,
+            "vocab_size": 50432
+        }"#;
+
+        let config = model_config_metadata_from_json_str(json).unwrap();
+
+        assert_eq!(config.architecture_type.as_deref(), Some("gpt_neox"));
+        assert_eq!(config.num_hidden_layers, Some(2));
+        assert_eq!(config.hidden_size, Some(128));
+        assert_eq!(config.intermediate_size, Some(512));
+        assert_eq!(config.num_attention_heads, Some(4));
+        assert_eq!(config.max_position_embeddings, Some(4096));
+        assert_eq!(config.rotary_pct, Some(0.25));
+        assert_eq!(config.rotary_emb_base, Some(10_000.0));
+        assert_eq!(config.layer_norm_eps, Some(1e-5));
+        assert_eq!(config.vocab_size, Some(50_432));
+    }
+
+    #[test]
+    fn parses_huggingface_tokenizer_json_into_tokenizer_metadata() {
+        let json = r#"{
+            "model": {
+                "type": "WordLevel",
+                "unk_token": "<unk>",
+                "vocab": {
+                    "Hello": 0,
+                    " world": 1,
+                    "<unk>": 2
+                }
+            },
+            "added_tokens": [
+                {"id": 3, "content": "<|endoftext|>", "special": true}
+            ],
+            "eos_token": "<|endoftext|>"
+        }"#;
+
+        let tokenizer = tokenizer_metadata_from_json_str(json).unwrap();
+
+        assert_eq!(tokenizer.tokenizer_type.as_deref(), Some("hf-wordlevel"));
+        assert_eq!(
+            tokenizer.id_to_token,
+            ["Hello", " world", "<unk>", "<|endoftext|>"]
+        );
+        assert_eq!(tokenizer.unk_token_id, Some(2));
+        assert_eq!(tokenizer.eos_token_id, Some(3));
     }
 }

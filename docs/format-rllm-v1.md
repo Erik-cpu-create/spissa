@@ -53,9 +53,19 @@ JSON-encoded, located at `metadata_offset`.
   "default_context_length": 2048,
   "tokenizer_type": "sentencepiece",
   "created_by": "rllm-pack",
-  "codec": "rtc-lossless-v1"
+  "codec": "rtc-lossless-v1",
+  "tokenizer": {
+    "tokenizer_type": "hf-bpe",
+    "id_to_token": ["<|endoftext|>", "Hello", "Ġworld"],
+    "eos_token_id": 0
+  }
 }
 ```
+
+`tokenizer` is optional and additive. Existing `.rllm` files without tokenizer
+metadata remain valid. Phase 5E stores a runtime-ready `id_to_token` table for a
+narrow text-generation smoke path; full production BPE/normalizer fidelity is a
+future tokenizer-runtime concern.
 
 ## Tensor Directory
 
