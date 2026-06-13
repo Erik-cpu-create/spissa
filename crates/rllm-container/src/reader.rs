@@ -102,6 +102,55 @@ impl RllmReader {
         Ok(data)
     }
 
+    /// Read a byte range from a chunk's compressed payload.
+    ///
+    /// Offsets are relative to the start of the compressed chunk. This primitive
+    /// is a Phase 7.8 building block for future tile/block-indexed codecs. Runtime
+    /// paths that require full-chunk SHA-256 verification should continue reading
+    /// the full chunk until per-range integrity metadata exists.
+    pub fn read_chunk_range(
+        &mut self,
+        chunk_id: u64,
+        byte_offset: u64,
+        byte_len: u64,
+    ) -> Result<Vec<u8>> {
+        let chunk = self
+            .chunks
+            .iter()
+            .find(|c| c.chunk_id == chunk_id)
+            .ok_or(ContainerError::ChunkNotFound(chunk_id))?;
+        let end =
+            byte_offset
+                .checked_add(byte_len)
+                .ok_or_else(|| ContainerError::InvalidRange {
+                    context: format!("chunk {chunk_id}"),
+                    offset: byte_offset,
+                    len: byte_len,
+                    size: chunk.compressed_size,
+                })?;
+        if end > chunk.compressed_size {
+            return Err(ContainerError::InvalidRange {
+                context: format!("chunk {chunk_id}"),
+                offset: byte_offset,
+                len: byte_len,
+                size: chunk.compressed_size,
+            });
+        }
+
+        self.file
+            .seek(SeekFrom::Start(chunk.file_offset + byte_offset))?;
+        let len = usize::try_from(byte_len).map_err(|_| ContainerError::InvalidRange {
+            context: format!("chunk {chunk_id}"),
+            offset: byte_offset,
+            len: byte_len,
+            size: chunk.compressed_size,
+        })?;
+        let mut data = vec![0u8; len];
+        self.file.read_exact(&mut data)?;
+
+        Ok(data)
+    }
+
     /// Get all chunks for a tensor
     pub fn get_tensor_chunks(&self, tensor_id: u64) -> Vec<&ChunkMeta> {
         self.chunks
@@ -193,6 +242,43 @@ mod tests {
         let mut reader = RllmReader::open(&temp).unwrap();
         let chunk_data = reader.read_chunk(0).unwrap();
         assert_eq!(chunk_data, vec![1, 2, 3, 4]);
+
+        std::fs::remove_file(&temp).ok();
+    }
+
+    #[test]
+    fn test_reader_chunk_range_data() {
+        let temp = std::env::temp_dir().join("test_chunk_range_data.rllm");
+
+        let metadata = GlobalMetadata::new_test();
+        let mut writer = RllmWriter::new(&temp, metadata).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "test".to_string(),
+            shape: vec![8],
+            dtype: DType::U8,
+            original_size_bytes: 8,
+            compressed_size_bytes: 8,
+            original_sha256: [0u8; 32],
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+
+        let data = vec![10, 11, 12, 13, 14, 15, 16, 17];
+        writer
+            .write_chunk(0, "rtc-raw-v1", &data, &data, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut reader = RllmReader::open(&temp).unwrap();
+        assert_eq!(
+            reader.read_chunk_range(0, 2, 4).unwrap(),
+            vec![12, 13, 14, 15]
+        );
+        assert!(matches!(
+            reader.read_chunk_range(0, 6, 3),
+            Err(ContainerError::InvalidRange { .. })
+        ));
 
         std::fs::remove_file(&temp).ok();
     }

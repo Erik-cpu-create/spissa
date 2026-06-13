@@ -9,6 +9,7 @@ description = "Runtime tensor loading and toy inference primitives for RLLM"
 rllm-container = { path = "../rllm-container" }
 rtc-codec = { path = "../rtc-codec" }
 
+serde = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }

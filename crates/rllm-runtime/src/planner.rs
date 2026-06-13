@@ -4,6 +4,8 @@ use rllm_container::{ChunkMeta, TensorMeta};
 use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 
+const DEFAULT_TILE_STREAM_ELEMENTS: usize = 4096;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMode {
     FullDecode,
@@ -218,14 +220,14 @@ fn tile_stream_step(model: &LazyRllmModel, runtime_state_bytes: usize) -> Result
         let Some(tensor) = tensors_by_id.get(&chunk.tensor_id) else {
             continue;
         };
-        let scratch_bytes = runtime_f32_bytes_for_chunk(chunk, tensor)?;
+        let scratch_bytes = runtime_f32_tile_scratch_bytes_for_chunk(chunk, tensor)?;
         let step_bytes = runtime_state_bytes
             .saturating_add(chunk.compressed_size as usize)
             .saturating_add(chunk.uncompressed_size as usize)
             .saturating_add(scratch_bytes);
         if step_bytes > largest.bytes {
             largest = PlanStep {
-                label: "tile-stream decode+compute+release chunk".to_string(),
+                label: "tile-stream fused tile decode+matmul chunk".to_string(),
                 tensor_name: Some(tensor.name.clone()),
                 chunk_id: Some(chunk.chunk_id),
                 bytes: step_bytes,
@@ -236,6 +238,7 @@ fn tile_stream_step(model: &LazyRllmModel, runtime_state_bytes: usize) -> Result
     Ok(largest)
 }
 
+#[cfg(test)]
 fn runtime_f32_bytes_for_chunk(chunk: &ChunkMeta, tensor: &TensorMeta) -> Result<usize> {
     let dtype_size = tensor.dtype.size_bytes() as u64;
     if dtype_size == 0 || chunk.uncompressed_size % dtype_size != 0 {
@@ -251,6 +254,34 @@ fn runtime_f32_bytes_for_chunk(chunk: &ChunkMeta, tensor: &TensorMeta) -> Result
         .ok_or_else(|| {
             RuntimeError::InvalidTensorData(format!(
                 "chunk {} runtime f32 scratch size overflows usize",
+                chunk.chunk_id
+            ))
+        })
+}
+
+fn runtime_f32_tile_scratch_bytes_for_chunk(
+    chunk: &ChunkMeta,
+    tensor: &TensorMeta,
+) -> Result<usize> {
+    let dtype_size = tensor.dtype.size_bytes() as u64;
+    if dtype_size == 0 || chunk.uncompressed_size % dtype_size != 0 {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "chunk {} for tensor {} has uncompressed_size={} not divisible by dtype size {}",
+            chunk.chunk_id, tensor.name, chunk.uncompressed_size, dtype_size
+        )));
+    }
+    let elements = usize::try_from(chunk.uncompressed_size / dtype_size).map_err(|_| {
+        RuntimeError::InvalidTensorData(format!(
+            "chunk {} element count overflows usize",
+            chunk.chunk_id
+        ))
+    })?;
+    elements
+        .min(DEFAULT_TILE_STREAM_ELEMENTS)
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} tile f32 scratch size overflows usize",
                 chunk.chunk_id
             ))
         })
@@ -426,9 +457,49 @@ mod tests {
         assert_eq!(plan.shape_hints.hidden_size, Some(4));
         assert_eq!(plan.shape_hints.num_layers, 1);
         assert_eq!(plan.largest_step.chunk_id, Some(1));
+        assert_eq!(
+            plan.largest_step.label,
+            "tile-stream fused tile decode+matmul chunk"
+        );
         assert!(plan.planned_peak_bytes >= plan.activation_window_bytes);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn tile_stream_plan_caps_f32_scratch_to_tile_window() {
+        let tensor = TensorMeta {
+            tensor_id: 9,
+            name: "large.weight".to_string(),
+            shape: vec![(DEFAULT_TILE_STREAM_ELEMENTS * 2) as u64],
+            dtype: DType::Fp16,
+            original_size_bytes: (DEFAULT_TILE_STREAM_ELEMENTS * 2 * 2) as u64,
+            compressed_size_bytes: 1,
+            original_sha256: [0u8; 32],
+            chunk_count: 1,
+            chunk_start_index: 0,
+        };
+        let chunk = ChunkMeta {
+            chunk_id: 11,
+            tensor_id: 9,
+            chunk_offset_in_tensor: 0,
+            uncompressed_size: tensor.original_size_bytes,
+            compressed_size: 1,
+            file_offset: 0,
+            codec_id: "rtc-raw-v1".to_string(),
+            chunk_sha256_original: [0u8; 32],
+            chunk_sha256_compressed: [0u8; 32],
+            range_checksums: Vec::new(),
+        };
+
+        assert_eq!(
+            runtime_f32_bytes_for_chunk(&chunk, &tensor).unwrap(),
+            DEFAULT_TILE_STREAM_ELEMENTS * 2 * std::mem::size_of::<f32>()
+        );
+        assert_eq!(
+            runtime_f32_tile_scratch_bytes_for_chunk(&chunk, &tensor).unwrap(),
+            DEFAULT_TILE_STREAM_ELEMENTS * std::mem::size_of::<f32>()
+        );
     }
 
     #[test]

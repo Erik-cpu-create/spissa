@@ -52,6 +52,9 @@ pub fn run(file: &str) -> Result<()> {
         if let Some(layer_norm_eps) = config.layer_norm_eps {
             println!("  LayerNorm eps: {}", layer_norm_eps);
         }
+        if let Some(use_parallel_residual) = config.use_parallel_residual {
+            println!("  Parallel residual: {}", use_parallel_residual);
+        }
         if let Some(vocab_size) = config.vocab_size {
             println!("  Vocab size: {}", vocab_size);
         }
@@ -88,6 +91,15 @@ pub fn run(file: &str) -> Result<()> {
         println!("    Original: {} bytes", tensor.original_size_bytes);
         println!("    Compressed: {} bytes", tensor.compressed_size_bytes);
         println!("    Chunks: {}", tensor.chunk_count);
+        let range_checksum_count: usize = reader
+            .list_chunks()
+            .iter()
+            .filter(|chunk| chunk.tensor_id == tensor.tensor_id)
+            .map(|chunk| chunk.range_checksums.len())
+            .sum();
+        if range_checksum_count > 0 {
+            println!("    Range checksums: {}", range_checksum_count);
+        }
 
         total_original += tensor.original_size_bytes;
         total_compressed += tensor.compressed_size_bytes;

@@ -29,6 +29,14 @@ pub enum ContainerError {
     #[error("Chunk not found: {0}")]
     ChunkNotFound(u64),
 
+    #[error("Invalid byte range for {context}: offset={offset}, len={len}, size={size}")]
+    InvalidRange {
+        context: String,
+        offset: u64,
+        len: u64,
+        size: u64,
+    },
+
     #[error("Truncated file: expected {expected} bytes, got {actual}")]
     TruncatedFile { expected: u64, actual: u64 },
 }

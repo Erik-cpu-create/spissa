@@ -200,47 +200,47 @@ pub fn scaled_dot_product_attention_with_cache(
     for query_pos in 0..config.query_len {
         let query_abs_pos = past_len + query_pos;
         for head in 0..config.num_heads {
+            let query_start = (query_pos * config.num_heads + head) * config.head_dim;
+            let query_row = &q[query_start..query_start + config.head_dim];
             for key_pos in 0..key_len {
                 if config.causal && key_pos > query_abs_pos {
                     scores[key_pos] = f32::NEG_INFINITY;
                     continue;
                 }
+                let key_row = kv_row(
+                    cache,
+                    current_k,
+                    past_len,
+                    key_pos,
+                    head,
+                    config,
+                    KvTensorKind::Key,
+                );
                 let mut dot = 0.0f32;
                 for dim in 0..config.head_dim {
-                    let q_idx = ((query_pos * config.num_heads + head) * config.head_dim) + dim;
-                    dot += q[q_idx]
-                        * kv_value(
-                            cache,
-                            current_k,
-                            past_len,
-                            key_pos,
-                            head,
-                            dim,
-                            config,
-                            KvTensorKind::Key,
-                        );
+                    dot += query_row[dim] * key_row[dim];
                 }
                 scores[key_pos] = dot * scale;
             }
 
             let probs = softmax_rows(&scores, 1, key_len)?;
-            for dim in 0..config.head_dim {
-                let out_idx = ((query_pos * config.num_heads + head) * config.head_dim) + dim;
-                let mut value = 0.0f32;
-                for key_pos in 0..key_len {
-                    value += probs[key_pos]
-                        * kv_value(
-                            cache,
-                            current_v,
-                            past_len,
-                            key_pos,
-                            head,
-                            dim,
-                            config,
-                            KvTensorKind::Value,
-                        );
+            let out_start = (query_pos * config.num_heads + head) * config.head_dim;
+            let out_row = &mut out[out_start..out_start + config.head_dim];
+            out_row.fill(0.0);
+            for key_pos in 0..key_len {
+                let value_row = kv_row(
+                    cache,
+                    current_v,
+                    past_len,
+                    key_pos,
+                    head,
+                    config,
+                    KvTensorKind::Value,
+                );
+                let prob = probs[key_pos];
+                for dim in 0..config.head_dim {
+                    out_row[dim] += prob * value_row[dim];
                 }
-                out[out_idx] = value;
             }
         }
     }
@@ -359,27 +359,26 @@ enum KvTensorKind {
     Value,
 }
 
-fn kv_value(
-    cache: Option<&KvCache>,
-    current: &[f32],
+fn kv_row<'a>(
+    cache: Option<&'a KvCache>,
+    current: &'a [f32],
     past_len: usize,
     key_pos: usize,
     head: usize,
-    dim: usize,
     config: KvAttentionConfig,
     kind: KvTensorKind,
-) -> f32 {
+) -> &'a [f32] {
     if key_pos < past_len {
         let cache = cache.expect("past_len is non-zero only when cache is present");
-        let idx = ((key_pos * config.num_heads + head) * config.head_dim) + dim;
+        let start = (key_pos * config.num_heads + head) * config.head_dim;
         match kind {
-            KvTensorKind::Key => cache.keys[idx],
-            KvTensorKind::Value => cache.values[idx],
+            KvTensorKind::Key => &cache.keys[start..start + config.head_dim],
+            KvTensorKind::Value => &cache.values[start..start + config.head_dim],
         }
     } else {
         let current_pos = key_pos - past_len;
-        let idx = ((current_pos * config.num_heads + head) * config.head_dim) + dim;
-        current[idx]
+        let start = (current_pos * config.num_heads + head) * config.head_dim;
+        &current[start..start + config.head_dim]
     }
 }
 

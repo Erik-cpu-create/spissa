@@ -1,12 +1,13 @@
 use crate::{
     layer_norm, sample_argmax, sample_top_p, streaming_embedding_lookup_from_model,
-    streaming_linear_from_model, streaming_transformer_block_with_runtime_from_model,
+    streaming_tile_linear_from_model, streaming_transformer_block_with_runtime_from_model,
     ContextEchoState, LazyRllmModel, MemoryBudget, Result, RotaryEmbeddingConfig, RuntimeError,
     StreamingAttentionRuntime, StreamingBlockConfig, StreamingBlockParameters,
     StreamingBlockRuntime, StreamingBlockTensorNames, StreamingEmbeddingConfig,
     StreamingLinearConfig, StreamingNextTokenResult, StreamingSamplingConfig,
-    StreamingTinyRotaryConfig,
+    StreamingTileLinearConfig, StreamingTinyRotaryConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
+use serde::Serialize;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingEchoTransformerConfig {
@@ -19,6 +20,7 @@ pub struct StreamingEchoTransformerConfig {
     pub intermediate_size: usize,
     pub causal: bool,
     pub layer_norm_eps: f32,
+    pub use_parallel_residual: bool,
     pub sampling: StreamingSamplingConfig,
     pub rotary: Option<StreamingTinyRotaryConfig>,
 }
@@ -86,6 +88,128 @@ pub struct StreamingEchoGenerationResult {
     pub step_logits: Vec<Vec<f32>>,
     pub context_echo_state: ContextEchoState,
     pub context_echo_bytes: usize,
+    pub timing: Option<RamaGenerationTiming>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct RamaGenerationTiming {
+    pub prefill_ns: u64,
+    pub decode_ns: u64,
+    pub final_norm_ns: u64,
+    pub lm_head_ns: u64,
+    pub sampling_ns: u64,
+    pub prefill_embedding_ns: u64,
+    pub prefill_layer_params_ns: u64,
+    pub prefill_attention_norm_ns: u64,
+    pub prefill_attention_ns: u64,
+    pub prefill_attention_qkv_projection_ns: u64,
+    pub prefill_attention_qkv_split_ns: u64,
+    pub prefill_attention_rotary_ns: u64,
+    pub prefill_attention_score_context_ns: u64,
+    pub prefill_attention_output_projection_ns: u64,
+    pub prefill_attention_kv_append_ns: u64,
+    pub prefill_attention_residual_ns: u64,
+    pub prefill_mlp_norm_ns: u64,
+    pub prefill_mlp_ns: u64,
+    pub prefill_mlp_input_projection_ns: u64,
+    pub prefill_mlp_activation_ns: u64,
+    pub prefill_mlp_output_projection_ns: u64,
+    pub prefill_mlp_residual_ns: u64,
+    pub prefill_chunks: usize,
+    pub decode_steps: usize,
+    pub max_prefill_chunk_tokens: usize,
+    pub prefill_timed_blocks: usize,
+}
+
+impl RamaGenerationTiming {
+    pub fn record_prefill_chunk(&mut self, chunk_tokens: usize, elapsed_ns: u64) {
+        self.prefill_ns = self.prefill_ns.saturating_add(elapsed_ns);
+        self.prefill_chunks = self.prefill_chunks.saturating_add(1);
+        self.max_prefill_chunk_tokens = self.max_prefill_chunk_tokens.max(chunk_tokens);
+    }
+
+    pub fn record_prefill_embedding(&mut self, elapsed_ns: u64) {
+        self.prefill_embedding_ns = self.prefill_embedding_ns.saturating_add(elapsed_ns);
+    }
+
+    pub fn record_prefill_layer_params(&mut self, elapsed_ns: u64) {
+        self.prefill_layer_params_ns = self.prefill_layer_params_ns.saturating_add(elapsed_ns);
+    }
+
+    pub fn record_prefill_block_timing(
+        &mut self,
+        attention_norm_ns: u64,
+        attention_ns: u64,
+        attention_qkv_projection_ns: u64,
+        attention_qkv_split_ns: u64,
+        attention_rotary_ns: u64,
+        attention_score_context_ns: u64,
+        attention_output_projection_ns: u64,
+        attention_kv_append_ns: u64,
+        attention_residual_ns: u64,
+        mlp_norm_ns: u64,
+        mlp_ns: u64,
+        mlp_input_projection_ns: u64,
+        mlp_activation_ns: u64,
+        mlp_output_projection_ns: u64,
+        mlp_residual_ns: u64,
+    ) {
+        self.prefill_attention_norm_ns = self
+            .prefill_attention_norm_ns
+            .saturating_add(attention_norm_ns);
+        self.prefill_attention_ns = self.prefill_attention_ns.saturating_add(attention_ns);
+        self.prefill_attention_qkv_projection_ns = self
+            .prefill_attention_qkv_projection_ns
+            .saturating_add(attention_qkv_projection_ns);
+        self.prefill_attention_qkv_split_ns = self
+            .prefill_attention_qkv_split_ns
+            .saturating_add(attention_qkv_split_ns);
+        self.prefill_attention_rotary_ns = self
+            .prefill_attention_rotary_ns
+            .saturating_add(attention_rotary_ns);
+        self.prefill_attention_score_context_ns = self
+            .prefill_attention_score_context_ns
+            .saturating_add(attention_score_context_ns);
+        self.prefill_attention_output_projection_ns = self
+            .prefill_attention_output_projection_ns
+            .saturating_add(attention_output_projection_ns);
+        self.prefill_attention_kv_append_ns = self
+            .prefill_attention_kv_append_ns
+            .saturating_add(attention_kv_append_ns);
+        self.prefill_attention_residual_ns = self
+            .prefill_attention_residual_ns
+            .saturating_add(attention_residual_ns);
+        self.prefill_mlp_norm_ns = self.prefill_mlp_norm_ns.saturating_add(mlp_norm_ns);
+        self.prefill_mlp_ns = self.prefill_mlp_ns.saturating_add(mlp_ns);
+        self.prefill_mlp_input_projection_ns = self
+            .prefill_mlp_input_projection_ns
+            .saturating_add(mlp_input_projection_ns);
+        self.prefill_mlp_activation_ns = self
+            .prefill_mlp_activation_ns
+            .saturating_add(mlp_activation_ns);
+        self.prefill_mlp_output_projection_ns = self
+            .prefill_mlp_output_projection_ns
+            .saturating_add(mlp_output_projection_ns);
+        self.prefill_mlp_residual_ns = self.prefill_mlp_residual_ns.saturating_add(mlp_residual_ns);
+        self.prefill_timed_blocks = self.prefill_timed_blocks.saturating_add(1);
+    }
+
+    pub fn record_decode_step(&mut self, elapsed_ns: u64) {
+        self.decode_ns = self.decode_ns.saturating_add(elapsed_ns);
+        self.decode_steps = self.decode_steps.saturating_add(1);
+    }
+
+    pub fn record_final_norm(&mut self, elapsed_ns: u64) {
+        self.final_norm_ns = self.final_norm_ns.saturating_add(elapsed_ns);
+    }
+
+    pub fn record_lm_head(&mut self, elapsed_ns: u64) {
+        self.lm_head_ns = self.lm_head_ns.saturating_add(elapsed_ns);
+    }
+
+    pub fn record_sampling(&mut self, elapsed_ns: u64) {
+        self.sampling_ns = self.sampling_ns.saturating_add(elapsed_ns);
+    }
 }
 
 impl StreamingEchoGenerationResult {
@@ -95,6 +219,10 @@ impl StreamingEchoGenerationResult {
 
     pub fn context_state(&self) -> &ContextEchoState {
         &self.context_echo_state
+    }
+
+    pub fn timing(&self) -> Option<&RamaGenerationTiming> {
+        self.timing.as_ref()
     }
 }
 
@@ -240,6 +368,7 @@ pub fn streaming_echo_transformer_generate_from_model(
         step_logits,
         context_echo_state: state,
         context_echo_bytes,
+        timing: None,
     })
 }
 
@@ -359,6 +488,7 @@ fn streaming_echo_transformer_step_from_model(
                     rotary: config.rotary_config(seq_len, position_offset),
                     kv_cache: Some(cache),
                 },
+                parallel_residual: config.use_parallel_residual,
             },
             budget,
         ) {
@@ -402,15 +532,18 @@ fn streaming_echo_transformer_step_from_model(
         .checked_mul(hidden_size)
         .ok_or_else(|| RuntimeError::Shape("echo last hidden offset overflow".to_string()))?;
     let last_hidden = &final_norm[last_hidden_start..last_hidden_start + hidden_size];
-    let logits = match streaming_linear_from_model(
+    let logits = match streaming_tile_linear_from_model(
         model,
         names.lm_head_weight,
         last_hidden,
         params.lm_head_bias,
-        StreamingLinearConfig {
-            batch: 1,
-            in_features: hidden_size,
-            out_features: config.vocab_size,
+        StreamingTileLinearConfig {
+            linear: StreamingLinearConfig {
+                batch: 1,
+                in_features: hidden_size,
+                out_features: config.vocab_size,
+            },
+            tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
         },
         budget,
     ) {
@@ -695,6 +828,7 @@ mod tests {
             intermediate_size: INTERMEDIATE_SIZE,
             causal: true,
             layer_norm_eps: 1e-5,
+            use_parallel_residual: false,
             sampling: StreamingSamplingConfig::Argmax,
             rotary: None,
         };
@@ -1097,6 +1231,7 @@ mod tests {
             intermediate_size: INTERMEDIATE_SIZE,
             causal: true,
             layer_norm_eps: 1e-5,
+            use_parallel_residual: false,
             sampling: StreamingSamplingConfig::Argmax,
             rotary: Some(StreamingTinyRotaryConfig {
                 rotary_dim: HEAD_DIM,
