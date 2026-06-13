@@ -1,10 +1,10 @@
 use crate::tensor::decode_to_f32;
 use crate::{
-    layer_norm, sample_argmax, sample_top_p, streaming_linear_from_model,
+    layer_norm, sample_argmax, sample_top_p, streaming_tile_linear_from_model,
     streaming_transformer_block_with_runtime_from_model, KvCache, LazyRllmModel, MemoryBudget,
     Result, RotaryEmbeddingConfig, RuntimeError, StreamingAttentionRuntime, StreamingBlockConfig,
     StreamingBlockParameters, StreamingBlockRuntime, StreamingBlockTensorNames,
-    StreamingLinearConfig,
+    StreamingLinearConfig, StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use rllm_container::{ChunkMeta, TensorMeta};
 
@@ -12,6 +12,28 @@ use rllm_container::{ChunkMeta, TensorMeta};
 pub struct StreamingEmbeddingConfig {
     pub vocab_size: usize,
     pub hidden_size: usize,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingChunkWindow {
+    chunk: ChunkMeta,
+    start_byte: usize,
+    end_byte: usize,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingCopySpan {
+    range_start_in_chunk: usize,
+    range_len_bytes: usize,
+    output_start: usize,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddingChunkRequest {
+    chunk: ChunkMeta,
+    range_start_in_chunk: usize,
+    range_len_bytes: usize,
+    copies: Vec<EmbeddingCopySpan>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -234,79 +256,83 @@ pub fn streaming_embedding_lookup_from_model(
 
     let mut output = vec![0.0f32; token_ids.len() * config.hidden_size];
     let dtype_size = tensor.dtype.size_bytes();
-    let mut byte_offset = 0usize;
-    for chunk in chunks {
-        if byte_offset % dtype_size != 0 {
-            return Err(RuntimeError::InvalidTensorData(format!(
-                "embedding tensor {embedding_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
-            )));
-        }
-        let element_start = byte_offset / dtype_size;
-        let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
-            RuntimeError::InvalidTensorData(format!(
-                "chunk {} uncompressed size does not fit usize",
-                chunk.chunk_id
-            ))
-        })?;
-
-        model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
-            if bytes.len() != expected_chunk_bytes {
-                return Err(RuntimeError::InvalidTensorData(format!(
-                    "chunk {} decoded byte len {} does not match metadata {}",
-                    chunk.chunk_id,
-                    bytes.len(),
-                    expected_chunk_bytes
-                )));
-            }
-            if bytes.len() % dtype_size != 0 {
-                return Err(RuntimeError::InvalidTensorData(format!(
-                    "chunk {} byte len {} is not aligned to dtype size {}",
-                    chunk.chunk_id,
-                    bytes.len(),
-                    dtype_size
-                )));
-            }
-
-            let scratch_bytes = (bytes.len() / dtype_size) * std::mem::size_of::<f32>();
-            let scratch_label = format!("streaming embedding f32 scratch chunk {}", chunk.chunk_id);
-            budget.reserve(scratch_bytes, scratch_label.clone())?;
-            let values = match decode_to_f32(tensor.dtype, bytes) {
-                Ok(values) => values,
-                Err(err) => {
-                    budget.release(scratch_bytes, scratch_label)?;
-                    return Err(err);
-                }
-            };
-
-            let result = gather_embedding_chunk(
-                &values,
-                element_start,
-                token_ids,
-                &mut output,
-                config,
-                embedding_name,
-            );
-            drop(values);
-            budget.release(scratch_bytes, scratch_label)?;
-            result
-        })?;
-
-        byte_offset = byte_offset
-            .checked_add(expected_chunk_bytes)
-            .ok_or_else(|| {
-                RuntimeError::InvalidTensorData("embedding chunk byte offset overflow".to_string())
-            })?;
-    }
-
     let expected_bytes = config
         .vocab_size
         .checked_mul(config.hidden_size)
         .and_then(|elements| elements.checked_mul(dtype_size))
         .ok_or_else(|| RuntimeError::Shape("embedding byte size overflow".to_string()))?;
-    if byte_offset != expected_bytes {
-        return Err(RuntimeError::InvalidTensorData(format!(
-            "embedding tensor {embedding_name} streamed {byte_offset} bytes, expected {expected_bytes}"
-        )));
+    let row_byte_len = config
+        .hidden_size
+        .checked_mul(dtype_size)
+        .ok_or_else(|| RuntimeError::Shape("embedding row byte size overflow".to_string()))?;
+    let chunk_windows =
+        embedding_chunk_windows(&chunks, dtype_size, expected_bytes, embedding_name)?;
+    let requests = build_embedding_row_requests(
+        token_ids,
+        config,
+        &chunk_windows,
+        row_byte_len,
+        dtype_size,
+        embedding_name,
+    )?;
+
+    for request in requests {
+        model.with_decoded_chunk_range(
+            request.chunk.chunk_id,
+            request.range_start_in_chunk as u64,
+            request.range_len_bytes as u64,
+            budget,
+            |bytes, budget| {
+                if bytes.len() != request.range_len_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "embedding chunk {} range decoded to {} bytes, expected {}",
+                        request.chunk.chunk_id,
+                        bytes.len(),
+                        request.range_len_bytes
+                    )));
+                }
+                if bytes.len() % dtype_size != 0 {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "embedding chunk {} range byte len {} is not aligned to dtype size {}",
+                        request.chunk.chunk_id,
+                        bytes.len(),
+                        dtype_size
+                    )));
+                }
+
+                let scratch_bytes = (bytes.len() / dtype_size)
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        RuntimeError::Shape("embedding f32 scratch overflow".to_string())
+                    })?;
+                let scratch_label = format!(
+                    "streaming embedding f32 scratch chunk {} range [{}..{})",
+                    request.chunk.chunk_id,
+                    request.range_start_in_chunk,
+                    request.range_start_in_chunk + request.range_len_bytes
+                );
+                budget.reserve(scratch_bytes, scratch_label.clone())?;
+                let values = match decode_to_f32(tensor.dtype, bytes) {
+                    Ok(values) => values,
+                    Err(err) => {
+                        budget.release(scratch_bytes, scratch_label)?;
+                        return Err(err);
+                    }
+                };
+
+                let result = copy_embedding_request_values(
+                    &values,
+                    &request,
+                    &mut output,
+                    dtype_size,
+                    config,
+                    embedding_name,
+                );
+                drop(values);
+                budget.release(scratch_bytes, scratch_label)?;
+                result
+            },
+        )?;
     }
 
     Ok(output)
@@ -417,15 +443,18 @@ pub fn streaming_tiny_transformer_next_token_with_runtime_from_model(
         .checked_mul(hidden_size)
         .ok_or_else(|| RuntimeError::Shape("last hidden offset overflow".to_string()))?;
     let last_hidden = &final_norm[last_hidden_start..last_hidden_start + hidden_size];
-    let logits = match streaming_linear_from_model(
+    let logits = match streaming_tile_linear_from_model(
         model,
         names.lm_head_weight,
         last_hidden,
         params.lm_head_bias,
-        StreamingLinearConfig {
-            batch: 1,
-            in_features: hidden_size,
-            out_features: config.vocab_size,
+        StreamingTileLinearConfig {
+            linear: StreamingLinearConfig {
+                batch: 1,
+                in_features: hidden_size,
+                out_features: config.vocab_size,
+            },
+            tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
         },
         budget,
     ) {
@@ -586,6 +615,7 @@ fn streaming_tiny_transformer_generation_step_from_model(
                 rotary,
                 kv_cache: Some(cache),
             },
+            parallel_residual: false,
         },
         budget,
     )
@@ -769,32 +799,158 @@ fn validate_embedding_tensor(tensor: &TensorMeta, config: StreamingEmbeddingConf
     Ok(())
 }
 
-fn gather_embedding_chunk(
-    values: &[f32],
-    element_start: usize,
+fn embedding_chunk_windows(
+    chunks: &[ChunkMeta],
+    dtype_size: usize,
+    expected_bytes: usize,
+    embedding_name: &str,
+) -> Result<Vec<EmbeddingChunkWindow>> {
+    let mut windows = Vec::with_capacity(chunks.len());
+    let mut byte_offset = 0usize;
+    for chunk in chunks {
+        if byte_offset % dtype_size != 0 {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "embedding tensor {embedding_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
+            )));
+        }
+        let chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} uncompressed size does not fit usize",
+                chunk.chunk_id
+            ))
+        })?;
+        if chunk_bytes % dtype_size != 0 {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "embedding tensor {embedding_name} chunk {} byte len {} is not aligned to dtype size {}",
+                chunk.chunk_id, chunk_bytes, dtype_size
+            )));
+        }
+        let end_byte = byte_offset.checked_add(chunk_bytes).ok_or_else(|| {
+            RuntimeError::InvalidTensorData("embedding chunk byte offset overflow".to_string())
+        })?;
+        windows.push(EmbeddingChunkWindow {
+            chunk: chunk.clone(),
+            start_byte: byte_offset,
+            end_byte,
+        });
+        byte_offset = end_byte;
+    }
+
+    if byte_offset != expected_bytes {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "embedding tensor {embedding_name} chunk stream covers {byte_offset} bytes, expected {expected_bytes}"
+        )));
+    }
+
+    Ok(windows)
+}
+
+fn build_embedding_row_requests(
     token_ids: &[usize],
+    config: StreamingEmbeddingConfig,
+    windows: &[EmbeddingChunkWindow],
+    row_byte_len: usize,
+    dtype_size: usize,
+    embedding_name: &str,
+) -> Result<Vec<EmbeddingChunkRequest>> {
+    let mut requests = Vec::new();
+    for window in windows {
+        let mut copies = Vec::new();
+        let mut request_start = usize::MAX;
+        let mut request_end = 0usize;
+
+        for (seq_idx, &token_id) in token_ids.iter().enumerate() {
+            let row_start = token_id.checked_mul(row_byte_len).ok_or_else(|| {
+                RuntimeError::Shape("embedding row byte offset overflow".to_string())
+            })?;
+            let row_end = row_start.checked_add(row_byte_len).ok_or_else(|| {
+                RuntimeError::Shape("embedding row byte end overflow".to_string())
+            })?;
+            let overlap_start = row_start.max(window.start_byte);
+            let overlap_end = row_end.min(window.end_byte);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let range_start_in_chunk = overlap_start - window.start_byte;
+            let range_len_bytes = overlap_end - overlap_start;
+            if range_start_in_chunk % dtype_size != 0 || range_len_bytes % dtype_size != 0 {
+                return Err(RuntimeError::InvalidTensorData(format!(
+                    "embedding tensor {embedding_name} token row {token_id} overlaps chunk {} on unaligned byte range [{}..{}) for dtype size {}",
+                    window.chunk.chunk_id,
+                    range_start_in_chunk,
+                    range_start_in_chunk + range_len_bytes,
+                    dtype_size
+                )));
+            }
+            let output_col_start = (overlap_start - row_start) / dtype_size;
+            let output_start = seq_idx
+                .checked_mul(config.hidden_size)
+                .and_then(|base| base.checked_add(output_col_start))
+                .ok_or_else(|| {
+                    RuntimeError::Shape("embedding output offset overflow".to_string())
+                })?;
+            copies.push(EmbeddingCopySpan {
+                range_start_in_chunk,
+                range_len_bytes,
+                output_start,
+            });
+            request_start = request_start.min(range_start_in_chunk);
+            request_end = request_end.max(range_start_in_chunk + range_len_bytes);
+        }
+
+        if !copies.is_empty() {
+            requests.push(EmbeddingChunkRequest {
+                chunk: window.chunk.clone(),
+                range_start_in_chunk: request_start,
+                range_len_bytes: request_end - request_start,
+                copies,
+            });
+        }
+    }
+
+    Ok(requests)
+}
+
+fn copy_embedding_request_values(
+    values: &[f32],
+    request: &EmbeddingChunkRequest,
     output: &mut [f32],
+    dtype_size: usize,
     config: StreamingEmbeddingConfig,
     embedding_name: &str,
 ) -> Result<()> {
-    let total_elements = config
-        .vocab_size
-        .checked_mul(config.hidden_size)
-        .ok_or_else(|| RuntimeError::Shape("embedding element count overflow".to_string()))?;
-    for (local_idx, &value) in values.iter().enumerate() {
-        let global_idx = element_start + local_idx;
-        if global_idx >= total_elements {
+    for copy in &request.copies {
+        let relative_byte_start = copy
+            .range_start_in_chunk
+            .checked_sub(request.range_start_in_chunk)
+            .ok_or_else(|| RuntimeError::Shape("embedding relative range underflow".to_string()))?;
+        if relative_byte_start % dtype_size != 0 || copy.range_len_bytes % dtype_size != 0 {
             return Err(RuntimeError::InvalidTensorData(format!(
-                "embedding tensor {embedding_name} chunk element {global_idx} exceeds expected {total_elements}"
+                "embedding tensor {embedding_name} copy range is not aligned to dtype size {dtype_size}"
             )));
         }
-        let row = global_idx / config.hidden_size;
-        let col = global_idx % config.hidden_size;
-        for (seq_idx, &token_id) in token_ids.iter().enumerate() {
-            if token_id == row {
-                output[seq_idx * config.hidden_size + col] = value;
-            }
+        let source_start = relative_byte_start / dtype_size;
+        let source_len = copy.range_len_bytes / dtype_size;
+        let source_end = source_start
+            .checked_add(source_len)
+            .ok_or_else(|| RuntimeError::Shape("embedding source range overflow".to_string()))?;
+        let output_end = copy
+            .output_start
+            .checked_add(source_len)
+            .ok_or_else(|| RuntimeError::Shape("embedding output range overflow".to_string()))?;
+        if source_end > values.len() || output_end > output.len() || source_len > config.hidden_size
+        {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "embedding tensor {embedding_name} copy range out of bounds: source [{}..{}) / {}, output [{}..{}) / {}",
+                source_start,
+                source_end,
+                values.len(),
+                copy.output_start,
+                output_end,
+                output.len()
+            )));
         }
+        output[copy.output_start..output_end].copy_from_slice(&values[source_start..source_end]);
     }
     Ok(())
 }
@@ -1253,6 +1409,38 @@ mod tests {
 
         assert_close_vec(&actual, &expected, 1e-6);
         assert_eq!(budget.current_bytes(), 0);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_embedding_lookup_recalls_only_touched_row_chunks() {
+        let path = temp_path("embedding-row-recall");
+        write_tiny_model(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let token_ids = [2];
+        let expected =
+            embedding_lookup(&EMBEDDING_WEIGHT, VOCAB_SIZE, HIDDEN_SIZE, &token_ids).unwrap();
+        let mut budget = MemoryBudget::new(24);
+
+        let actual = streaming_embedding_lookup_from_model(
+            &mut model,
+            "embed.weight",
+            &token_ids,
+            StreamingEmbeddingConfig {
+                vocab_size: VOCAB_SIZE,
+                hidden_size: HIDDEN_SIZE,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_close_vec(&actual, &expected, 1e-6);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(
+            budget.peak_bytes() <= 24,
+            "selective row recall should fit under the budget that full embedding chunk scan exceeds; peak={} bytes",
+            budget.peak_bytes()
+        );
         std::fs::remove_file(&path).ok();
     }
 

@@ -1,17 +1,20 @@
+use crate::RamaGenerationTiming;
 use crate::{
     gpt_neox_rotary_dim, layer_norm, sample_argmax, sample_top_p,
     streaming_echo_transformer_generate_from_model, streaming_embedding_lookup_from_model,
-    streaming_linear_from_model, streaming_transformer_block_with_runtime_from_model,
-    LazyRllmModel, MemoryBudget, RamaContextState, Result, RllmTokenizer, RuntimeError,
-    StreamingAttentionRuntime, StreamingBlockConfig, StreamingBlockParameters,
-    StreamingBlockRuntime, StreamingBlockTensorNames, StreamingEchoGenerationResult,
+    streaming_tile_linear_from_model,
+    streaming_transformer_block_with_runtime_and_timing_from_model, LazyRllmModel, MemoryBudget,
+    RamaContextState, Result, RllmTokenizer, RuntimeError, StreamingAttentionRuntime,
+    StreamingBlockConfig, StreamingBlockParameters, StreamingBlockRuntime,
+    StreamingBlockTensorNames, StreamingBlockTiming, StreamingEchoGenerationResult,
     StreamingEchoTransformerConfig, StreamingEchoTransformerParameters,
     StreamingEchoTransformerTensorNames, StreamingEmbeddingConfig, StreamingLinearConfig,
     StreamingNextTokenResult, StreamingRamaGenerationResult, StreamingSamplingConfig,
-    StreamingTinyRotaryConfig,
+    StreamingTileLinearConfig, StreamingTinyRotaryConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use rllm_container::{GlobalMetadata, ModelConfigMetadata};
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy)]
 pub struct GptNeoxEchoBuildConfig {
@@ -22,6 +25,7 @@ pub struct GptNeoxEchoBuildConfig {
     pub rotary_base: f32,
     pub causal: bool,
     pub layer_norm_eps: f32,
+    pub use_parallel_residual: bool,
     pub sampling: StreamingSamplingConfig,
 }
 
@@ -36,6 +40,49 @@ pub struct GptNeoxEchoGenerationConfig {
 pub type GptNeoxRamaBuildConfig = GptNeoxEchoBuildConfig;
 pub type GptNeoxRamaGenerationConfig = GptNeoxEchoGenerationConfig;
 pub type PreparedGptNeoxRamaTransformer = PreparedGptNeoxEchoTransformer;
+
+const RAMA_PREFILL_BASE_CHUNK_TOKENS: usize = 32;
+const RAMA_PREFILL_BASE_HIDDEN_SIZE: usize = 512;
+const RAMA_PREFILL_BASE_LAYER_COUNT: usize = 6;
+const RAMA_PREFILL_LOW_RAM_MAX_CHUNK_TOKENS: usize = 128;
+const RAMA_PREFILL_SPEED_MAX_CHUNK_TOKENS: usize = 256;
+const RAMA_PREFILL_ESTIMATE_HIDDEN_MULTIPLIER: usize = 7;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamaPrefillPolicy {
+    /// Prefer the measured low-RAM-safe window for the model shape.
+    LowRam,
+    /// Prefer a larger speed-biased window, still downshifted by an explicit transient budget.
+    Speed,
+}
+
+impl Default for RamaPrefillPolicy {
+    fn default() -> Self {
+        Self::LowRam
+    }
+}
+
+impl RamaPrefillPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LowRam => "low-ram",
+            Self::Speed => "speed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GptNeoxRamaGenerationOptions {
+    /// Collect low-overhead aggregate phase timings without buffering per-chunk trace events.
+    pub timing: bool,
+    /// Optional maximum number of prompt tokens processed per prefill recall window.
+    ///
+    /// This keeps active activations bounded for real long prompts. Intermediate
+    /// chunks update layer KV caches and deliberately skip final-norm/lm-head
+    /// projection because only the last prompt token produces the first generated
+    /// token.
+    pub prefill_chunk_tokens: Option<usize>,
+}
 
 #[derive(Debug, Clone)]
 pub struct OwnedStreamingBlockTensorNames {
@@ -204,6 +251,21 @@ impl LayerDecodedGptNeoxRamaTransformer {
         prompt_token_ids: &[usize],
         budget: &mut MemoryBudget,
     ) -> Result<StreamingRamaGenerationResult> {
+        self.generate_from_model_with_options(
+            model,
+            prompt_token_ids,
+            budget,
+            GptNeoxRamaGenerationOptions::default(),
+        )
+    }
+
+    pub fn generate_from_model_with_options(
+        &self,
+        model: &mut LazyRllmModel,
+        prompt_token_ids: &[usize],
+        budget: &mut MemoryBudget,
+        options: GptNeoxRamaGenerationOptions,
+    ) -> Result<StreamingRamaGenerationResult> {
         let mut state = RamaContextState::new(
             self.config.num_layers,
             self.config.num_heads,
@@ -211,12 +273,40 @@ impl LayerDecodedGptNeoxRamaTransformer {
             self.config.max_seq_len,
         )?;
         validate_layer_decode_generation_inputs(prompt_token_ids, self.config, &state)?;
+        let prefill_chunk_tokens =
+            validated_prefill_chunk_tokens(options.prefill_chunk_tokens, prompt_token_ids.len())?;
+        let mut timing = options.timing.then(RamaGenerationTiming::default);
 
         let mut token_ids = prompt_token_ids.to_vec();
         let mut generated_token_ids = Vec::with_capacity(self.config.max_new_tokens);
         let mut step_logits = Vec::with_capacity(self.config.max_new_tokens);
 
-        let prefill = self.step_from_model(model, prompt_token_ids, 0, &mut state, budget)?;
+        let mut prefill_position = 0usize;
+        let mut prefill = None;
+        for chunk in prompt_token_ids.chunks(prefill_chunk_tokens) {
+            let is_last_prompt_chunk = prefill_position + chunk.len() == prompt_token_ids.len();
+            let started = Instant::now();
+            let step = self.step_from_model_inner(
+                model,
+                chunk,
+                prefill_position,
+                &mut state,
+                budget,
+                is_last_prompt_chunk,
+                true,
+                timing.as_mut(),
+            )?;
+            if let Some(timing) = timing.as_mut() {
+                timing.record_prefill_chunk(chunk.len(), elapsed_ns_u64(started.elapsed()));
+            }
+            if is_last_prompt_chunk {
+                prefill = step;
+            }
+            prefill_position += chunk.len();
+        }
+        let prefill = prefill.ok_or_else(|| {
+            RuntimeError::InvalidTensorData("RAMA prefill produced no logits".to_string())
+        })?;
         generated_token_ids.push(prefill.token_id);
         token_ids.push(prefill.token_id);
         step_logits.push(prefill.logits);
@@ -226,8 +316,26 @@ impl LayerDecodedGptNeoxRamaTransformer {
                 RuntimeError::InvalidTensorData("missing generated token".to_string())
             })?;
             let position_offset = token_ids.len() - 1;
-            let step =
-                self.step_from_model(model, &[input_token], position_offset, &mut state, budget)?;
+            let started = Instant::now();
+            let step = self
+                .step_from_model_inner(
+                    model,
+                    &[input_token],
+                    position_offset,
+                    &mut state,
+                    budget,
+                    true,
+                    false,
+                    timing.as_mut(),
+                )?
+                .ok_or_else(|| {
+                    RuntimeError::InvalidTensorData(
+                        "RAMA decode step produced no logits".to_string(),
+                    )
+                })?;
+            if let Some(timing) = timing.as_mut() {
+                timing.record_decode_step(elapsed_ns_u64(started.elapsed()));
+            }
             generated_token_ids.push(step.token_id);
             token_ids.push(step.token_id);
             step_logits.push(step.logits);
@@ -240,6 +348,7 @@ impl LayerDecodedGptNeoxRamaTransformer {
             step_logits,
             context_echo_state: state,
             context_echo_bytes,
+            timing,
         })
     }
 
@@ -265,14 +374,17 @@ impl LayerDecodedGptNeoxRamaTransformer {
         })
     }
 
-    fn step_from_model(
+    fn step_from_model_inner(
         &self,
         model: &mut LazyRllmModel,
         token_ids: &[usize],
         position_offset: usize,
         state: &mut RamaContextState,
         budget: &mut MemoryBudget,
-    ) -> Result<StreamingNextTokenResult> {
+        emit_logits: bool,
+        record_prefill_detail: bool,
+        mut timing: Option<&mut RamaGenerationTiming>,
+    ) -> Result<Option<StreamingNextTokenResult>> {
         validate_layer_decode_step_inputs(token_ids, position_offset, self.config, state)?;
         let seq_len = token_ids.len();
         let hidden_size = layer_decode_hidden_size(self.config)?;
@@ -284,6 +396,7 @@ impl LayerDecodedGptNeoxRamaTransformer {
 
         let mut current_label = "gpt-neox RAMA embedding activation".to_string();
         budget.reserve(sequence_bytes, current_label.clone())?;
+        let embedding_started = Instant::now();
         let mut current_hidden = match streaming_embedding_lookup_from_model(
             model,
             &self.embedding_weight,
@@ -300,6 +413,11 @@ impl LayerDecodedGptNeoxRamaTransformer {
                 return Err(err);
             }
         };
+        if record_prefill_detail {
+            if let Some(timing) = timing.as_deref_mut() {
+                timing.record_prefill_embedding(elapsed_ns_u64(embedding_started.elapsed()));
+            }
+        }
 
         for layer_idx in 0..self.config.num_layers {
             let next_label = format!("gpt-neox RAMA layer {layer_idx} output activation");
@@ -308,6 +426,7 @@ impl LayerDecodedGptNeoxRamaTransformer {
                 return Err(err);
             }
 
+            let layer_params_started = Instant::now();
             let params = match self.decode_layer_params_from_model(model, layer_idx) {
                 Ok(params) => params,
                 Err(err) => {
@@ -316,6 +435,13 @@ impl LayerDecodedGptNeoxRamaTransformer {
                     return Err(err);
                 }
             };
+            if record_prefill_detail {
+                if let Some(timing) = timing.as_deref_mut() {
+                    timing.record_prefill_layer_params(elapsed_ns_u64(
+                        layer_params_started.elapsed(),
+                    ));
+                }
+            }
             let param_bytes = params.resident_bytes();
             let param_label = format!("gpt-neox RAMA layer {layer_idx} active params");
             if let Err(err) = budget.reserve(param_bytes, param_label.clone()) {
@@ -333,7 +459,13 @@ impl LayerDecodedGptNeoxRamaTransformer {
                     return Err(err);
                 }
             };
-            let next_hidden = match streaming_transformer_block_with_runtime_from_model(
+            let mut block_timing = StreamingBlockTiming::default();
+            let block_timing_ref = if record_prefill_detail {
+                Some(&mut block_timing)
+            } else {
+                None
+            };
+            let next_hidden = match streaming_transformer_block_with_runtime_and_timing_from_model(
                 model,
                 &current_hidden,
                 self.layers[layer_idx].as_borrowed(),
@@ -351,8 +483,10 @@ impl LayerDecodedGptNeoxRamaTransformer {
                         rotary: layer_decode_rotary_config(self.config, seq_len, position_offset),
                         kv_cache: Some(cache),
                     },
+                    parallel_residual: self.config.use_parallel_residual,
                 },
                 budget,
+                block_timing_ref,
             ) {
                 Ok(values) => values,
                 Err(err) => {
@@ -362,6 +496,27 @@ impl LayerDecodedGptNeoxRamaTransformer {
                     return Err(err);
                 }
             };
+            if record_prefill_detail {
+                if let Some(timing) = timing.as_deref_mut() {
+                    timing.record_prefill_block_timing(
+                        block_timing.attention_norm_ns,
+                        block_timing.attention_ns,
+                        block_timing.attention_qkv_projection_ns,
+                        block_timing.attention_qkv_split_ns,
+                        block_timing.attention_rotary_ns,
+                        block_timing.attention_score_context_ns,
+                        block_timing.attention_output_projection_ns,
+                        block_timing.attention_kv_append_ns,
+                        block_timing.attention_residual_ns,
+                        block_timing.mlp_norm_ns,
+                        block_timing.mlp_ns,
+                        block_timing.mlp_input_projection_ns,
+                        block_timing.mlp_activation_ns,
+                        block_timing.mlp_output_projection_ns,
+                        block_timing.mlp_residual_ns,
+                    );
+                }
+            }
             budget.release(param_bytes, param_label)?;
             drop(params);
             drop(current_hidden);
@@ -370,11 +525,18 @@ impl LayerDecodedGptNeoxRamaTransformer {
             current_label = next_label;
         }
 
+        if !emit_logits {
+            drop(current_hidden);
+            budget.release(sequence_bytes, current_label)?;
+            return Ok(None);
+        }
+
         let final_norm_label = "gpt-neox RAMA final layernorm activation".to_string();
         if let Err(err) = budget.reserve(sequence_bytes, final_norm_label.clone()) {
             budget.release(sequence_bytes, current_label)?;
             return Err(err);
         }
+        let final_norm_started = Instant::now();
         let final_norm = match layer_norm(
             &current_hidden,
             &self.final_layernorm_weight,
@@ -390,6 +552,9 @@ impl LayerDecodedGptNeoxRamaTransformer {
                 return Err(err);
             }
         };
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.record_final_norm(elapsed_ns_u64(final_norm_started.elapsed()));
+        }
         drop(current_hidden);
         budget.release(sequence_bytes, current_label)?;
 
@@ -397,15 +562,19 @@ impl LayerDecodedGptNeoxRamaTransformer {
             RuntimeError::Shape("gpt-neox RAMA last hidden offset overflow".to_string())
         })?;
         let last_hidden = &final_norm[last_hidden_start..last_hidden_start + hidden_size];
-        let logits = match streaming_linear_from_model(
+        let lm_head_started = Instant::now();
+        let logits = match streaming_tile_linear_from_model(
             model,
             &self.lm_head_weight,
             last_hidden,
             self.lm_head_bias.as_deref(),
-            StreamingLinearConfig {
-                batch: 1,
-                in_features: hidden_size,
-                out_features: self.config.vocab_size,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: hidden_size,
+                    out_features: self.config.vocab_size,
+                },
+                tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
             },
             budget,
         ) {
@@ -415,11 +584,18 @@ impl LayerDecodedGptNeoxRamaTransformer {
                 return Err(err);
             }
         };
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.record_lm_head(elapsed_ns_u64(lm_head_started.elapsed()));
+        }
         drop(final_norm);
         budget.release(sequence_bytes, final_norm_label)?;
 
+        let sampling_started = Instant::now();
         let token_id = sample_gpt_neox_logits(&logits, self.config.sampling)?;
-        Ok(StreamingNextTokenResult { logits, token_id })
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.record_sampling(elapsed_ns_u64(sampling_started.elapsed()));
+        }
+        Ok(Some(StreamingNextTokenResult { logits, token_id }))
     }
 
     fn decode_layer_params_from_model(
@@ -478,6 +654,107 @@ impl LayerDecodedGptNeoxRamaTransformer {
             )?,
         })
     }
+}
+
+fn validated_prefill_chunk_tokens(requested: Option<usize>, prompt_len: usize) -> Result<usize> {
+    match requested {
+        Some(0) => Err(RuntimeError::Shape(
+            "RAMA prefill chunk size must be greater than zero".to_string(),
+        )),
+        Some(chunk_tokens) => Ok(chunk_tokens.min(prompt_len)),
+        None => Ok(prompt_len),
+    }
+}
+
+pub fn recommend_rama_prefill_chunk_tokens(
+    config: StreamingEchoTransformerConfig,
+    policy: RamaPrefillPolicy,
+    prompt_len: usize,
+    memory_budget_bytes: Option<usize>,
+) -> Result<usize> {
+    validate_layer_decode_config(config)?;
+    if prompt_len == 0 {
+        return Err(RuntimeError::Shape(
+            "RAMA prefill policy requires at least one prompt token".to_string(),
+        ));
+    }
+
+    let mut chunk_tokens = shape_aware_prefill_chunk_tokens(config, policy)?.min(prompt_len);
+    if let Some(limit) = memory_budget_bytes.filter(|&limit| limit != usize::MAX) {
+        while chunk_tokens > 1 && estimated_prefill_window_peak_bytes(config, chunk_tokens)? > limit
+        {
+            chunk_tokens = (chunk_tokens / 2).max(1);
+        }
+    }
+    Ok(chunk_tokens)
+}
+
+fn shape_aware_prefill_chunk_tokens(
+    config: StreamingEchoTransformerConfig,
+    policy: RamaPrefillPolicy,
+) -> Result<usize> {
+    let hidden_size = layer_decode_hidden_size(config)?;
+    let hidden_scaled = scaled_prefill_window(hidden_size, RAMA_PREFILL_BASE_HIDDEN_SIZE)?;
+    let layer_scaled = scaled_prefill_window(config.num_layers, RAMA_PREFILL_BASE_LAYER_COUNT)?;
+    let raw = hidden_scaled
+        .max(layer_scaled)
+        .max(RAMA_PREFILL_BASE_CHUNK_TOKENS);
+    let low_ram = next_power_of_two_at_least(raw)?.clamp(
+        RAMA_PREFILL_BASE_CHUNK_TOKENS,
+        RAMA_PREFILL_LOW_RAM_MAX_CHUNK_TOKENS,
+    );
+
+    Ok(match policy {
+        RamaPrefillPolicy::LowRam => low_ram,
+        RamaPrefillPolicy::Speed => low_ram
+            .saturating_mul(2)
+            .min(RAMA_PREFILL_SPEED_MAX_CHUNK_TOKENS),
+    })
+}
+
+fn scaled_prefill_window(value: usize, baseline: usize) -> Result<usize> {
+    let scaled = value
+        .checked_mul(RAMA_PREFILL_BASE_CHUNK_TOKENS)
+        .ok_or_else(|| RuntimeError::Shape("RAMA prefill policy scale overflow".to_string()))?;
+    Ok(div_ceil_usize(scaled, baseline))
+}
+
+fn div_ceil_usize(numerator: usize, denominator: usize) -> usize {
+    numerator / denominator + usize::from(numerator % denominator != 0)
+}
+
+fn next_power_of_two_at_least(value: usize) -> Result<usize> {
+    let mut power = 1usize;
+    while power < value {
+        power = power.checked_mul(2).ok_or_else(|| {
+            RuntimeError::Shape("RAMA prefill policy power-of-two overflow".to_string())
+        })?;
+    }
+    Ok(power)
+}
+
+fn estimated_prefill_window_peak_bytes(
+    config: StreamingEchoTransformerConfig,
+    chunk_tokens: usize,
+) -> Result<usize> {
+    let hidden_size = layer_decode_hidden_size(config)?;
+    let hidden_terms = hidden_size
+        .checked_mul(RAMA_PREFILL_ESTIMATE_HIDDEN_MULTIPLIER)
+        .ok_or_else(|| RuntimeError::Shape("RAMA prefill hidden estimate overflow".to_string()))?;
+    let values_per_token = config
+        .intermediate_size
+        .checked_add(hidden_terms)
+        .ok_or_else(|| {
+            RuntimeError::Shape("RAMA prefill per-token estimate overflow".to_string())
+        })?;
+    chunk_tokens
+        .checked_mul(values_per_token)
+        .and_then(|values| values.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| RuntimeError::Shape("RAMA prefill byte estimate overflow".to_string()))
+}
+
+fn elapsed_ns_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 pub fn prepare_gpt_neox_echo_transformer_from_model(
@@ -656,6 +933,7 @@ pub fn prepare_gpt_neox_echo_transformer_from_model(
             })?,
             causal: build.causal,
             layer_norm_eps: build.layer_norm_eps,
+            use_parallel_residual: build.use_parallel_residual,
             sampling: build.sampling,
             rotary: Some(StreamingTinyRotaryConfig {
                 rotary_dim,
@@ -829,6 +1107,7 @@ pub fn prepare_gpt_neox_rama_layer_decode_transformer_from_model(
             })?,
             causal: build.causal,
             layer_norm_eps: build.layer_norm_eps,
+            use_parallel_residual: build.use_parallel_residual,
             sampling: build.sampling,
             rotary: Some(StreamingTinyRotaryConfig {
                 rotary_dim,
@@ -887,6 +1166,7 @@ fn gpt_neox_build_config_from_metadata(
         rotary_base: model_config.rotary_emb_base.unwrap_or(10_000.0),
         causal: generation.causal,
         layer_norm_eps: model_config.layer_norm_eps.unwrap_or(1e-5),
+        use_parallel_residual: model_config.use_parallel_residual.unwrap_or(false),
         sampling: generation.sampling,
     })
 }
@@ -1509,6 +1789,7 @@ mod tests {
             rotary_pct: Some(1.0),
             rotary_emb_base: Some(10_000.0),
             layer_norm_eps: Some(1e-5),
+            use_parallel_residual: Some(true),
             vocab_size: Some(VOCAB_SIZE as u64),
         });
         let mut writer = RllmWriter::new(path, meta).unwrap();
@@ -1710,8 +1991,105 @@ mod tests {
             rotary_base: 10_000.0,
             causal: true,
             layer_norm_eps: 1e-5,
+            use_parallel_residual: false,
             sampling: StreamingSamplingConfig::Argmax,
         }
+    }
+
+    fn policy_config(
+        num_layers: usize,
+        hidden_size: usize,
+        num_heads: usize,
+        intermediate_size: usize,
+    ) -> StreamingEchoTransformerConfig {
+        StreamingEchoTransformerConfig {
+            num_layers,
+            max_new_tokens: 16,
+            max_seq_len: 2048,
+            vocab_size: 50_304,
+            num_heads,
+            head_dim: hidden_size / num_heads,
+            intermediate_size,
+            causal: true,
+            layer_norm_eps: 1e-5,
+            use_parallel_residual: true,
+            sampling: StreamingSamplingConfig::Argmax,
+            rotary: Some(StreamingTinyRotaryConfig {
+                rotary_dim: hidden_size / num_heads,
+                base: 10_000.0,
+            }),
+        }
+    }
+
+    #[test]
+    fn recommended_rama_prefill_policy_selects_shape_aware_windows() {
+        let pythia_70m_like = policy_config(6, 512, 8, 2048);
+        let pythia_160m_like = policy_config(12, 768, 12, 3072);
+        let budget_100mb = 100 * 1024 * 1024;
+
+        assert_eq!(
+            recommend_rama_prefill_chunk_tokens(
+                pythia_70m_like,
+                RamaPrefillPolicy::LowRam,
+                1024,
+                Some(budget_100mb),
+            )
+            .unwrap(),
+            32
+        );
+        assert_eq!(
+            recommend_rama_prefill_chunk_tokens(
+                pythia_160m_like,
+                RamaPrefillPolicy::LowRam,
+                1024,
+                Some(budget_100mb),
+            )
+            .unwrap(),
+            64
+        );
+        assert_eq!(
+            recommend_rama_prefill_chunk_tokens(
+                pythia_160m_like,
+                RamaPrefillPolicy::Speed,
+                1024,
+                Some(budget_100mb),
+            )
+            .unwrap(),
+            128
+        );
+    }
+
+    #[test]
+    fn recommended_rama_prefill_policy_respects_prompt_len_and_budget() {
+        let pythia_160m_like = policy_config(12, 768, 12, 3072);
+
+        assert_eq!(
+            recommend_rama_prefill_chunk_tokens(
+                pythia_160m_like,
+                RamaPrefillPolicy::LowRam,
+                48,
+                Some(100 * 1024 * 1024),
+            )
+            .unwrap(),
+            48
+        );
+        assert_eq!(
+            recommend_rama_prefill_chunk_tokens(
+                pythia_160m_like,
+                RamaPrefillPolicy::Speed,
+                1024,
+                Some(2 * 1024 * 1024),
+            )
+            .unwrap(),
+            32
+        );
+        assert!(recommend_rama_prefill_chunk_tokens(
+            pythia_160m_like,
+            RamaPrefillPolicy::LowRam,
+            0,
+            Some(100 * 1024 * 1024),
+        )
+        .is_err());
     }
 
     #[test]
@@ -1851,6 +2229,108 @@ mod tests {
         assert_eq!(prepared_budget.current_bytes(), 0);
         assert_eq!(layer_decode_budget.current_bytes(), 0);
 
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn layer_decoded_gpt_neox_chunked_prefill_matches_full_prefill() {
+        let path = temp_path("layer-decode-chunked-prefill");
+        write_gpt_neox_stack_model(&path);
+        let mut full_model = LazyRllmModel::open(&path).unwrap();
+        let mut chunked_model = LazyRllmModel::open(&path).unwrap();
+        let prompt = [0, 2, 1, 2];
+        let build = build_config(3);
+        let full =
+            prepare_gpt_neox_rama_layer_decode_transformer_from_model(&mut full_model, build)
+                .unwrap();
+        let chunked =
+            prepare_gpt_neox_rama_layer_decode_transformer_from_model(&mut chunked_model, build)
+                .unwrap();
+        let mut full_budget = MemoryBudget::new(32768);
+        let mut chunked_budget = MemoryBudget::new(32768);
+
+        let expected = full
+            .generate_from_model(&mut full_model, &prompt, &mut full_budget)
+            .unwrap();
+        let actual = chunked
+            .generate_from_model_with_options(
+                &mut chunked_model,
+                &prompt,
+                &mut chunked_budget,
+                GptNeoxRamaGenerationOptions {
+                    timing: true,
+                    prefill_chunk_tokens: Some(2),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(actual.generated_token_ids, expected.generated_token_ids);
+        assert_eq!(actual.token_ids, expected.token_ids);
+        assert_eq!(actual.step_logits, expected.step_logits);
+        assert_eq!(
+            actual.context_memory_bytes(),
+            expected.context_memory_bytes()
+        );
+        let timing = actual
+            .timing()
+            .expect("chunked prefill should collect timing");
+        assert_eq!(timing.prefill_chunks, 2);
+        assert_eq!(timing.decode_steps, build.max_new_tokens - 1);
+        assert_eq!(timing.max_prefill_chunk_tokens, 2);
+        assert_eq!(
+            timing.prefill_timed_blocks,
+            timing.prefill_chunks * NUM_LAYERS
+        );
+        assert!(timing.prefill_embedding_ns > 0);
+        assert!(timing.prefill_layer_params_ns > 0);
+        assert!(timing.prefill_attention_ns > 0);
+        assert!(timing.prefill_attention_qkv_projection_ns > 0);
+        assert!(timing.prefill_attention_qkv_split_ns > 0);
+        assert!(timing.prefill_attention_rotary_ns > 0);
+        assert!(timing.prefill_attention_score_context_ns > 0);
+        assert!(timing.prefill_attention_output_projection_ns > 0);
+        assert!(timing.prefill_attention_kv_append_ns > 0);
+        assert!(timing.prefill_mlp_ns > 0);
+        assert!(timing.prefill_mlp_input_projection_ns > 0);
+        assert!(timing.prefill_mlp_activation_ns > 0);
+        assert!(timing.prefill_mlp_output_projection_ns > 0);
+        assert_eq!(full_budget.current_bytes(), 0);
+        assert_eq!(chunked_budget.current_bytes(), 0);
+        assert!(
+            chunked_budget.peak_bytes() <= full_budget.peak_bytes(),
+            "chunked prefill should not increase transient peak: chunked={} full={}",
+            chunked_budget.peak_bytes(),
+            full_budget.peak_bytes()
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn layer_decoded_gpt_neox_rejects_zero_prefill_chunk_size() {
+        let path = temp_path("layer-decode-zero-prefill-chunk");
+        write_gpt_neox_stack_model(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prompt = [0, 2];
+        let transformer =
+            prepare_gpt_neox_rama_layer_decode_transformer_from_model(&mut model, build_config(1))
+                .unwrap();
+        let mut budget = MemoryBudget::new(16384);
+
+        let err = transformer
+            .generate_from_model_with_options(
+                &mut model,
+                &prompt,
+                &mut budget,
+                GptNeoxRamaGenerationOptions {
+                    timing: false,
+                    prefill_chunk_tokens: Some(0),
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::Shape(_)));
+        assert_eq!(budget.current_bytes(), 0);
         std::fs::remove_file(&path).ok();
     }
 

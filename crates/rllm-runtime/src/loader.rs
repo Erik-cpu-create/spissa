@@ -1,5 +1,5 @@
 use crate::{Result, RuntimeError, Tensor};
-use rllm_container::{ChunkMeta, GlobalMetadata, RllmReader, TensorMeta};
+use rllm_container::{ChunkMeta, ChunkRangeMeta, GlobalMetadata, RllmReader, TensorMeta};
 use rtc_codec::{DecodeMeta, HuffmanCodec, RawCodec, RleCodec, TensorCodec};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -149,6 +149,82 @@ pub(crate) fn verify_original_chunk_checksum(chunk: &ChunkMeta, decoded: &[u8]) 
     Ok(())
 }
 
+#[allow(dead_code)]
+// Phase 7.8C foundation: used by tests now, production routing starts after
+// pack-time tile/block alignment gives every partial read an integrity record.
+pub(crate) fn chunk_range_for_original_bytes(
+    chunk: &ChunkMeta,
+    byte_offset: u64,
+    byte_len: u64,
+) -> Result<&ChunkRangeMeta> {
+    let end = byte_offset.checked_add(byte_len).ok_or_else(|| {
+        RuntimeError::InvalidTensorData(format!(
+            "chunk {} range [{byte_offset}, +{byte_len}) overflows",
+            chunk.chunk_id
+        ))
+    })?;
+    chunk
+        .range_checksums
+        .iter()
+        .find(|range| range.original_offset == byte_offset && range.original_size == byte_len)
+        .ok_or_else(|| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} has no checksum metadata for original byte range [{byte_offset}, {end})",
+                chunk.chunk_id
+            ))
+        })
+}
+
+#[allow(dead_code)]
+// Phase 7.8C foundation: used by tests now, production routing starts after
+// pack-time tile/block alignment gives every partial read an integrity record.
+pub(crate) fn verify_original_chunk_range_checksum(
+    range: &ChunkRangeMeta,
+    decoded_range: &[u8],
+) -> Result<()> {
+    if decoded_range.len() as u64 != range.original_size {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "chunk range {} decoded len {} does not match metadata {}",
+            range.range_id,
+            decoded_range.len(),
+            range.original_size
+        )));
+    }
+    let computed = Sha256::digest(decoded_range);
+    if computed.as_slice() != range.sha256_original {
+        return Err(RuntimeError::ChecksumMismatch(format!(
+            "decoded chunk range {} checksum mismatch",
+            range.range_id
+        )));
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+// Phase 7.8C foundation: used by tests now, production routing starts after
+// pack-time tile/block alignment gives every partial read an integrity record.
+pub(crate) fn verify_compressed_chunk_range_checksum(
+    range: &ChunkRangeMeta,
+    compressed_range: &[u8],
+) -> Result<()> {
+    if compressed_range.len() as u64 != range.compressed_size {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "chunk range {} compressed len {} does not match metadata {}",
+            range.range_id,
+            compressed_range.len(),
+            range.compressed_size
+        )));
+    }
+    let computed = Sha256::digest(compressed_range);
+    if computed.as_slice() != range.sha256_compressed {
+        return Err(RuntimeError::ChecksumMismatch(format!(
+            "compressed chunk range {} checksum mismatch",
+            range.range_id
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn verify_tensor_checksum(tensor_meta: &TensorMeta, decoded: &[u8]) -> Result<()> {
     let computed = Sha256::digest(decoded);
     if computed.as_slice() != tensor_meta.original_sha256 {
@@ -254,6 +330,52 @@ mod tests {
         let tensor = model.get("ids").unwrap();
         assert_eq!(tensor.data.len(), 128);
         assert!(tensor.data.iter().all(|&v| v == 7.0));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn verifies_chunk_range_checksum_metadata() {
+        let path = temp_path("range-checksums");
+        let data: Vec<u8> = (0..12).collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "ids".to_string(),
+            shape: vec![12],
+            dtype: DType::U8,
+            original_size_bytes: data.len() as u64,
+            compressed_size_bytes: data.len() as u64,
+            original_sha256: sha256_array(&data),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk_with_identity_range_checksums(0, "rtc-raw-v1", &data, &data, 0, 4)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut reader = RllmReader::open(&path).unwrap();
+        let chunk = reader.list_chunks()[0].clone();
+        let range = chunk_range_for_original_bytes(&chunk, 4, 4).unwrap();
+        let compressed_range = reader
+            .read_chunk_range(
+                chunk.chunk_id,
+                range.compressed_offset,
+                range.compressed_size,
+            )
+            .unwrap();
+
+        verify_compressed_chunk_range_checksum(range, &compressed_range).unwrap();
+        verify_original_chunk_range_checksum(range, &data[4..8]).unwrap();
+        assert!(chunk_range_for_original_bytes(&chunk, 5, 4).is_err());
+
+        let mut corrupted = compressed_range.clone();
+        corrupted[0] ^= 0xFF;
+        assert!(matches!(
+            verify_compressed_chunk_range_checksum(range, &corrupted),
+            Err(RuntimeError::ChecksumMismatch(_))
+        ));
 
         std::fs::remove_file(&path).ok();
     }

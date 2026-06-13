@@ -4,12 +4,26 @@ use crate::{
     KvCache, LazyRllmModel, MemoryBudget, Result, RotaryEmbeddingConfig, RuntimeError,
 };
 use rllm_container::{ChunkMeta, TensorMeta};
+use std::time::{Duration, Instant};
+
+pub const DEFAULT_STREAMING_TILE_ELEMENTS: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingLinearConfig {
     pub batch: usize,
     pub in_features: usize,
     pub out_features: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StreamingTileLinearConfig {
+    pub linear: StreamingLinearConfig,
+    /// Maximum number of weight elements converted into f32 scratch at once.
+    ///
+    /// Current RTC codecs still decode one compressed chunk to original bytes;
+    /// Phase 7 starts by fusing f32 conversion and matmul accumulation over
+    /// bounded tiles instead of materializing a full f32 chunk.
+    pub tile_elements: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +77,150 @@ pub struct StreamingBlockConfig {
 #[derive(Debug, Default)]
 pub struct StreamingBlockRuntime<'a> {
     pub attention: StreamingAttentionRuntime<'a>,
+    /// GPT-NeoX/Pythia can use parallel residual blocks:
+    /// `x + attention(LN1(x)) + mlp(LN2(x))`.
+    ///
+    /// The default remains the older sequential pre-norm toy block:
+    /// `x + attention(LN1(x)) -> LN2(residual) -> + mlp(...)`.
+    pub parallel_residual: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamingBlockTiming {
+    pub attention_norm_ns: u64,
+    pub attention_ns: u64,
+    pub attention_qkv_projection_ns: u64,
+    pub attention_qkv_split_ns: u64,
+    pub attention_rotary_ns: u64,
+    pub attention_score_context_ns: u64,
+    pub attention_output_projection_ns: u64,
+    pub attention_kv_append_ns: u64,
+    pub attention_residual_ns: u64,
+    pub mlp_norm_ns: u64,
+    pub mlp_ns: u64,
+    pub mlp_input_projection_ns: u64,
+    pub mlp_activation_ns: u64,
+    pub mlp_output_projection_ns: u64,
+    pub mlp_residual_ns: u64,
+    pub attention_norm_calls: usize,
+    pub attention_calls: usize,
+    pub attention_qkv_projection_calls: usize,
+    pub attention_qkv_split_calls: usize,
+    pub attention_rotary_calls: usize,
+    pub attention_score_context_calls: usize,
+    pub attention_output_projection_calls: usize,
+    pub attention_kv_append_calls: usize,
+    pub attention_residual_calls: usize,
+    pub mlp_norm_calls: usize,
+    pub mlp_calls: usize,
+    pub mlp_input_projection_calls: usize,
+    pub mlp_activation_calls: usize,
+    pub mlp_output_projection_calls: usize,
+    pub mlp_residual_calls: usize,
+}
+
+impl StreamingBlockTiming {
+    fn record_attention_norm(&mut self, elapsed: Duration) {
+        self.attention_norm_ns = self
+            .attention_norm_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.attention_norm_calls = self.attention_norm_calls.saturating_add(1);
+    }
+
+    fn record_attention(&mut self, elapsed: Duration) {
+        self.attention_ns = self.attention_ns.saturating_add(elapsed_ns_u64(elapsed));
+        self.attention_calls = self.attention_calls.saturating_add(1);
+    }
+
+    fn record_attention_qkv_projection(&mut self, elapsed: Duration) {
+        self.attention_qkv_projection_ns = self
+            .attention_qkv_projection_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.attention_qkv_projection_calls = self.attention_qkv_projection_calls.saturating_add(1);
+    }
+
+    fn record_attention_qkv_split(&mut self, elapsed: Duration) {
+        self.attention_qkv_split_ns = self
+            .attention_qkv_split_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.attention_qkv_split_calls = self.attention_qkv_split_calls.saturating_add(1);
+    }
+
+    fn record_attention_rotary(&mut self, elapsed: Duration) {
+        self.attention_rotary_ns = self
+            .attention_rotary_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.attention_rotary_calls = self.attention_rotary_calls.saturating_add(1);
+    }
+
+    fn record_attention_score_context(&mut self, elapsed: Duration) {
+        self.attention_score_context_ns = self
+            .attention_score_context_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.attention_score_context_calls = self.attention_score_context_calls.saturating_add(1);
+    }
+
+    fn record_attention_output_projection(&mut self, elapsed: Duration) {
+        self.attention_output_projection_ns = self
+            .attention_output_projection_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.attention_output_projection_calls =
+            self.attention_output_projection_calls.saturating_add(1);
+    }
+
+    fn record_attention_kv_append(&mut self, elapsed: Duration) {
+        self.attention_kv_append_ns = self
+            .attention_kv_append_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.attention_kv_append_calls = self.attention_kv_append_calls.saturating_add(1);
+    }
+
+    fn record_attention_residual(&mut self, elapsed: Duration) {
+        self.attention_residual_ns = self
+            .attention_residual_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.attention_residual_calls = self.attention_residual_calls.saturating_add(1);
+    }
+
+    fn record_mlp_norm(&mut self, elapsed: Duration) {
+        self.mlp_norm_ns = self.mlp_norm_ns.saturating_add(elapsed_ns_u64(elapsed));
+        self.mlp_norm_calls = self.mlp_norm_calls.saturating_add(1);
+    }
+
+    fn record_mlp(&mut self, elapsed: Duration) {
+        self.mlp_ns = self.mlp_ns.saturating_add(elapsed_ns_u64(elapsed));
+        self.mlp_calls = self.mlp_calls.saturating_add(1);
+    }
+
+    fn record_mlp_input_projection(&mut self, elapsed: Duration) {
+        self.mlp_input_projection_ns = self
+            .mlp_input_projection_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.mlp_input_projection_calls = self.mlp_input_projection_calls.saturating_add(1);
+    }
+
+    fn record_mlp_activation(&mut self, elapsed: Duration) {
+        self.mlp_activation_ns = self
+            .mlp_activation_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.mlp_activation_calls = self.mlp_activation_calls.saturating_add(1);
+    }
+
+    fn record_mlp_output_projection(&mut self, elapsed: Duration) {
+        self.mlp_output_projection_ns = self
+            .mlp_output_projection_ns
+            .saturating_add(elapsed_ns_u64(elapsed));
+        self.mlp_output_projection_calls = self.mlp_output_projection_calls.saturating_add(1);
+    }
+
+    fn record_mlp_residual(&mut self, elapsed: Duration) {
+        self.mlp_residual_ns = self.mlp_residual_ns.saturating_add(elapsed_ns_u64(elapsed));
+        self.mlp_residual_calls = self.mlp_residual_calls.saturating_add(1);
+    }
+}
+
+fn elapsed_ns_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 impl StreamingBlockConfig {
@@ -222,12 +380,175 @@ pub fn streaming_linear_from_model(
     Ok(output)
 }
 
+/// Phase 7 fused tile variant of `streaming_linear_from_model`.
+///
+/// Computes the same PyTorch-style linear layer but converts only
+/// `tile_elements` weight values into f32 scratch at a time before immediately
+/// accumulating them into the output. Current RTC codecs still require decoding
+/// one compressed chunk to original bytes first; this removes the separate
+/// full-f32-chunk scratch window and is the first verified step toward true
+/// fused decode+matmul.
+pub fn streaming_tile_linear_from_model(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    bias: Option<&[f32]>,
+    config: StreamingTileLinearConfig,
+    budget: &mut MemoryBudget,
+) -> Result<Vec<f32>> {
+    validate_tile_linear_config(config)?;
+    validate_linear_shapes(input, bias, config.linear)?;
+    let tensor = model.tensor(weight_name)?.clone();
+    validate_weight_tensor(&tensor, config.linear)?;
+
+    let chunks: Vec<ChunkMeta> = model.chunks_for_tensor(tensor.tensor_id).to_vec();
+    if chunks.is_empty() {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} has no chunks"
+        )));
+    }
+
+    let mut output = vec![0.0f32; config.linear.batch * config.linear.out_features];
+    if let Some(bias) = bias {
+        for batch_idx in 0..config.linear.batch {
+            let row_start = batch_idx * config.linear.out_features;
+            output[row_start..row_start + config.linear.out_features].copy_from_slice(bias);
+        }
+    }
+
+    let dtype_size = tensor.dtype.size_bytes();
+    let mut byte_offset = 0usize;
+    for chunk in chunks {
+        if byte_offset % dtype_size != 0 {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
+            )));
+        }
+        let element_start = byte_offset / dtype_size;
+        let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} uncompressed size does not fit usize",
+                chunk.chunk_id
+            ))
+        })?;
+
+        model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
+            if bytes.len() != expected_chunk_bytes {
+                return Err(RuntimeError::InvalidTensorData(format!(
+                    "chunk {} decoded byte len {} does not match metadata {}",
+                    chunk.chunk_id,
+                    bytes.len(),
+                    expected_chunk_bytes
+                )));
+            }
+            if bytes.len() % dtype_size != 0 {
+                return Err(RuntimeError::InvalidTensorData(format!(
+                    "chunk {} byte len {} is not aligned to dtype size {}",
+                    chunk.chunk_id,
+                    bytes.len(),
+                    dtype_size
+                )));
+            }
+
+            let elements_in_chunk = bytes.len() / dtype_size;
+            let mut local_element_start = 0usize;
+            while local_element_start < elements_in_chunk {
+                let tile_len = config
+                    .tile_elements
+                    .min(elements_in_chunk - local_element_start);
+                let tile_byte_start = local_element_start
+                    .checked_mul(dtype_size)
+                    .ok_or_else(|| RuntimeError::Shape("tile byte start overflow".to_string()))?;
+                let tile_byte_len = tile_len
+                    .checked_mul(dtype_size)
+                    .ok_or_else(|| RuntimeError::Shape("tile byte len overflow".to_string()))?;
+                let tile_byte_end = tile_byte_start
+                    .checked_add(tile_byte_len)
+                    .ok_or_else(|| RuntimeError::Shape("tile byte end overflow".to_string()))?;
+                let scratch_bytes = tile_len
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| RuntimeError::Shape("tile f32 scratch overflow".to_string()))?;
+                let scratch_label = format!(
+                    "streaming fused tile f32 scratch chunk {} elements {}..{}",
+                    chunk.chunk_id,
+                    local_element_start,
+                    local_element_start + tile_len
+                );
+
+                budget.reserve(scratch_bytes, scratch_label.clone())?;
+                let weights =
+                    match decode_to_f32(tensor.dtype, &bytes[tile_byte_start..tile_byte_end]) {
+                        Ok(values) => values,
+                        Err(err) => {
+                            budget.release(scratch_bytes, scratch_label)?;
+                            return Err(err);
+                        }
+                    };
+                let result = accumulate_weight_chunk(
+                    input,
+                    &mut output,
+                    &weights,
+                    element_start + local_element_start,
+                    config.linear,
+                    weight_name,
+                );
+                drop(weights);
+                budget.release(scratch_bytes, scratch_label)?;
+                result?;
+                local_element_start += tile_len;
+            }
+            Ok(())
+        })?;
+
+        byte_offset = byte_offset
+            .checked_add(expected_chunk_bytes)
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData("chunk byte offset overflow".to_string())
+            })?;
+    }
+
+    let expected_weight_bytes = config
+        .linear
+        .out_features
+        .checked_mul(config.linear.in_features)
+        .and_then(|elements| elements.checked_mul(dtype_size))
+        .ok_or_else(|| RuntimeError::Shape("weight byte size overflow".to_string()))?;
+    if byte_offset != expected_weight_bytes {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} streamed {byte_offset} bytes, expected {expected_weight_bytes}"
+        )));
+    }
+
+    Ok(output)
+}
+
+fn streaming_default_tile_linear_from_model(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    bias: Option<&[f32]>,
+    config: StreamingLinearConfig,
+    budget: &mut MemoryBudget,
+) -> Result<Vec<f32>> {
+    streaming_tile_linear_from_model(
+        model,
+        weight_name,
+        input,
+        bias,
+        StreamingTileLinearConfig {
+            linear: config,
+            tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+        },
+        budget,
+    )
+}
+
 /// Low-RAM two-layer MLP block over chunked `.rllm` weight tensors.
 ///
 /// Computes `Linear(input, w_in, b_in) -> GELU -> Linear(hidden, w_out, b_out)`.
 /// The intermediate activation is reserved in `budget` for the duration of the
 /// second linear pass, while each weight chunk is still decoded/released one at
-/// a time by `streaming_linear_from_model`.
+/// a time through the default Phase 7 tiled linear path.
 pub fn streaming_mlp_from_model(
     model: &mut LazyRllmModel,
     input: &[f32],
@@ -237,6 +558,22 @@ pub fn streaming_mlp_from_model(
     b_out: Option<&[f32]>,
     config: StreamingMlpConfig,
     budget: &mut MemoryBudget,
+) -> Result<Vec<f32>> {
+    streaming_mlp_with_timing_from_model(
+        model, input, w_in_name, b_in, w_out_name, b_out, config, budget, None,
+    )
+}
+
+fn streaming_mlp_with_timing_from_model(
+    model: &mut LazyRllmModel,
+    input: &[f32],
+    w_in_name: &str,
+    b_in: Option<&[f32]>,
+    w_out_name: &str,
+    b_out: Option<&[f32]>,
+    config: StreamingMlpConfig,
+    budget: &mut MemoryBudget,
+    mut timing: Option<&mut StreamingBlockTiming>,
 ) -> Result<Vec<f32>> {
     validate_mlp_shapes(input, b_in, b_out, config)?;
 
@@ -248,7 +585,8 @@ pub fn streaming_mlp_from_model(
     let intermediate_label = "streaming MLP intermediate activation".to_string();
     budget.reserve(intermediate_bytes, intermediate_label.clone())?;
 
-    let mut hidden = match streaming_linear_from_model(
+    let input_projection_started = Instant::now();
+    let mut hidden = match streaming_default_tile_linear_from_model(
         model,
         w_in_name,
         input,
@@ -266,10 +604,18 @@ pub fn streaming_mlp_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_mlp_input_projection(input_projection_started.elapsed());
+    }
 
+    let activation_started = Instant::now();
     crate::ops::gelu_inplace(&mut hidden);
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_mlp_activation(activation_started.elapsed());
+    }
 
-    let output = match streaming_linear_from_model(
+    let output_projection_started = Instant::now();
+    let output = match streaming_default_tile_linear_from_model(
         model,
         w_out_name,
         &hidden,
@@ -287,6 +633,9 @@ pub fn streaming_mlp_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_mlp_output_projection(output_projection_started.elapsed());
+    }
 
     drop(hidden);
     budget.release(intermediate_bytes, intermediate_label)?;
@@ -296,9 +645,9 @@ pub fn streaming_mlp_from_model(
 /// Low-RAM attention sub-block over chunked `.rllm` QKV and output weights.
 ///
 /// This implements the non-rotary toy baseline used by Phase 5 tests:
-/// `streaming QKV linear -> split Q/K/V -> scaled dot-product attention ->
-/// streaming output projection`. Real GPT-NeoX rotary embeddings are still a
-/// later block-level concern.
+/// `tiled QKV linear -> split Q/K/V -> scaled dot-product attention ->
+/// tiled output projection`. Real GPT-NeoX rotary embeddings are layered on
+/// through `StreamingAttentionRuntime`.
 pub fn streaming_attention_from_model(
     model: &mut LazyRllmModel,
     input: &[f32],
@@ -330,8 +679,34 @@ pub fn streaming_attention_with_runtime_from_model(
     out_weight_name: &str,
     out_bias: Option<&[f32]>,
     config: StreamingAttentionConfig,
+    runtime: StreamingAttentionRuntime<'_>,
+    budget: &mut MemoryBudget,
+) -> Result<Vec<f32>> {
+    streaming_attention_with_runtime_and_timing_from_model(
+        model,
+        input,
+        qkv_weight_name,
+        qkv_bias,
+        out_weight_name,
+        out_bias,
+        config,
+        runtime,
+        budget,
+        None,
+    )
+}
+
+fn streaming_attention_with_runtime_and_timing_from_model(
+    model: &mut LazyRllmModel,
+    input: &[f32],
+    qkv_weight_name: &str,
+    qkv_bias: Option<&[f32]>,
+    out_weight_name: &str,
+    out_bias: Option<&[f32]>,
+    config: StreamingAttentionConfig,
     mut runtime: StreamingAttentionRuntime<'_>,
     budget: &mut MemoryBudget,
+    mut timing: Option<&mut StreamingBlockTiming>,
 ) -> Result<Vec<f32>> {
     validate_attention_shapes(input, qkv_bias, out_bias, config)?;
     let hidden_size = config.hidden_size()?;
@@ -343,7 +718,8 @@ pub fn streaming_attention_with_runtime_from_model(
     let qkv_label = "streaming attention fused QKV activation".to_string();
     budget.reserve(qkv_bytes, qkv_label.clone())?;
 
-    let fused_qkv = match streaming_linear_from_model(
+    let qkv_projection_started = Instant::now();
+    let fused_qkv = match streaming_default_tile_linear_from_model(
         model,
         qkv_weight_name,
         input,
@@ -361,12 +737,16 @@ pub fn streaming_attention_with_runtime_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_attention_qkv_projection(qkv_projection_started.elapsed());
+    }
 
     let split_label = "streaming attention split QKV activation".to_string();
     if let Err(err) = budget.reserve(qkv_bytes, split_label.clone()) {
         budget.release(qkv_bytes, qkv_label)?;
         return Err(err);
     }
+    let qkv_split_started = Instant::now();
     let (mut q, mut k, v) = match split_fused_qkv(&fused_qkv, config) {
         Ok(split) => split,
         Err(err) => {
@@ -375,13 +755,20 @@ pub fn streaming_attention_with_runtime_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_attention_qkv_split(qkv_split_started.elapsed());
+    }
     drop(fused_qkv);
     budget.release(qkv_bytes, qkv_label)?;
 
     if let Some(rotary) = runtime.rotary {
+        let rotary_started = Instant::now();
         if let Err(err) = apply_gpt_neox_rotary_inplace(&mut q, &mut k, rotary) {
             budget.release(qkv_bytes, split_label)?;
             return Err(err);
+        }
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.record_attention_rotary(rotary_started.elapsed());
         }
     }
 
@@ -398,6 +785,7 @@ pub fn streaming_attention_with_runtime_from_model(
         return Err(err);
     }
     let cache_view = runtime.kv_cache.as_ref().map(|cache| &**cache);
+    let score_context_started = Instant::now();
     let attended = match scaled_dot_product_attention_with_cache(
         &q,
         &k,
@@ -417,11 +805,15 @@ pub fn streaming_attention_with_runtime_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_attention_score_context(score_context_started.elapsed());
+    }
     if !cache_is_active {
         budget.release(qkv_bytes, split_label.clone())?;
     }
 
-    let output = match streaming_linear_from_model(
+    let output_projection_started = Instant::now();
+    let output = match streaming_default_tile_linear_from_model(
         model,
         out_weight_name,
         &attended,
@@ -442,12 +834,19 @@ pub fn streaming_attention_with_runtime_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_attention_output_projection(output_projection_started.elapsed());
+    }
 
     if let Some(cache) = runtime.kv_cache.as_deref_mut() {
+        let kv_append_started = Instant::now();
         if let Err(err) = cache.append(&k, &v, config.seq_len) {
             budget.release(attention_bytes, attention_label)?;
             budget.release(qkv_bytes, split_label)?;
             return Err(err);
+        }
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.record_attention_kv_append(kv_append_started.elapsed());
         }
         budget.release(qkv_bytes, split_label)?;
     }
@@ -492,6 +891,21 @@ pub fn streaming_transformer_block_with_runtime_from_model(
     runtime: StreamingBlockRuntime<'_>,
     budget: &mut MemoryBudget,
 ) -> Result<Vec<f32>> {
+    streaming_transformer_block_with_runtime_and_timing_from_model(
+        model, input, names, params, config, runtime, budget, None,
+    )
+}
+
+pub fn streaming_transformer_block_with_runtime_and_timing_from_model(
+    model: &mut LazyRllmModel,
+    input: &[f32],
+    names: StreamingBlockTensorNames<'_>,
+    params: StreamingBlockParameters<'_>,
+    config: StreamingBlockConfig,
+    runtime: StreamingBlockRuntime<'_>,
+    budget: &mut MemoryBudget,
+    mut timing: Option<&mut StreamingBlockTiming>,
+) -> Result<Vec<f32>> {
     validate_block_shapes(input, params, config)?;
     let hidden_size = config.hidden_size()?;
     let hidden_bytes = activation_bytes(
@@ -504,6 +918,7 @@ pub fn streaming_transformer_block_with_runtime_from_model(
 
     let attention_input_label = "streaming block input layernorm activation".to_string();
     budget.reserve(hidden_bytes, attention_input_label.clone())?;
+    let attention_norm_started = Instant::now();
     let attention_input = match crate::ops::layer_norm(
         input,
         params.input_layernorm_weight,
@@ -518,13 +933,17 @@ pub fn streaming_transformer_block_with_runtime_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_attention_norm(attention_norm_started.elapsed());
+    }
 
     let attention_output_label = "streaming block attention output activation".to_string();
     if let Err(err) = budget.reserve(hidden_bytes, attention_output_label.clone()) {
         budget.release(hidden_bytes, attention_input_label)?;
         return Err(err);
     }
-    let attention_output = match streaming_attention_with_runtime_from_model(
+    let attention_started = Instant::now();
+    let attention_output = match streaming_attention_with_runtime_and_timing_from_model(
         model,
         &attention_input,
         names.qkv_weight,
@@ -534,6 +953,7 @@ pub fn streaming_transformer_block_with_runtime_from_model(
         config.attention_config(),
         runtime.attention,
         budget,
+        timing.as_deref_mut(),
     ) {
         Ok(values) => values,
         Err(err) => {
@@ -542,6 +962,10 @@ pub fn streaming_transformer_block_with_runtime_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_attention(attention_started.elapsed());
+    }
+    let attention_residual_started = Instant::now();
     drop(attention_input);
     budget.release(hidden_bytes, attention_input_label)?;
     if let Err(err) = crate::ops::add_inplace(&mut residual, &attention_output) {
@@ -550,11 +974,20 @@ pub fn streaming_transformer_block_with_runtime_from_model(
     }
     drop(attention_output);
     budget.release(hidden_bytes, attention_output_label)?;
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_attention_residual(attention_residual_started.elapsed());
+    }
 
     let mlp_input_label = "streaming block post-attention layernorm activation".to_string();
     budget.reserve(hidden_bytes, mlp_input_label.clone())?;
+    let mlp_input_source = if runtime.parallel_residual {
+        input
+    } else {
+        residual.as_slice()
+    };
+    let mlp_norm_started = Instant::now();
     let mlp_input = match crate::ops::layer_norm(
-        &residual,
+        mlp_input_source,
         params.post_attention_layernorm_weight,
         params.post_attention_layernorm_bias,
         config.seq_len,
@@ -567,13 +1000,17 @@ pub fn streaming_transformer_block_with_runtime_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_mlp_norm(mlp_norm_started.elapsed());
+    }
 
     let mlp_output_label = "streaming block MLP output activation".to_string();
     if let Err(err) = budget.reserve(hidden_bytes, mlp_output_label.clone()) {
         budget.release(hidden_bytes, mlp_input_label)?;
         return Err(err);
     }
-    let mlp_output = match streaming_mlp_from_model(
+    let mlp_started = Instant::now();
+    let mlp_output = match streaming_mlp_with_timing_from_model(
         model,
         &mlp_input,
         names.mlp_in_weight,
@@ -582,6 +1019,7 @@ pub fn streaming_transformer_block_with_runtime_from_model(
         params.mlp_out_bias,
         config.mlp_config()?,
         budget,
+        timing.as_deref_mut(),
     ) {
         Ok(values) => values,
         Err(err) => {
@@ -590,6 +1028,10 @@ pub fn streaming_transformer_block_with_runtime_from_model(
             return Err(err);
         }
     };
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_mlp(mlp_started.elapsed());
+    }
+    let mlp_residual_started = Instant::now();
     drop(mlp_input);
     budget.release(hidden_bytes, mlp_input_label)?;
     if let Err(err) = crate::ops::add_inplace(&mut residual, &mlp_output) {
@@ -598,6 +1040,9 @@ pub fn streaming_transformer_block_with_runtime_from_model(
     }
     drop(mlp_output);
     budget.release(hidden_bytes, mlp_output_label)?;
+    if let Some(timing) = timing.as_deref_mut() {
+        timing.record_mlp_residual(mlp_residual_started.elapsed());
+    }
 
     Ok(residual)
 }
@@ -766,12 +1211,18 @@ fn split_fused_qkv(
     for pos in 0..config.seq_len {
         let fused_row = pos * hidden_size * 3;
         let out_row = pos * hidden_size;
-        q[out_row..out_row + hidden_size]
-            .copy_from_slice(&fused[fused_row..fused_row + hidden_size]);
-        k[out_row..out_row + hidden_size]
-            .copy_from_slice(&fused[fused_row + hidden_size..fused_row + 2 * hidden_size]);
-        v[out_row..out_row + hidden_size]
-            .copy_from_slice(&fused[fused_row + 2 * hidden_size..fused_row + 3 * hidden_size]);
+        for head in 0..config.num_heads {
+            let fused_head = fused_row + head * config.head_dim * 3;
+            let out_head = out_row + head * config.head_dim;
+            q[out_head..out_head + config.head_dim]
+                .copy_from_slice(&fused[fused_head..fused_head + config.head_dim]);
+            k[out_head..out_head + config.head_dim].copy_from_slice(
+                &fused[fused_head + config.head_dim..fused_head + 2 * config.head_dim],
+            );
+            v[out_head..out_head + config.head_dim].copy_from_slice(
+                &fused[fused_head + 2 * config.head_dim..fused_head + 3 * config.head_dim],
+            );
+        }
     }
     Ok((q, k, v))
 }
@@ -841,6 +1292,15 @@ fn validate_linear_shapes(
     Ok(())
 }
 
+fn validate_tile_linear_config(config: StreamingTileLinearConfig) -> Result<()> {
+    if config.tile_elements == 0 {
+        return Err(RuntimeError::Shape(
+            "tile_elements must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_weight_tensor(tensor: &TensorMeta, config: StreamingLinearConfig) -> Result<()> {
     if tensor.shape.len() != 2 {
         return Err(RuntimeError::Shape(format!(
@@ -886,20 +1346,64 @@ fn accumulate_weight_chunk(
         .checked_mul(config.in_features)
         .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
 
-    for (local_idx, &weight) in weights.iter().enumerate() {
-        let global_idx = element_start + local_idx;
-        if global_idx >= weight_elements {
-            return Err(RuntimeError::InvalidTensorData(format!(
-                "weight tensor {weight_name} chunk element {global_idx} exceeds expected {weight_elements}"
-            )));
-        }
+    let element_end = element_start
+        .checked_add(weights.len())
+        .ok_or_else(|| RuntimeError::Shape("weight chunk element range overflow".to_string()))?;
+    if element_end > weight_elements {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} chunk elements {element_start}..{element_end} exceed expected {weight_elements}"
+        )));
+    }
+
+    let mut local_idx = 0usize;
+    let mut global_idx = element_start;
+    while local_idx < weights.len() {
         let out_feature = global_idx / config.in_features;
         let in_feature = global_idx % config.in_features;
-        for batch_idx in 0..config.batch {
-            let input_idx = batch_idx * config.in_features + in_feature;
-            let output_idx = batch_idx * config.out_features + out_feature;
-            output[output_idx] += input[input_idx] * weight;
+        let row_len = (config.in_features - in_feature).min(weights.len() - local_idx);
+        let weight_row = &weights[local_idx..local_idx + row_len];
+
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= config.batch {
+            let output_idx0 = batch_idx * config.out_features + out_feature;
+            let output_idx1 = (batch_idx + 1) * config.out_features + out_feature;
+            let output_idx2 = (batch_idx + 2) * config.out_features + out_feature;
+            let output_idx3 = (batch_idx + 3) * config.out_features + out_feature;
+            let mut acc0 = output[output_idx0];
+            let mut acc1 = output[output_idx1];
+            let mut acc2 = output[output_idx2];
+            let mut acc3 = output[output_idx3];
+            let input_start0 = batch_idx * config.in_features + in_feature;
+            let input_start1 = (batch_idx + 1) * config.in_features + in_feature;
+            let input_start2 = (batch_idx + 2) * config.in_features + in_feature;
+            let input_start3 = (batch_idx + 3) * config.in_features + in_feature;
+            for idx in 0..row_len {
+                let weight = weight_row[idx];
+                acc0 += input[input_start0 + idx] * weight;
+                acc1 += input[input_start1 + idx] * weight;
+                acc2 += input[input_start2 + idx] * weight;
+                acc3 += input[input_start3 + idx] * weight;
+            }
+            output[output_idx0] = acc0;
+            output[output_idx1] = acc1;
+            output[output_idx2] = acc2;
+            output[output_idx3] = acc3;
+            batch_idx += 4;
         }
+        while batch_idx < config.batch {
+            let input_start = batch_idx * config.in_features + in_feature;
+            let input_row = &input[input_start..input_start + row_len];
+            let output_idx = batch_idx * config.out_features + out_feature;
+            let mut acc = output[output_idx];
+            for idx in 0..row_len {
+                acc += input_row[idx] * weight_row[idx];
+            }
+            output[output_idx] = acc;
+            batch_idx += 1;
+        }
+
+        local_idx += row_len;
+        global_idx += row_len;
     }
     Ok(())
 }
@@ -909,6 +1413,7 @@ mod tests {
     use super::*;
     use crate::linear;
     use rllm_container::{DType, GlobalMetadata, RllmWriter, TensorMeta};
+    use rtc_codec::{EncodeMeta, RleCodec, TensorCodec};
     use sha2::{Digest, Sha256};
 
     fn sha256_array(bytes: &[u8]) -> [u8; 32] {
@@ -950,6 +1455,55 @@ mod tests {
         writer
             .write_chunk(0, "rtc-raw-v1", &weight[16..], &weight[16..], 1)
             .unwrap();
+        writer.finalize().unwrap();
+    }
+
+    fn add_rle_zero_tensor(
+        writer: &mut RllmWriter,
+        tensor_id: u64,
+        name: &str,
+        out_features: usize,
+        in_features: usize,
+    ) {
+        let values = vec![0.0f32; out_features * in_features];
+        let bytes = f32_bytes(&values);
+        let encoded = RleCodec
+            .encode(
+                &bytes,
+                &EncodeMeta {
+                    name: name.to_string(),
+                    shape: vec![out_features as u64, in_features as u64],
+                    dtype: "F32".to_string(),
+                },
+            )
+            .unwrap();
+        assert!(encoded.data.len() < bytes.len() / 8);
+
+        writer.add_tensor(TensorMeta {
+            tensor_id,
+            name: name.to_string(),
+            shape: vec![out_features as u64, in_features as u64],
+            dtype: DType::Fp32,
+            original_size_bytes: bytes.len() as u64,
+            compressed_size_bytes: encoded.data.len() as u64,
+            original_sha256: sha256_array(&bytes),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(tensor_id, "rtc-rle-v1", &encoded.data, &bytes, 0)
+            .unwrap();
+    }
+
+    fn write_rle_zero_weight(path: &std::path::Path, out_features: usize, in_features: usize) {
+        let mut writer = RllmWriter::new(path, GlobalMetadata::new_test()).unwrap();
+        add_rle_zero_tensor(
+            &mut writer,
+            0,
+            "linear.zero.weight",
+            out_features,
+            in_features,
+        );
         writer.finalize().unwrap();
     }
 
@@ -997,6 +1551,44 @@ mod tests {
     }
 
     #[test]
+    fn streaming_linear_matches_full_decode_with_four_batch_fast_path_and_tail() {
+        let path = temp_path("linear-batch-fast-path-tail");
+        write_chunked_weight(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input: Vec<f32> = (0..15).map(|idx| idx as f32 * 0.25 - 1.0).collect(); // [batch=5, in=3]
+        let bias = vec![1.0, -1.0];
+        let expected = linear(
+            &input,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            Some(&bias),
+            5,
+            3,
+            2,
+        )
+        .unwrap();
+        let mut budget = MemoryBudget::new(512);
+
+        let actual = streaming_linear_from_model(
+            &mut model,
+            "linear.weight",
+            &input,
+            Some(&bias),
+            StreamingLinearConfig {
+                batch: 5,
+                in_features: 3,
+                out_features: 2,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn streaming_linear_rejects_too_small_transient_budget_without_leaking() {
         let path = temp_path("budget");
         write_chunked_weight(&path);
@@ -1013,6 +1605,94 @@ mod tests {
                 batch: 1,
                 in_features: 3,
                 out_features: 2,
+            },
+            &mut budget,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, RuntimeError::MemoryBudgetExceeded { .. }));
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_matches_full_decode_with_smaller_scratch_budget() {
+        let path = temp_path("tile-linear");
+        write_rle_zero_weight(&path, 32, 32);
+        let mut standard_model = LazyRllmModel::open(&path).unwrap();
+        let mut tile_model = LazyRllmModel::open(&path).unwrap();
+        let input: Vec<f32> = (0..64).map(|idx| (idx as f32) * 0.01 - 0.25).collect();
+        let bias: Vec<f32> = (0..32).map(|idx| idx as f32 * 0.125).collect();
+        let config = StreamingLinearConfig {
+            batch: 2,
+            in_features: 32,
+            out_features: 32,
+        };
+
+        let mut standard_budget = MemoryBudget::new(5_000);
+        let standard_err = streaming_linear_from_model(
+            &mut standard_model,
+            "linear.zero.weight",
+            &input,
+            Some(&bias),
+            config,
+            &mut standard_budget,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            standard_err,
+            RuntimeError::MemoryBudgetExceeded { .. }
+        ));
+        assert_eq!(standard_budget.current_bytes(), 0);
+
+        let mut tile_budget = MemoryBudget::new(5_000);
+        let actual = streaming_tile_linear_from_model(
+            &mut tile_model,
+            "linear.zero.weight",
+            &input,
+            Some(&bias),
+            StreamingTileLinearConfig {
+                linear: config,
+                tile_elements: 16,
+            },
+            &mut tile_budget,
+        )
+        .unwrap();
+
+        let expected = linear(&input, &vec![0.0; 32 * 32], Some(&bias), 2, 32, 32).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(tile_budget.current_bytes(), 0);
+        assert!(
+            tile_budget.peak_bytes() < 5_000,
+            "peak was {}",
+            tile_budget.peak_bytes()
+        );
+        assert!(standard_budget.peak_bytes() < 5_000);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_rejects_too_small_tile_scratch_without_leaking() {
+        let path = temp_path("tile-linear-budget");
+        write_rle_zero_weight(&path, 32, 32);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 32];
+        let mut budget = MemoryBudget::new(4_140);
+
+        let err = streaming_tile_linear_from_model(
+            &mut model,
+            "linear.zero.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 32,
+                    out_features: 32,
+                },
+                tile_elements: 16,
             },
             &mut budget,
         )
@@ -1085,6 +1765,25 @@ mod tests {
         writer.finalize().unwrap();
     }
 
+    fn write_rle_zero_mlp(path: &std::path::Path, hidden_size: usize, intermediate_size: usize) {
+        let mut writer = RllmWriter::new(path, GlobalMetadata::new_test()).unwrap();
+        add_rle_zero_tensor(
+            &mut writer,
+            0,
+            "mlp.zero.dense_h_to_4h.weight",
+            intermediate_size,
+            hidden_size,
+        );
+        add_rle_zero_tensor(
+            &mut writer,
+            1,
+            "mlp.zero.dense_4h_to_h.weight",
+            hidden_size,
+            intermediate_size,
+        );
+        writer.finalize().unwrap();
+    }
+
     fn assert_close_vec(actual: &[f32], expected: &[f32], eps: f32) {
         assert_eq!(actual.len(), expected.len());
         for (idx, (actual, expected)) in actual.iter().zip(expected).enumerate() {
@@ -1144,6 +1843,41 @@ mod tests {
     }
 
     #[test]
+    fn streaming_mlp_uses_tiled_linear_to_fit_below_full_chunk_scratch_budget() {
+        let path = temp_path("mlp-tiled-budget");
+        write_rle_zero_mlp(&path, 128, 128);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 128];
+        let mut budget = MemoryBudget::new(100_000);
+
+        let actual = streaming_mlp_from_model(
+            &mut model,
+            &input,
+            "mlp.zero.dense_h_to_4h.weight",
+            None,
+            "mlp.zero.dense_4h_to_h.weight",
+            None,
+            StreamingMlpConfig {
+                batch: 1,
+                hidden_size: 128,
+                intermediate_size: 128,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, vec![0.0; 128]);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(
+            budget.peak_bytes() < 100_000,
+            "peak was {}",
+            budget.peak_bytes()
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn streaming_mlp_rejects_too_small_intermediate_budget_without_leaking() {
         let path = temp_path("mlp-budget");
         write_chunked_mlp(&path);
@@ -1190,6 +1924,25 @@ mod tests {
             vec![2, 2],
             &[1.0, 0.5, -0.25, 1.0],
             8,
+        );
+        writer.finalize().unwrap();
+    }
+
+    fn write_rle_zero_attention(path: &std::path::Path, hidden_size: usize) {
+        let mut writer = RllmWriter::new(path, GlobalMetadata::new_test()).unwrap();
+        add_rle_zero_tensor(
+            &mut writer,
+            0,
+            "attention.zero.query_key_value.weight",
+            3 * hidden_size,
+            hidden_size,
+        );
+        add_rle_zero_tensor(
+            &mut writer,
+            1,
+            "attention.zero.dense.weight",
+            hidden_size,
+            hidden_size,
         );
         writer.finalize().unwrap();
     }
@@ -1248,13 +2001,37 @@ mod tests {
         for pos in 0..seq_len {
             let fused_row = pos * hidden * 3;
             let out_row = pos * hidden;
-            q[out_row..out_row + hidden].copy_from_slice(&fused[fused_row..fused_row + hidden]);
-            k[out_row..out_row + hidden]
-                .copy_from_slice(&fused[fused_row + hidden..fused_row + 2 * hidden]);
-            v[out_row..out_row + hidden]
-                .copy_from_slice(&fused[fused_row + 2 * hidden..fused_row + 3 * hidden]);
+            for head in 0..num_heads {
+                let fused_head = fused_row + head * head_dim * 3;
+                let out_head = out_row + head * head_dim;
+                q[out_head..out_head + head_dim]
+                    .copy_from_slice(&fused[fused_head..fused_head + head_dim]);
+                k[out_head..out_head + head_dim]
+                    .copy_from_slice(&fused[fused_head + head_dim..fused_head + 2 * head_dim]);
+                v[out_head..out_head + head_dim]
+                    .copy_from_slice(&fused[fused_head + 2 * head_dim..fused_head + 3 * head_dim]);
+            }
         }
         (q, k, v)
+    }
+
+    #[test]
+    fn split_fused_qkv_uses_gpt_neox_per_head_layout() {
+        let fused: Vec<f32> = (1..=24).map(|value| value as f32).collect();
+        let (q, k, v) = split_fused_qkv(
+            &fused,
+            StreamingAttentionConfig {
+                seq_len: 2,
+                num_heads: 2,
+                head_dim: 2,
+                causal: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(q, vec![1.0, 2.0, 7.0, 8.0, 13.0, 14.0, 19.0, 20.0]);
+        assert_eq!(k, vec![3.0, 4.0, 9.0, 10.0, 15.0, 16.0, 21.0, 22.0]);
+        assert_eq!(v, vec![5.0, 6.0, 11.0, 12.0, 17.0, 18.0, 23.0, 24.0]);
     }
 
     #[test]
@@ -1294,6 +2071,42 @@ mod tests {
         assert_eq!(budget.current_bytes(), 0);
         assert!(
             budget.peak_bytes() <= 128,
+            "peak was {}",
+            budget.peak_bytes()
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_attention_uses_tiled_linear_to_fit_below_full_chunk_scratch_budget() {
+        let path = temp_path("attention-tiled-budget");
+        write_rle_zero_attention(&path, 80);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 80];
+        let mut budget = MemoryBudget::new(112_000);
+
+        let actual = streaming_attention_from_model(
+            &mut model,
+            &input,
+            "attention.zero.query_key_value.weight",
+            None,
+            "attention.zero.dense.weight",
+            None,
+            StreamingAttentionConfig {
+                seq_len: 1,
+                num_heads: 1,
+                head_dim: 80,
+                causal: true,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, vec![0.0; 80]);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(
+            budget.peak_bytes() < 112_000,
             "peak was {}",
             budget.peak_bytes()
         );
@@ -1365,8 +2178,9 @@ mod tests {
         let mut cache = crate::KvCache::new(1, 4, 4).unwrap();
         cache.append(&k[..4], &v[..4], 1).unwrap();
         let mut budget = MemoryBudget::new(1024);
+        let mut timing = StreamingBlockTiming::default();
 
-        let actual = streaming_attention_with_runtime_from_model(
+        let actual = streaming_attention_with_runtime_and_timing_from_model(
             &mut model,
             &current_input,
             "attention.rotary_qkv.weight",
@@ -1391,6 +2205,7 @@ mod tests {
                 kv_cache: Some(&mut cache),
             },
             &mut budget,
+            Some(&mut timing),
         )
         .unwrap();
 
@@ -1399,6 +2214,18 @@ mod tests {
         assert_close_vec(cache.keys(), &k[..8], 1e-6);
         assert_close_vec(cache.values(), &v[..8], 1e-6);
         assert_eq!(budget.current_bytes(), 0);
+        assert_eq!(timing.attention_qkv_projection_calls, 1);
+        assert_eq!(timing.attention_qkv_split_calls, 1);
+        assert_eq!(timing.attention_rotary_calls, 1);
+        assert_eq!(timing.attention_score_context_calls, 1);
+        assert_eq!(timing.attention_output_projection_calls, 1);
+        assert_eq!(timing.attention_kv_append_calls, 1);
+        assert!(timing.attention_qkv_projection_ns > 0);
+        assert!(timing.attention_qkv_split_ns > 0);
+        assert!(timing.attention_rotary_ns > 0);
+        assert!(timing.attention_score_context_ns > 0);
+        assert!(timing.attention_output_projection_ns > 0);
+        assert!(timing.attention_kv_append_ns > 0);
 
         std::fs::remove_file(&path).ok();
     }
@@ -1440,7 +2267,7 @@ mod tests {
         writer.finalize().unwrap();
     }
 
-    fn full_decode_block_baseline(input: &[f32]) -> Vec<f32> {
+    fn full_decode_block_baseline(input: &[f32], parallel_residual: bool) -> Vec<f32> {
         let ln1_weight = [1.1, 0.9];
         let ln1_bias = [0.05, -0.05];
         let qkv_bias = [0.1, -0.2, 0.0, 0.3, -0.1, 0.2];
@@ -1470,7 +2297,13 @@ mod tests {
         let mut residual = input.to_vec();
         crate::add_inplace(&mut residual, &attention_out).unwrap();
 
-        let mlp_input = crate::layer_norm(&residual, &ln2_weight, &ln2_bias, 2, 2, 1e-5).unwrap();
+        let mlp_input_source = if parallel_residual {
+            input
+        } else {
+            residual.as_slice()
+        };
+        let mlp_input =
+            crate::layer_norm(mlp_input_source, &ln2_weight, &ln2_bias, 2, 2, 1e-5).unwrap();
         let mlp_out = crate::mlp(
             &mlp_input,
             &mlp_in_weight,
@@ -1523,7 +2356,7 @@ mod tests {
         write_chunked_block(&path);
         let mut model = LazyRllmModel::open(&path).unwrap();
         let input = vec![0.5, -1.0, 1.25, 0.75];
-        let expected = full_decode_block_baseline(&input);
+        let expected = full_decode_block_baseline(&input, false);
         let mut budget = MemoryBudget::new(512);
 
         let actual = streaming_transformer_block_from_model(
@@ -1550,6 +2383,99 @@ mod tests {
             "peak was {}",
             budget.peak_bytes()
         );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_transformer_block_supports_parallel_residual_baseline() {
+        let path = temp_path("block_parallel_residual");
+        write_chunked_block(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![0.5, -1.0, 1.25, 0.75];
+        let expected = full_decode_block_baseline(&input, true);
+        let mut budget = MemoryBudget::new(512);
+
+        let actual = streaming_transformer_block_with_runtime_from_model(
+            &mut model,
+            &input,
+            block_names_for_test(),
+            block_params_for_test(),
+            StreamingBlockConfig {
+                seq_len: 2,
+                num_heads: 1,
+                head_dim: 2,
+                intermediate_size: 3,
+                causal: true,
+                layer_norm_eps: 1e-5,
+            },
+            StreamingBlockRuntime {
+                attention: StreamingAttentionRuntime::default(),
+                parallel_residual: true,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_close_vec(&actual, &expected, 1e-5);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_transformer_block_timing_records_each_subphase_once() {
+        let path = temp_path("block-timing");
+        write_chunked_block(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![0.5, -1.0, 1.25, 0.75];
+        let expected = full_decode_block_baseline(&input, false);
+        let mut budget = MemoryBudget::new(512);
+        let mut timing = StreamingBlockTiming::default();
+
+        let actual = streaming_transformer_block_with_runtime_and_timing_from_model(
+            &mut model,
+            &input,
+            block_names_for_test(),
+            block_params_for_test(),
+            StreamingBlockConfig {
+                seq_len: 2,
+                num_heads: 1,
+                head_dim: 2,
+                intermediate_size: 3,
+                causal: true,
+                layer_norm_eps: 1e-5,
+            },
+            StreamingBlockRuntime::default(),
+            &mut budget,
+            Some(&mut timing),
+        )
+        .unwrap();
+
+        assert_close_vec(&actual, &expected, 1e-5);
+        assert_eq!(budget.current_bytes(), 0);
+        assert_eq!(timing.attention_norm_calls, 1);
+        assert_eq!(timing.attention_calls, 1);
+        assert_eq!(timing.attention_qkv_projection_calls, 1);
+        assert_eq!(timing.attention_qkv_split_calls, 1);
+        assert_eq!(timing.attention_score_context_calls, 1);
+        assert_eq!(timing.attention_output_projection_calls, 1);
+        assert_eq!(timing.attention_rotary_calls, 0);
+        assert_eq!(timing.attention_kv_append_calls, 0);
+        assert_eq!(timing.attention_residual_calls, 1);
+        assert_eq!(timing.mlp_norm_calls, 1);
+        assert_eq!(timing.mlp_calls, 1);
+        assert_eq!(timing.mlp_input_projection_calls, 1);
+        assert_eq!(timing.mlp_activation_calls, 1);
+        assert_eq!(timing.mlp_output_projection_calls, 1);
+        assert_eq!(timing.mlp_residual_calls, 1);
+        assert!(timing.attention_qkv_projection_ns > 0);
+        assert!(timing.attention_qkv_split_ns > 0);
+        assert!(timing.attention_score_context_ns > 0);
+        assert!(timing.attention_output_projection_ns > 0);
+        assert!(timing.mlp_input_projection_ns > 0);
+        assert!(timing.mlp_activation_ns > 0);
+        assert!(timing.mlp_output_projection_ns > 0);
 
         std::fs::remove_file(&path).ok();
     }

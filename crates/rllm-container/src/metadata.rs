@@ -67,6 +67,31 @@ pub struct TensorMeta {
     pub chunk_start_index: u64,
 }
 
+/// Integrity metadata for a byte range inside one chunk.
+///
+/// Range offsets are relative to the start of the chunk payload, not the whole
+/// tensor/file. `original_*` describes the decoded/original byte range;
+/// `compressed_*` describes the corresponding encoded byte range. For raw
+/// identity chunks these spans are identical. For future independently-compressed
+/// tile blocks they may differ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChunkRangeMeta {
+    /// Stable ordinal within the parent chunk.
+    pub range_id: u32,
+    /// Offset in decoded/original chunk bytes.
+    pub original_offset: u64,
+    /// Length in decoded/original chunk bytes.
+    pub original_size: u64,
+    /// Offset in compressed chunk bytes.
+    pub compressed_offset: u64,
+    /// Length in compressed chunk bytes.
+    pub compressed_size: u64,
+    /// SHA-256 hash of this decoded/original byte range.
+    pub sha256_original: [u8; 32],
+    /// SHA-256 hash of this compressed byte range.
+    pub sha256_compressed: [u8; 32],
+}
+
 /// Metadata for a single compressed chunk
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkMeta {
@@ -88,6 +113,9 @@ pub struct ChunkMeta {
     pub chunk_sha256_original: [u8; 32],
     /// SHA-256 hash of compressed chunk bytes
     pub chunk_sha256_compressed: [u8; 32],
+    /// Optional per-range integrity metadata for verified partial reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub range_checksums: Vec<ChunkRangeMeta>,
 }
 
 /// Architecture/config fields imported from an original model `config.json`.
@@ -116,6 +144,8 @@ pub struct ModelConfigMetadata {
     pub rotary_emb_base: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer_norm_eps: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_parallel_residual: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocab_size: Option<u64>,
 }
@@ -225,6 +255,39 @@ mod tests {
     }
 
     #[test]
+    fn test_chunk_meta_preserves_optional_range_checksums_and_reads_legacy_json() {
+        let legacy_json = r#"{
+            "chunk_id": 7,
+            "tensor_id": 3,
+            "chunk_offset_in_tensor": 0,
+            "uncompressed_size": 16,
+            "compressed_size": 16,
+            "file_offset": 44,
+            "codec_id": "rtc-raw-v1",
+            "chunk_sha256_original": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            "chunk_sha256_compressed": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        }"#;
+        let legacy: ChunkMeta = serde_json::from_str(legacy_json).unwrap();
+        assert!(legacy.range_checksums.is_empty());
+
+        let mut meta = legacy;
+        meta.range_checksums.push(ChunkRangeMeta {
+            range_id: 0,
+            original_offset: 4,
+            original_size: 4,
+            compressed_offset: 4,
+            compressed_size: 4,
+            sha256_original: [1u8; 32],
+            sha256_compressed: [2u8; 32],
+        });
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("range_checksums"));
+        let decoded: ChunkMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.range_checksums.len(), 1);
+        assert_eq!(decoded.range_checksums[0].original_offset, 4);
+    }
+
+    #[test]
     fn test_global_metadata_serialization() {
         let meta = GlobalMetadata::new_test();
         let json = serde_json::to_string(&meta).unwrap();
@@ -260,6 +323,7 @@ mod tests {
             rotary_pct: Some(0.25),
             rotary_emb_base: Some(10_000.0),
             layer_norm_eps: Some(1e-5),
+            use_parallel_residual: Some(true),
             vocab_size: Some(50_432),
         });
 
@@ -273,6 +337,7 @@ mod tests {
         );
         assert_eq!(decoded_config.num_attention_heads, Some(4));
         assert_eq!(decoded_config.rotary_pct, Some(0.25));
+        assert_eq!(decoded_config.use_parallel_residual, Some(true));
     }
 
     #[test]

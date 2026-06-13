@@ -5,7 +5,7 @@
 //! 2. A baseline for testing the codec framework
 //! 3. A reference implementation for the TensorCodec trait
 
-use crate::codec::{DecodeMeta, EncodeMeta, EncodedChunk, TensorCodec};
+use crate::codec::{DecodeMeta, DecodeRange, EncodeMeta, EncodedChunk, TensorCodec};
 use crate::error::{CodecError, Result};
 use crate::CODEC_RAW_V1;
 
@@ -46,6 +46,26 @@ impl TensorCodec for RawCodec {
             )));
         }
         Ok(encoded.to_vec())
+    }
+
+    fn supports_native_range_decode(&self) -> bool {
+        true
+    }
+
+    fn decode_range(
+        &self,
+        encoded: &[u8],
+        meta: &DecodeMeta,
+        range: DecodeRange,
+    ) -> Result<Vec<u8>> {
+        if encoded.len() as u64 != meta.uncompressed_size {
+            return Err(CodecError::InvalidData(format!(
+                "Size mismatch: encoded={} expected={}",
+                encoded.len(),
+                meta.uncompressed_size
+            )));
+        }
+        range.slice(encoded)
     }
 }
 
@@ -114,5 +134,21 @@ mod tests {
 
         let result = codec.decode(&data, &meta);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_raw_decode_range_slices_without_full_decode_contract() {
+        let codec = RawCodec::new();
+        let data = b"0123456789abcdef";
+        let meta = DecodeMeta {
+            codec_id: CODEC_RAW_V1.to_string(),
+            uncompressed_size: data.len() as u64,
+        };
+
+        assert!(codec.supports_native_range_decode());
+        let decoded = codec
+            .decode_range(data, &meta, DecodeRange::new(4, 6))
+            .unwrap();
+        assert_eq!(decoded, b"456789");
     }
 }

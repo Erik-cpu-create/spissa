@@ -408,7 +408,7 @@ The next slices should follow this order:
 1. Prefer RAMA public API names for new runtime and CLI code.
 2. Keep existing ECHO/ContextEcho runtime code working as compatibility aliases until a dedicated deprecation/removal decision.
 3. Phase 6: GPT-NeoX/Pythia layer-param decode path under RAMA terminology; keep only names + final params resident and decode/release active layer params per layer.
-4. Phase 7: tile decode / fused decode+matmul under RAMA memory laws.
+4. Phase 7: fused tile-linear first, tiled MLP/attention/RAMA/GPT-NeoX routing second, measured real Pythia release RSS benchmark matrix third, fixed-token HF/PyTorch logits comparison fourth, range-decode API/container foundation fifth, per-range checksum metadata sixth, opt-in raw/identity pack range metadata seventh, pack-time tile/block chunk alignment eighth, real Pythia tile-block RSS benchmark ninth, RAMA trace profiler tenth, embedding row recall eleventh, low-ram-fast raw/tile-block profile and verify-once integrity twelfth, then parallelize the remaining lm-head/`embed_out.weight` compute path based on measured trace evidence.
 5. Future ERIK: explicit episodic recall/cache policy only after baseline RAMA layer/tile runtime is correct.
 
 ## Non-Goals

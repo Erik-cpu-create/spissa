@@ -36,6 +36,20 @@ enum Commands {
         #[arg(long, default_value = "1mb")]
         chunk_size: String,
 
+        /// Codec policy for packed chunks: auto chooses the smallest lossless codec; raw/rle/huff force one codec.
+        #[arg(long, default_value = "auto")]
+        codec: String,
+
+        /// Optional fixed decoded-byte range size for per-range checksums.
+        /// Currently emitted only for identity-mapped raw chunks.
+        #[arg(long)]
+        range_checksum_size: Option<String>,
+
+        /// Optional number of tensor elements per packed chunk/block.
+        /// Overrides --chunk-size per tensor after multiplying by dtype size.
+        #[arg(long)]
+        tile_block_elements: Option<usize>,
+
         /// Optional HuggingFace config.json path. Defaults to sibling config.json when present.
         #[arg(long)]
         config: Option<String>,
@@ -95,13 +109,48 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
-        /// Prompt text for Phase 5E tokenizer-backed RAMA generation
+        /// Prompt text for Phase 7 tiled RAMA generation
         #[arg(long)]
         prompt: Option<String>,
 
-        /// Number of new tokens to generate when --prompt is provided
+        /// Comma-separated input token IDs for fixed-token generation/comparison; bypasses tokenizer
+        #[arg(long)]
+        token_ids: Option<String>,
+
+        /// Number of new tokens to generate when --prompt or --token-ids is provided
         #[arg(long, default_value_t = 8)]
         max_new_tokens: usize,
+
+        /// Optional JSON output path for first-step logits from --prompt/--token-ids generation
+        #[arg(long)]
+        logits_out: Option<String>,
+
+        /// Optional JSON output path for RAMA chunk recall timing trace
+        #[arg(long)]
+        rama_trace: Option<String>,
+
+        /// Optional JSON output path for low-overhead aggregate RAMA generation timings.
+        #[arg(long)]
+        rama_timing: Option<String>,
+
+        /// Optional prompt prefill chunk size in real input tokens.
+        ///
+        /// Generation defaults to the generic RAMA shape/budget-aware low-RAM policy
+        /// unless --no-rama-prefill-chunking is set.
+        #[arg(long)]
+        rama_prefill_chunk_tokens: Option<usize>,
+
+        /// RAMA automatic prefill policy when --rama-prefill-chunk-tokens is not set: low-ram or speed.
+        #[arg(long, default_value = "low-ram")]
+        rama_prefill_policy: String,
+
+        /// Disable the default RAMA prompt prefill chunking window and process prefill in one full prompt pass.
+        #[arg(long)]
+        no_rama_prefill_chunking: bool,
+
+        /// Runtime integrity policy: strict verifies every chunk recall; verify-once verifies each chunk once per process.
+        #[arg(long, default_value = "strict")]
+        rama_integrity: String,
     },
 
     /// Import a model from external format (not yet implemented)
@@ -135,6 +184,9 @@ fn main() -> Result<()> {
             input,
             out,
             chunk_size,
+            codec,
+            range_checksum_size,
+            tile_block_elements,
             config,
             tokenizer,
             no_tokenizer,
@@ -142,6 +194,9 @@ fn main() -> Result<()> {
             &input,
             &out,
             &chunk_size,
+            &codec,
+            range_checksum_size.as_deref(),
+            tile_block_elements,
             config.as_deref(),
             tokenizer.as_deref(),
             no_tokenizer,
@@ -159,7 +214,15 @@ fn main() -> Result<()> {
             memory_budget,
             dry_run,
             prompt,
+            token_ids,
             max_new_tokens,
+            logits_out,
+            rama_trace,
+            rama_timing,
+            rama_prefill_chunk_tokens,
+            rama_prefill_policy,
+            no_rama_prefill_chunking,
+            rama_integrity,
         } => commands::run::run(
             &file,
             &mode,
@@ -167,7 +230,15 @@ fn main() -> Result<()> {
             memory_budget.as_deref(),
             dry_run,
             prompt.as_deref(),
+            token_ids.as_deref(),
             max_new_tokens,
+            logits_out.as_deref(),
+            rama_trace.as_deref(),
+            rama_timing.as_deref(),
+            rama_prefill_chunk_tokens,
+            &rama_prefill_policy,
+            no_rama_prefill_chunking,
+            &rama_integrity,
         ),
         Commands::Import { input } => commands::import::run(&input),
         Commands::Benchmark { file } => commands::benchmark::run(&file),

@@ -2,18 +2,76 @@ use crate::commands::common::parse_size;
 use anyhow::{Context, Result};
 use rllm_container::{GlobalMetadata, RllmWriter};
 use rllm_import::{read_model_config_metadata, read_tokenizer_metadata, SafetensorsReader};
-use rtc_codec::{EncodeMeta, HuffmanCodec, RawCodec, RleCodec, TensorCodec};
+use rtc_codec::{
+    EncodeMeta, HuffmanCodec, RawCodec, RleCodec, TensorCodec, CODEC_HUFF_V1, CODEC_RAW_V1,
+    CODEC_RLE_V1,
+};
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackCodecPolicy {
+    Auto,
+    Raw,
+    Rle,
+    Huff,
+}
+
+impl PackCodecPolicy {
+    fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "raw" | CODEC_RAW_V1 => Ok(Self::Raw),
+            "rle" | CODEC_RLE_V1 => Ok(Self::Rle),
+            "huff" | "huffman" | CODEC_HUFF_V1 => Ok(Self::Huff),
+            other => anyhow::bail!(
+                "unsupported --codec {other:?}; expected one of: auto, raw, rle, huff"
+            ),
+        }
+    }
+
+    fn metadata_label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Raw => CODEC_RAW_V1,
+            Self::Rle => CODEC_RLE_V1,
+            Self::Huff => CODEC_HUFF_V1,
+        }
+    }
+
+    fn codecs(self) -> Vec<Box<dyn TensorCodec>> {
+        match self {
+            Self::Auto => vec![
+                Box::new(RawCodec),
+                Box::new(RleCodec),
+                Box::new(HuffmanCodec),
+            ],
+            Self::Raw => vec![Box::new(RawCodec)],
+            Self::Rle => vec![Box::new(RleCodec)],
+            Self::Huff => vec![Box::new(HuffmanCodec)],
+        }
+    }
+}
 
 pub fn run(
     input: &str,
     output: &str,
     chunk_size: &str,
+    codec_policy: &str,
+    range_checksum_size: Option<&str>,
+    tile_block_elements: Option<usize>,
     config: Option<&str>,
     tokenizer: Option<&str>,
     no_tokenizer: bool,
 ) -> Result<()> {
     let chunk_size_bytes = parse_size(chunk_size)?;
+    let codec_policy = PackCodecPolicy::parse(codec_policy)?;
+    let range_checksum_size_bytes = match range_checksum_size.map(parse_size).transpose()? {
+        Some(0) => anyhow::bail!("--range-checksum-size must be greater than zero"),
+        other => other,
+    };
+    if matches!(tile_block_elements, Some(0)) {
+        anyhow::bail!("--tile-block-elements must be greater than zero");
+    }
     let input_path = Path::new(input);
 
     if !input_path.exists() {
@@ -77,23 +135,23 @@ pub fn run(
         default_context_length,
         tokenizer_type,
         created_by: "rllm-cli".to_string(),
-        codec: "auto".to_string(),
+        codec: codec_policy.metadata_label().to_string(),
         model_config,
         tokenizer,
     };
 
     let mut writer = RllmWriter::new(output, metadata)?;
 
-    // Codecs to try
-    let codecs: Vec<Box<dyn TensorCodec>> = vec![
-        Box::new(RawCodec),
-        Box::new(RleCodec),
-        Box::new(HuffmanCodec),
-    ];
+    // Codecs to try. `auto` preserves the original smallest-lossless behavior;
+    // forced policies create runtime-layout artifacts for measured RAMA trade-offs.
+    let codecs = codec_policy.codecs();
 
     let mut total_original = 0;
     let mut total_compressed = 0;
     let mut chunk_count = 0;
+    let mut range_checksum_count = 0usize;
+    let mut range_checksum_skipped_chunks = 0usize;
+    let mut tile_block_aligned_tensors = 0usize;
 
     // Process each tensor
     for (tensor_id, tensor_name) in tensor_names.iter().enumerate() {
@@ -111,6 +169,24 @@ pub fn run(
         // Update tensor ID
         let mut meta = tensor_meta;
         meta.tensor_id = tensor_id as u64;
+        let effective_chunk_size_bytes = if let Some(tile_elements) = tile_block_elements {
+            let dtype_size = meta.dtype.size_bytes();
+            tile_elements.checked_mul(dtype_size).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--tile-block-elements overflow for tensor {} with dtype size {}",
+                    tensor_name,
+                    dtype_size
+                )
+            })?
+        } else {
+            chunk_size_bytes
+        };
+        if effective_chunk_size_bytes == 0 {
+            anyhow::bail!("effective chunk size for tensor {} is zero", tensor_name);
+        }
+        if tile_block_elements.is_some() {
+            tile_block_aligned_tensors += 1;
+        }
 
         total_original += meta.original_size_bytes;
 
@@ -124,7 +200,7 @@ pub fn run(
             dtype: "u8".to_string(),
         };
 
-        for (i, chunk) in tensor_data.chunks(chunk_size_bytes).enumerate() {
+        for (i, chunk) in tensor_data.chunks(effective_chunk_size_bytes).enumerate() {
             let mut best_encoded = None;
             let mut best_size = usize::MAX;
 
@@ -149,7 +225,30 @@ pub fn run(
                 )
             })?;
 
-            writer.write_chunk(tensor_id as u64, &codec_id, &encoded.data, chunk, i as u64)?;
+            if let Some(range_size) = range_checksum_size_bytes {
+                if codec_id == CODEC_RAW_V1 && encoded.data.len() == chunk.len() {
+                    writer.write_chunk_with_identity_range_checksums(
+                        tensor_id as u64,
+                        &codec_id,
+                        &encoded.data,
+                        chunk,
+                        i as u64,
+                        range_size as u64,
+                    )?;
+                    range_checksum_count += chunk.len().div_ceil(range_size);
+                } else {
+                    writer.write_chunk(
+                        tensor_id as u64,
+                        &codec_id,
+                        &encoded.data,
+                        chunk,
+                        i as u64,
+                    )?;
+                    range_checksum_skipped_chunks += 1;
+                }
+            } else {
+                writer.write_chunk(tensor_id as u64, &codec_id, &encoded.data, chunk, i as u64)?;
+            }
 
             chunk_count += 1;
             total_compressed += encoded.data.len();
@@ -157,6 +256,22 @@ pub fn run(
     }
 
     println!("\nEncoded {} chunks total", chunk_count);
+    println!("Codec policy: {}", codec_policy.metadata_label());
+    if range_checksum_size_bytes.is_some() {
+        println!("Range checksums emitted: {}", range_checksum_count);
+        if range_checksum_skipped_chunks > 0 {
+            println!(
+                "Range checksums skipped for {} non-identity compressed chunks",
+                range_checksum_skipped_chunks
+            );
+        }
+    }
+    if let Some(tile_elements) = tile_block_elements {
+        println!(
+            "Tile-block packing: {} tensor(s), {} element(s) per chunk/block",
+            tile_block_aligned_tensors, tile_elements
+        );
+    }
     println!("Original size: {} bytes", total_original);
     println!("Compressed size: {} bytes", total_compressed);
 
@@ -193,4 +308,36 @@ fn resolve_tokenizer_path(
     }
     let sibling = input_path.parent()?.join("tokenizer.json");
     sibling.exists().then_some(sibling)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PackCodecPolicy;
+
+    #[test]
+    fn pack_codec_policy_accepts_short_and_codec_ids() {
+        assert_eq!(
+            PackCodecPolicy::parse("auto").unwrap(),
+            PackCodecPolicy::Auto
+        );
+        assert_eq!(PackCodecPolicy::parse("raw").unwrap(), PackCodecPolicy::Raw);
+        assert_eq!(
+            PackCodecPolicy::parse("rtc-raw-v1").unwrap(),
+            PackCodecPolicy::Raw
+        );
+        assert_eq!(PackCodecPolicy::parse("rle").unwrap(), PackCodecPolicy::Rle);
+        assert_eq!(
+            PackCodecPolicy::parse("huffman").unwrap(),
+            PackCodecPolicy::Huff
+        );
+        assert_eq!(
+            PackCodecPolicy::parse("rtc-huff-v1").unwrap(),
+            PackCodecPolicy::Huff
+        );
+    }
+
+    #[test]
+    fn pack_codec_policy_rejects_unknown_values() {
+        assert!(PackCodecPolicy::parse("zstd").is_err());
+    }
 }

@@ -2,10 +2,25 @@ use crate::loader::{
     codec_for_id, verify_compressed_chunk_checksum, verify_original_chunk_checksum,
     verify_tensor_checksum,
 };
-use crate::{MemoryBudget, Result, RuntimeError, Tensor};
+use crate::{MemoryBudget, RamaTrace, RamaTraceEventInput, Result, RuntimeError, Tensor};
 use rllm_container::{ChunkMeta, GlobalMetadata, RllmReader, TensorMeta};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamaIntegrityMode {
+    /// Verify compressed and decoded chunk checksums every time a chunk is recalled.
+    Strict,
+    /// Verify each chunk checksum once per process, then trust the already-verified chunk.
+    VerifyOnce,
+}
+
+impl Default for RamaIntegrityMode {
+    fn default() -> Self {
+        Self::Strict
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct LazyModelStats {
@@ -26,6 +41,10 @@ pub struct LazyRllmModel {
     chunks_by_tensor: HashMap<u64, Vec<ChunkMeta>>,
     chunks_by_id: HashMap<u64, ChunkMeta>,
     stats: LazyModelStats,
+    rama_trace: Option<RamaTrace>,
+    integrity_mode: RamaIntegrityMode,
+    verified_compressed_chunks: HashSet<u64>,
+    verified_original_chunks: HashSet<u64>,
 }
 
 impl LazyRllmModel {
@@ -89,6 +108,10 @@ impl LazyRllmModel {
             chunks_by_tensor,
             chunks_by_id,
             stats,
+            rama_trace: None,
+            integrity_mode: RamaIntegrityMode::Strict,
+            verified_compressed_chunks: HashSet::new(),
+            verified_original_chunks: HashSet::new(),
         })
     }
 
@@ -102,6 +125,25 @@ impl LazyRllmModel {
 
     pub fn stats(&self) -> &LazyModelStats {
         &self.stats
+    }
+
+    pub fn enable_rama_trace(&mut self) {
+        self.rama_trace = Some(RamaTrace::new(
+            self.metadata.model_name.clone(),
+            self.metadata.architecture.clone(),
+        ));
+    }
+
+    pub fn take_rama_trace(&mut self) -> Option<RamaTrace> {
+        self.rama_trace.take()
+    }
+
+    pub fn set_rama_integrity_mode(&mut self, mode: RamaIntegrityMode) {
+        if self.integrity_mode != mode {
+            self.verified_compressed_chunks.clear();
+            self.verified_original_chunks.clear();
+        }
+        self.integrity_mode = mode;
     }
 
     pub fn tensor(&self, name: &str) -> Result<&TensorMeta> {
@@ -135,6 +177,69 @@ impl LazyRllmModel {
             .get(&tensor_id)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    fn record_rama_chunk_event(
+        &mut self,
+        phase: &str,
+        label: String,
+        chunk: &ChunkMeta,
+        tensor_name: Option<&str>,
+        start: Instant,
+        duration: Duration,
+        budget: &MemoryBudget,
+    ) {
+        if let Some(trace) = self.rama_trace.as_mut() {
+            let start_ns = trace.elapsed_ns_since_start(start);
+            trace.record(RamaTraceEventInput {
+                phase: phase.to_string(),
+                label,
+                tensor_name: tensor_name.map(ToOwned::to_owned),
+                tensor_id: Some(chunk.tensor_id),
+                chunk_id: Some(chunk.chunk_id),
+                codec_id: Some(chunk.codec_id.clone()),
+                compressed_bytes: Some(chunk.compressed_size),
+                decoded_bytes: Some(chunk.uncompressed_size),
+                start_ns,
+                duration_ns: crate::trace::saturating_duration_nanos(duration),
+                budget_current_bytes: budget.current_bytes(),
+                budget_peak_bytes: budget.peak_bytes(),
+            });
+        }
+    }
+
+    fn verify_compressed_chunk_if_needed(
+        &mut self,
+        chunk: &ChunkMeta,
+        compressed: &[u8],
+    ) -> Result<bool> {
+        if self.integrity_mode == RamaIntegrityMode::VerifyOnce
+            && self.verified_compressed_chunks.contains(&chunk.chunk_id)
+        {
+            return Ok(false);
+        }
+        verify_compressed_chunk_checksum(chunk, compressed)?;
+        if self.integrity_mode == RamaIntegrityMode::VerifyOnce {
+            self.verified_compressed_chunks.insert(chunk.chunk_id);
+        }
+        Ok(true)
+    }
+
+    fn verify_original_chunk_if_needed(
+        &mut self,
+        chunk: &ChunkMeta,
+        decoded: &[u8],
+    ) -> Result<bool> {
+        if self.integrity_mode == RamaIntegrityMode::VerifyOnce
+            && self.verified_original_chunks.contains(&chunk.chunk_id)
+        {
+            return Ok(false);
+        }
+        verify_original_chunk_checksum(chunk, decoded)?;
+        if self.integrity_mode == RamaIntegrityMode::VerifyOnce {
+            self.verified_original_chunks.insert(chunk.chunk_id);
+        }
+        Ok(true)
     }
 
     /// Decode one tensor under a caller-provided memory budget.
@@ -196,9 +301,14 @@ impl LazyRllmModel {
             .get(&chunk_id)
             .ok_or_else(|| RuntimeError::InvalidTensorData(format!("missing chunk {chunk_id}")))?
             .clone();
+        let tensor_name = self
+            .tensors_by_id
+            .get(&chunk.tensor_id)
+            .map(|tensor| tensor.name.clone());
 
         let compressed_label = format!("compressed chunk {}", chunk.chunk_id);
         budget.reserve(chunk.compressed_size as usize, compressed_label.clone())?;
+        let read_start = Instant::now();
         let compressed = match self.reader.read_chunk(chunk.chunk_id) {
             Ok(bytes) => bytes,
             Err(err) => {
@@ -206,10 +316,35 @@ impl LazyRllmModel {
                 return Err(err.into());
             }
         };
+        self.record_rama_chunk_event(
+            "chunk_read",
+            format!("read chunk {}", chunk.chunk_id),
+            &chunk,
+            tensor_name.as_deref(),
+            read_start,
+            read_start.elapsed(),
+            budget,
+        );
 
-        if let Err(err) = verify_compressed_chunk_checksum(&chunk, &compressed) {
-            budget.release(chunk.compressed_size as usize, compressed_label)?;
-            return Err(err);
+        let compressed_checksum_start = Instant::now();
+        let compressed_verified = match self.verify_compressed_chunk_if_needed(&chunk, &compressed)
+        {
+            Ok(verified) => verified,
+            Err(err) => {
+                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                return Err(err);
+            }
+        };
+        if compressed_verified {
+            self.record_rama_chunk_event(
+                "chunk_compressed_checksum",
+                format!("verify compressed chunk {}", chunk.chunk_id),
+                &chunk,
+                tensor_name.as_deref(),
+                compressed_checksum_start,
+                compressed_checksum_start.elapsed(),
+                budget,
+            );
         }
 
         let decoded_label = format!("decoded chunk {}", chunk.chunk_id);
@@ -226,6 +361,7 @@ impl LazyRllmModel {
                 return Err(err);
             }
         };
+        let decode_start = Instant::now();
         let decoded = match codec.decode(
             &compressed,
             &rtc_codec::DecodeMeta {
@@ -240,6 +376,15 @@ impl LazyRllmModel {
                 return Err(err.into());
             }
         };
+        self.record_rama_chunk_event(
+            "chunk_decode",
+            format!("decode chunk {}", chunk.chunk_id),
+            &chunk,
+            tensor_name.as_deref(),
+            decode_start,
+            decode_start.elapsed(),
+            budget,
+        );
         budget.release(chunk.compressed_size as usize, compressed_label)?;
 
         if decoded.len() != chunk.uncompressed_size as usize {
@@ -251,13 +396,142 @@ impl LazyRllmModel {
                 chunk.uncompressed_size
             )));
         }
-        if let Err(err) = verify_original_chunk_checksum(&chunk, &decoded) {
-            budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+        let original_checksum_start = Instant::now();
+        let original_verified = match self.verify_original_chunk_if_needed(&chunk, &decoded) {
+            Ok(verified) => verified,
+            Err(err) => {
+                budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+                return Err(err);
+            }
+        };
+        if original_verified {
+            self.record_rama_chunk_event(
+                "chunk_original_checksum",
+                format!("verify original chunk {}", chunk.chunk_id),
+                &chunk,
+                tensor_name.as_deref(),
+                original_checksum_start,
+                original_checksum_start.elapsed(),
+                budget,
+            );
+        }
+
+        let compute_start = Instant::now();
+        let result = f(&decoded, budget);
+        self.record_rama_chunk_event(
+            "chunk_compute_closure",
+            format!("compute with decoded chunk {}", chunk.chunk_id),
+            &chunk,
+            tensor_name.as_deref(),
+            compute_start,
+            compute_start.elapsed(),
+            budget,
+        );
+        budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+        result
+    }
+
+    /// Decode a byte range from a compressed chunk when the codec supports it,
+    /// otherwise fall back to the full-chunk path.
+    ///
+    /// This is the Phase 7.8 foundation for tile-aligned decode. Memory accounting
+    /// reserves only the requested decoded range for native range codecs. For
+    /// codecs without native range support, it deliberately falls back to
+    /// `with_decoded_chunk` so the budget still reflects full decoded materialization.
+    pub fn with_decoded_chunk_range<R>(
+        &mut self,
+        chunk_id: u64,
+        byte_offset: u64,
+        byte_len: u64,
+        budget: &mut MemoryBudget,
+        f: impl FnOnce(&[u8], &mut MemoryBudget) -> Result<R>,
+    ) -> Result<R> {
+        let chunk = self
+            .chunks_by_id
+            .get(&chunk_id)
+            .ok_or_else(|| RuntimeError::InvalidTensorData(format!("missing chunk {chunk_id}")))?
+            .clone();
+        let range = rtc_codec::DecodeRange::new(byte_offset, byte_len);
+        range.validate(chunk.uncompressed_size)?;
+
+        let codec = codec_for_id(&chunk.codec_id)?;
+        if !codec.supports_native_range_decode() {
+            return self.with_decoded_chunk(chunk_id, budget, |decoded, budget| {
+                let start = usize::try_from(byte_offset).map_err(|_| {
+                    RuntimeError::InvalidTensorData(format!(
+                        "chunk {chunk_id} range offset {byte_offset} overflows usize"
+                    ))
+                })?;
+                let end = usize::try_from(range.end()?).map_err(|_| {
+                    RuntimeError::InvalidTensorData(format!(
+                        "chunk {chunk_id} range end overflows usize"
+                    ))
+                })?;
+                f(&decoded[start..end], budget)
+            });
+        }
+
+        let compressed_label = format!("compressed chunk {}", chunk.chunk_id);
+        budget.reserve(chunk.compressed_size as usize, compressed_label.clone())?;
+        let compressed = match self.reader.read_chunk(chunk.chunk_id) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                return Err(err.into());
+            }
+        };
+
+        if let Err(err) = self.verify_compressed_chunk_if_needed(&chunk, &compressed) {
+            budget.release(chunk.compressed_size as usize, compressed_label)?;
             return Err(err);
         }
 
+        let decoded_range_bytes = usize::try_from(byte_len).map_err(|_| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} range len {} overflows usize",
+                chunk.chunk_id, byte_len
+            ))
+        })?;
+        let decoded_label = format!(
+            "decoded chunk {} byte range [{}..{})",
+            chunk.chunk_id,
+            byte_offset,
+            range.end()?
+        );
+        if let Err(err) = budget.reserve(decoded_range_bytes, decoded_label.clone()) {
+            budget.release(chunk.compressed_size as usize, compressed_label)?;
+            return Err(err);
+        }
+
+        let decoded = match codec.decode_range(
+            &compressed,
+            &rtc_codec::DecodeMeta {
+                codec_id: chunk.codec_id.clone(),
+                uncompressed_size: chunk.uncompressed_size,
+            },
+            range,
+        ) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                budget.release(decoded_range_bytes, decoded_label)?;
+                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                return Err(err.into());
+            }
+        };
+        budget.release(chunk.compressed_size as usize, compressed_label)?;
+
+        if decoded.len() != decoded_range_bytes {
+            budget.release(decoded_range_bytes, decoded_label)?;
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "chunk {} range decoded to {} bytes, expected {}",
+                chunk.chunk_id,
+                decoded.len(),
+                decoded_range_bytes
+            )));
+        }
+
         let result = f(&decoded, budget);
-        budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+        budget.release(decoded_range_bytes, decoded_label)?;
         result
     }
 
@@ -375,6 +649,183 @@ mod tests {
         assert_eq!(sum, 9 * 16);
         assert_eq!(budget.current_bytes(), 0);
         assert_eq!(budget.peak_bytes(), 32);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn with_decoded_chunk_records_rama_trace_events() {
+        let path = temp_path("chunk-trace");
+        let data: Vec<u8> = (0..16).collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "tiny.weight".to_string(),
+            shape: vec![16],
+            dtype: DType::U8,
+            original_size_bytes: data.len() as u64,
+            compressed_size_bytes: data.len() as u64,
+            original_sha256: sha256_array(&data),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &data, &data, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        model.enable_rama_trace();
+        let mut budget = MemoryBudget::new(64);
+        model
+            .with_decoded_chunk(0, &mut budget, |bytes, _budget| Ok(bytes.len()))
+            .unwrap();
+        let trace = model.take_rama_trace().expect("trace should be enabled");
+        let phases: Vec<&str> = trace
+            .events
+            .iter()
+            .map(|event| event.phase.as_str())
+            .collect();
+
+        assert_eq!(
+            phases,
+            vec![
+                "chunk_read",
+                "chunk_compressed_checksum",
+                "chunk_decode",
+                "chunk_original_checksum",
+                "chunk_compute_closure",
+            ]
+        );
+        assert!(trace
+            .events
+            .iter()
+            .all(|event| event.tensor_name.as_deref() == Some("tiny.weight")));
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn verify_once_integrity_records_checksums_only_on_first_chunk_access() {
+        let path = temp_path("chunk-verify-once");
+        let data: Vec<u8> = (0..16).collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "tiny.weight".to_string(),
+            shape: vec![16],
+            dtype: DType::U8,
+            original_size_bytes: data.len() as u64,
+            compressed_size_bytes: data.len() as u64,
+            original_sha256: sha256_array(&data),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &data, &data, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
+        model.enable_rama_trace();
+        let mut budget = MemoryBudget::new(64);
+        for _ in 0..2 {
+            model
+                .with_decoded_chunk(0, &mut budget, |bytes, _budget| Ok(bytes.len()))
+                .unwrap();
+        }
+        let trace = model.take_rama_trace().expect("trace should be enabled");
+        let compressed_checksum_events = trace
+            .events
+            .iter()
+            .filter(|event| event.phase == "chunk_compressed_checksum")
+            .count();
+        let original_checksum_events = trace
+            .events
+            .iter()
+            .filter(|event| event.phase == "chunk_original_checksum")
+            .count();
+        let read_events = trace
+            .events
+            .iter()
+            .filter(|event| event.phase == "chunk_read")
+            .count();
+
+        assert_eq!(compressed_checksum_events, 1);
+        assert_eq!(original_checksum_events, 1);
+        assert_eq!(read_events, 2);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn with_decoded_chunk_range_uses_native_raw_range_budget() {
+        let path = temp_path("chunk-range-raw");
+        let data: Vec<u8> = (0..16).collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "tiny.weight".to_string(),
+            shape: vec![16],
+            dtype: DType::U8,
+            original_size_bytes: data.len() as u64,
+            compressed_size_bytes: data.len() as u64,
+            original_sha256: sha256_array(&data),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &data, &data, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(64);
+        let range = model
+            .with_decoded_chunk_range(0, 4, 6, &mut budget, |bytes, _budget| Ok(bytes.to_vec()))
+            .unwrap();
+
+        assert_eq!(range, vec![4, 5, 6, 7, 8, 9]);
+        assert_eq!(budget.current_bytes(), 0);
+        assert_eq!(budget.peak_bytes(), 22);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn with_decoded_chunk_range_falls_back_to_full_decode_budget_for_rle() {
+        let path = temp_path("chunk-range-rle");
+        let data = vec![7u8; 16];
+        let compressed = vec![16u8, 7u8];
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "tiny.weight".to_string(),
+            shape: vec![16],
+            dtype: DType::U8,
+            original_size_bytes: data.len() as u64,
+            compressed_size_bytes: compressed.len() as u64,
+            original_sha256: sha256_array(&data),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-rle-v1", &compressed, &data, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(64);
+        let range = model
+            .with_decoded_chunk_range(0, 4, 6, &mut budget, |bytes, _budget| Ok(bytes.to_vec()))
+            .unwrap();
+
+        assert_eq!(range, vec![7u8; 6]);
+        assert_eq!(budget.current_bytes(), 0);
+        assert_eq!(budget.peak_bytes(), 18);
 
         std::fs::remove_file(&path).ok();
     }

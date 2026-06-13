@@ -17,16 +17,18 @@ mod streaming;
 mod tensor;
 mod tiny;
 mod tokenizer;
+mod trace;
 
 pub use echo::{
     streaming_echo_transformer_decode_step_from_model,
     streaming_echo_transformer_generate_from_model, streaming_echo_transformer_prefill_from_model,
     streaming_rama_transformer_decode_step_from_model,
     streaming_rama_transformer_generate_from_model, streaming_rama_transformer_prefill_from_model,
-    RamaContextState, StreamingEchoGenerationResult, StreamingEchoTransformerConfig,
-    StreamingEchoTransformerParameters, StreamingEchoTransformerTensorNames,
-    StreamingRamaGenerationResult, StreamingRamaTransformerConfig,
-    StreamingRamaTransformerParameters, StreamingRamaTransformerTensorNames,
+    RamaContextState, RamaGenerationTiming, StreamingEchoGenerationResult,
+    StreamingEchoTransformerConfig, StreamingEchoTransformerParameters,
+    StreamingEchoTransformerTensorNames, StreamingRamaGenerationResult,
+    StreamingRamaTransformerConfig, StreamingRamaTransformerParameters,
+    StreamingRamaTransformerTensorNames,
 };
 pub use error::{Result, RuntimeError};
 pub use gpt_neox::{
@@ -34,12 +36,13 @@ pub use gpt_neox::{
     prepare_gpt_neox_rama_layer_decode_transformer_from_metadata,
     prepare_gpt_neox_rama_layer_decode_transformer_from_model,
     prepare_gpt_neox_rama_transformer_from_metadata, prepare_gpt_neox_rama_transformer_from_model,
-    GptNeoxEchoBuildConfig, GptNeoxEchoGenerationConfig, GptNeoxRamaBuildConfig,
-    GptNeoxRamaGenerationConfig, GptNeoxTextGenerationResult, LayerDecodedGptNeoxRamaTransformer,
-    OwnedStreamingBlockParameters, OwnedStreamingBlockTensorNames, PreparedGptNeoxEchoTransformer,
-    PreparedGptNeoxRamaTransformer,
+    recommend_rama_prefill_chunk_tokens, GptNeoxEchoBuildConfig, GptNeoxEchoGenerationConfig,
+    GptNeoxRamaBuildConfig, GptNeoxRamaGenerationConfig, GptNeoxRamaGenerationOptions,
+    GptNeoxTextGenerationResult, LayerDecodedGptNeoxRamaTransformer, OwnedStreamingBlockParameters,
+    OwnedStreamingBlockTensorNames, PreparedGptNeoxEchoTransformer, PreparedGptNeoxRamaTransformer,
+    RamaPrefillPolicy,
 };
-pub use lazy::{LazyModelStats, LazyRllmModel};
+pub use lazy::{LazyModelStats, LazyRllmModel, RamaIntegrityMode};
 pub use loader::{FullDecodeModel, FullDecodeStats};
 pub use memory::MemoryBudget;
 pub use ops::*;
@@ -53,10 +56,13 @@ pub use rotary::{
 };
 pub use streaming::{
     streaming_attention_from_model, streaming_attention_with_runtime_from_model,
-    streaming_linear_from_model, streaming_mlp_from_model, streaming_transformer_block_from_model,
+    streaming_linear_from_model, streaming_mlp_from_model, streaming_tile_linear_from_model,
+    streaming_transformer_block_from_model,
+    streaming_transformer_block_with_runtime_and_timing_from_model,
     streaming_transformer_block_with_runtime_from_model, StreamingAttentionConfig,
     StreamingAttentionRuntime, StreamingBlockConfig, StreamingBlockParameters,
-    StreamingBlockRuntime, StreamingBlockTensorNames, StreamingLinearConfig, StreamingMlpConfig,
+    StreamingBlockRuntime, StreamingBlockTensorNames, StreamingBlockTiming, StreamingLinearConfig,
+    StreamingMlpConfig, StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 pub use tensor::{bf16_to_f32, fp16_to_f32, Tensor};
 pub use tiny::{
@@ -70,3 +76,4 @@ pub use tiny::{
     StreamingTinyTransformerParameters, StreamingTinyTransformerTensorNames,
 };
 pub use tokenizer::RllmTokenizer;
+pub use trace::{RamaTrace, RamaTraceEvent, RamaTraceEventInput};

@@ -54,6 +54,7 @@ struct HuggingFaceModelConfig {
     rotary_pct: Option<f32>,
     rotary_emb_base: Option<f32>,
     layer_norm_eps: Option<f32>,
+    use_parallel_residual: Option<bool>,
     vocab_size: Option<u64>,
 }
 
@@ -80,6 +81,7 @@ pub fn model_config_metadata_from_json_str(json: &str) -> Result<ModelConfigMeta
         rotary_pct: config.rotary_pct,
         rotary_emb_base: config.rotary_emb_base,
         layer_norm_eps: config.layer_norm_eps,
+        use_parallel_residual: config.use_parallel_residual,
         vocab_size: config.vocab_size,
     })
 }
@@ -268,6 +270,7 @@ mod tests {
             "rotary_pct": 0.25,
             "rotary_emb_base": 10000,
             "layer_norm_eps": 0.00001,
+            "use_parallel_residual": true,
             "vocab_size": 50432
         }"#;
 
@@ -282,6 +285,7 @@ mod tests {
         assert_eq!(config.rotary_pct, Some(0.25));
         assert_eq!(config.rotary_emb_base, Some(10_000.0));
         assert_eq!(config.layer_norm_eps, Some(1e-5));
+        assert_eq!(config.use_parallel_residual, Some(true));
         assert_eq!(config.vocab_size, Some(50_432));
     }
 
