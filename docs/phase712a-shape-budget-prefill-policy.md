@@ -117,4 +117,4 @@ rllm-runtime policy tests: 2 passed
 
 ## Remaining work
 
-Phase 7.12A chooses smarter defaults; it does not make the MLP/QKV kernels faster. The next performance slice should optimize the remaining measured Pythia-160M MLP/QKV projection bottlenecks, still using timing evidence rather than model-specific hacks.
+Phase 7.12A chooses smarter defaults; it does not make the MLP/QKV kernels faster. Phase 7.12B follows this with generic eight-row projection reuse in the shared tiled-linear hot loop, still using timing evidence rather than model-specific hacks.

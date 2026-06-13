@@ -154,10 +154,10 @@ python3 scripts/phase79d_long_prompt_benchmark.py \
 
 ## Next decision
 
-Phase 7.11B answered the chunk/window question, and Phase 7.12A implemented the generic shape/budget-aware default. The next evidence-driven implementation target is now:
+Phase 7.11B answered the chunk/window question, Phase 7.12A implemented the generic shape/budget-aware default, and Phase 7.12B optimized the shared projection hot loop with generic eight-row accumulation reuse. The next evidence-driven implementation target is now optional and should start from fresh timing:
 
 ```text
-Phase 7.12B — optimize generic MLP/QKV projection bottlenecks
+Phase 7.12C — another generic dense-projection slice, or Phase 8 LLaMA-family adapter work
 ```
 
 Keep it generic and timing-driven: no Pythia-160M-specific branches, and no PowerInfer-style hot/cold activation routing.
