@@ -88,6 +88,7 @@ Implemented:
   - Phase 7.10A row-span linear accumulation: the tiled-linear hot loop now accumulates contiguous row spans instead of doing per-weight division/modulo. Short prompt + 16 generated improved from 3.65 to 7.10 tok/s at ~20.66 MiB RSS; 512-token chunked prefill improved to 2.26 tok/s at ~32.98 MiB RSS; 1024-token chunked prefill improved to 1.25 tok/s at ~44.80 MiB RSS while 512-token HF parity remained top-1/top-10 matched.
   - Phase 7.10B RAMA prefill homeostasis: broader post-7.10A matrix reaches 9.756 tok/s for 1-token prompt + 16 generated at 20.33 MiB RSS; measured prefill chunk sweep chooses 32 real input tokens as the default CLI prefill window. Best swept long-prompt rows: 512-token + 16 at 2.3495 tok/s / 32.77 MiB RSS and 1024-token + 16 at 1.1653 tok/s / 44.91 MiB RSS.
   - Phase 7.12A generic shape/budget-aware prefill policy: `rllm run` now defaults to auto low-RAM prefill selection from GPT-NeoX/Pythia shape and explicit transient budget, preserving Pythia-70M-like 32-token defaults while selecting 64 for Pythia-160M-like low-RAM runs; `--rama-prefill-policy speed` selects the speed-biased larger window when budget allows.
+  - Phase 7.12B generic eight-row projection reuse: the shared tiled-linear hot loop now reuses each decoded weight row fragment across 8 prompt-token rows before falling back to the existing 4-row/scalar tails, improving the measured Pythia-160M 512-token speed-policy row from 13.21s to 12.34s wall time while keeping tracked transient memory unchanged at 3.79 MiB.
 
 
 Not yet implemented:
@@ -95,7 +96,7 @@ Not yet implemented:
 - Production-grade tokenizer/normalizer fidelity beyond the current runtime-ready vocabulary metadata
 - Multi-tensor unpack back to safetensors layout
 - True intra-chunk compressed range decode/routing for non-identity codecs
-- Comfortable 512/1024-token chat latency; Phase 7.12A improves default prefill-window selection, but MLP/QKV projection speed remains the next measured bottleneck
+- Comfortable 512/1024-token chat latency; Phase 7.12B improves generic projection throughput, but 512/1024-token prompts are still not interactive
 
 ## Quick Start
 
@@ -288,6 +289,7 @@ See [docs/phase710e-attention-row-slice.md](docs/phase710e-attention-row-slice.m
 See [docs/phase711a-pythia160m-scale-validation.md](docs/phase711a-pythia160m-scale-validation.md) for GPT-NeoX/Pythia-family scale validation on Pythia-160M.
 See [docs/phase711b-pythia160m-prefill-window-sweep.md](docs/phase711b-pythia160m-prefill-window-sweep.md) for the Pythia-160M prefill window and transient memory-budget sweep.
 See [docs/phase712a-shape-budget-prefill-policy.md](docs/phase712a-shape-budget-prefill-policy.md) for the generic shape/budget-aware RAMA prefill policy.
+See [docs/phase712b-eight-row-projection-reuse.md](docs/phase712b-eight-row-projection-reuse.md) for the generic eight-row projection reuse optimization.
 
 
 ## Architecture

@@ -1364,6 +1364,52 @@ fn accumulate_weight_chunk(
         let weight_row = &weights[local_idx..local_idx + row_len];
 
         let mut batch_idx = 0usize;
+        while batch_idx + 8 <= config.batch {
+            let output_idx0 = batch_idx * config.out_features + out_feature;
+            let output_idx1 = (batch_idx + 1) * config.out_features + out_feature;
+            let output_idx2 = (batch_idx + 2) * config.out_features + out_feature;
+            let output_idx3 = (batch_idx + 3) * config.out_features + out_feature;
+            let output_idx4 = (batch_idx + 4) * config.out_features + out_feature;
+            let output_idx5 = (batch_idx + 5) * config.out_features + out_feature;
+            let output_idx6 = (batch_idx + 6) * config.out_features + out_feature;
+            let output_idx7 = (batch_idx + 7) * config.out_features + out_feature;
+            let mut acc0 = output[output_idx0];
+            let mut acc1 = output[output_idx1];
+            let mut acc2 = output[output_idx2];
+            let mut acc3 = output[output_idx3];
+            let mut acc4 = output[output_idx4];
+            let mut acc5 = output[output_idx5];
+            let mut acc6 = output[output_idx6];
+            let mut acc7 = output[output_idx7];
+            let input_start0 = batch_idx * config.in_features + in_feature;
+            let input_start1 = (batch_idx + 1) * config.in_features + in_feature;
+            let input_start2 = (batch_idx + 2) * config.in_features + in_feature;
+            let input_start3 = (batch_idx + 3) * config.in_features + in_feature;
+            let input_start4 = (batch_idx + 4) * config.in_features + in_feature;
+            let input_start5 = (batch_idx + 5) * config.in_features + in_feature;
+            let input_start6 = (batch_idx + 6) * config.in_features + in_feature;
+            let input_start7 = (batch_idx + 7) * config.in_features + in_feature;
+            for idx in 0..row_len {
+                let weight = weight_row[idx];
+                acc0 += input[input_start0 + idx] * weight;
+                acc1 += input[input_start1 + idx] * weight;
+                acc2 += input[input_start2 + idx] * weight;
+                acc3 += input[input_start3 + idx] * weight;
+                acc4 += input[input_start4 + idx] * weight;
+                acc5 += input[input_start5 + idx] * weight;
+                acc6 += input[input_start6 + idx] * weight;
+                acc7 += input[input_start7 + idx] * weight;
+            }
+            output[output_idx0] = acc0;
+            output[output_idx1] = acc1;
+            output[output_idx2] = acc2;
+            output[output_idx3] = acc3;
+            output[output_idx4] = acc4;
+            output[output_idx5] = acc5;
+            output[output_idx6] = acc6;
+            output[output_idx7] = acc7;
+            batch_idx += 8;
+        }
         while batch_idx + 4 <= config.batch {
             let output_idx0 = batch_idx * config.out_features + out_feature;
             let output_idx1 = (batch_idx + 1) * config.out_features + out_feature;
@@ -1551,17 +1597,17 @@ mod tests {
     }
 
     #[test]
-    fn streaming_linear_matches_full_decode_with_four_batch_fast_path_and_tail() {
+    fn streaming_linear_matches_full_decode_with_eight_and_four_batch_fast_paths_and_tail() {
         let path = temp_path("linear-batch-fast-path-tail");
         write_chunked_weight(&path);
         let mut model = LazyRllmModel::open(&path).unwrap();
-        let input: Vec<f32> = (0..15).map(|idx| idx as f32 * 0.25 - 1.0).collect(); // [batch=5, in=3]
+        let input: Vec<f32> = (0..39).map(|idx| idx as f32 * 0.25 - 1.0).collect(); // [batch=13, in=3]
         let bias = vec![1.0, -1.0];
         let expected = linear(
             &input,
             &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             Some(&bias),
-            5,
+            13,
             3,
             2,
         )
@@ -1574,7 +1620,7 @@ mod tests {
             &input,
             Some(&bias),
             StreamingLinearConfig {
-                batch: 5,
+                batch: 13,
                 in_features: 3,
                 out_features: 2,
             },

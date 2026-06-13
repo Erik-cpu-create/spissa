@@ -260,7 +260,7 @@ fn run_generation(
         write_rama_timing_json(rama_timing_out, timing)?;
         println!("RAMA timing JSON: {}", rama_timing_out);
     }
-    println!("\n[phase-7.12A] Tokenizer-backed tiled RAMA generation completed.");
+    println!("\n[phase-7.12B] Tokenizer-backed tiled RAMA generation completed.");
 
     Ok(())
 }

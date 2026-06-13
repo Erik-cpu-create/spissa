@@ -180,7 +180,7 @@
 - [x] Fixed-token RLLM logits match HuggingFace/PyTorch reference top-1/top-10 on tested Pythia-70M prompts; see [`docs/phase77-hf-logits-comparison.md`](phase77-hf-logits-comparison.md)
 
 **Next implementation slice:**
-- Continue Phase 7 from the Phase 7.12A policy foundation: auto low-RAM prefill selection is now shape/budget-aware for GPT-NeoX/Pythia-family models. Next optimize the measured Pythia-160M MLP/QKV projection bottlenecks, or start Phase 8 LLaMA-family adapter work if architecture breadth becomes the priority.
+- Continue Phase 7 from the Phase 7.12B projection-reuse foundation: generic eight-row tiled-linear accumulation improves the measured Pythia-160M projection bottleneck without model-specific code. Next either pursue another measured dense-projection slice or start Phase 8 LLaMA-family adapter work if architecture breadth becomes the priority.
 
 **Measured local Pythia-70M planning examples after Phase 7 fused tile scratch cap:**
 - 32MiB chunks (`pythia-70m-huff-32mb.rllm`): 120.60 MiB compressed, planned peak 75.48 MiB → within 100MiB budget
@@ -221,7 +221,7 @@
 
 ## Phase 7 — Tile Decode Runtime
 
-**Status:** ✅ Partial — tiled MLP/attention/RAMA generation routing, tile-stream planner scratch cap, release RSS benchmark matrices, fixed-token HF logits comparison, Phase 7.8 tile-block real-artifact benchmark, Phase 7.9A RAMA trace profiler, Phase 7.9B embedding row recall, Phase 7.9C low-ram-fast raw/tile-block profile, Phase 7.9D real long-prompt benchmark, Phase 7.9E RAMA chunked prefill optimization, Phase 7.10A row-span linear accumulation, Phase 7.10B RAMA prefill homeostasis, Phase 7.11 Pythia-160M scale/window validation, and Phase 7.12A generic shape/budget-aware prefill policy complete
+**Status:** ✅ Partial — tiled MLP/attention/RAMA generation routing, tile-stream planner scratch cap, release RSS benchmark matrices, fixed-token HF logits comparison, Phase 7.8 tile-block real-artifact benchmark, Phase 7.9A RAMA trace profiler, Phase 7.9B embedding row recall, Phase 7.9C low-ram-fast raw/tile-block profile, Phase 7.9D real long-prompt benchmark, Phase 7.9E RAMA chunked prefill optimization, Phase 7.10A row-span linear accumulation, Phase 7.10B RAMA prefill homeostasis, Phase 7.11 Pythia-160M scale/window validation, Phase 7.12A generic shape/budget-aware prefill policy, and Phase 7.12B generic eight-row projection reuse complete
 
 **Deliverables:**
 - [x] Bounded f32 tile scratch for linear matmul accumulation
@@ -254,7 +254,8 @@
 - [x] Scale-validate RAMA on Pythia-160M before LLaMA-family architecture expansion; Phase 7.11A proves the existing GPT-NeoX/Pythia path packs, verifies, runs, matches HF top-k, and completes the timing/RSS matrix without model-specific code
 - [x] Sweep Pythia-160M prefill chunk/window and memory-budget behavior before adding more kernel complexity; Phase 7.11B recommends chunk=64 as the low-RAM-safe 160M override and chunk=128 as the speed-biased setting
 - [x] Implement a generic shape/budget-aware prefill policy with low-ram/speed modes, preserving Pythia-70M-like 32-token low-RAM defaults while selecting 64/128-token windows for larger Pythia-160M-like shapes when budget allows
-- [ ] Optimize measured Pythia-160M MLP/QKV projection bottlenecks
+- [x] Optimize measured Pythia-160M MLP/QKV projection bottlenecks with generic eight-row tiled-linear accumulation reuse while preserving the existing 4-row/scalar tails, bounded transient memory, and tested output semantics
+- [ ] Optional next dense-projection slice if fresh timing identifies a safe generic candidate
 - [ ] Optional low-RAM parallel row-span accumulation if short-prompt decode/lm-head remains the priority
 - [ ] Codec-level range decode + multiply in one step
 
@@ -291,6 +292,7 @@
 - [x] Phase 7.11A Pythia-160M scale validation packs a raw/tile-block artifact (`184` tensors / `3366` chunks / `367 MiB`), verifies `374,977,752` bytes losslessly, runs `Hello!` from token `[12092]`, and passes HF/PyTorch fixed-token top-k parity (`top1_match=true`, top-10 overlap `10/10`, max abs diff `0.02246094`). The conservative matrix succeeds for input tokens `1,128,512,1024` × new tokens `1,4,16`; 1024 + 16 reaches `31.08s` / `0.515 tok/s` / `99.47 MiB RSS` with tracked transient `1.04 MiB`. Existing RAMA optimizations transfer without model-specific 160M code.
 - [x] Phase 7.11B Pythia-160M chunk/window sweep (`512/1024` prompt tokens, `16` generated, chunks `8/16/32/64/128/256`) shows larger chunks improve 160M throughput until RSS/transient trade-offs dominate. For 1024 + 16, chunk=32 gives `31.23s` / `0.512 tok/s` / `93.75 MiB RSS`; chunk=64 gives `28.22s` / `0.567 tok/s` / `99.02 MiB RSS`; chunk=128 gives `26.65s` / `0.600 tok/s` / `100.06 MiB RSS`; chunk=256 gives only `0.609 tok/s` but jumps to `107.20 MiB RSS`. Memory-budget threshold at chunk=128 requires just under 4 MiB tracked transient (`3840kb` fails; `3968kb` passes), proving `--memory-budget` is a transient cap, not an RSS cap. Recommendation: use chunk=64 for Pythia-160M low-RAM-safe runs, chunk=128 for speed-biased runs with ~100-102 MiB RSS tolerance.
 - [x] Phase 7.12A generic shape/budget-aware prefill policy moves the previous measured defaults into runtime logic: low-ram policy chooses 32 for Pythia-70M-like shapes and 64 for Pythia-160M-like shapes, speed policy chooses 128 for 160M-like shapes when budget allows, explicit `--rama-prefill-chunk-tokens` still wins, and `--no-rama-prefill-chunking` still reproduces full-prompt prefill. Unit coverage verifies policy selection, prompt-length clamping, budget downshift, CLI parser aliases, fixed override, and disabled mode.
+- [x] Phase 7.12B generic eight-row projection reuse extends the shared tiled-linear accumulation hot loop from 4 prompt-token rows to 8 rows with 4-row/scalar fallbacks. Same-session Pythia-160M 512-token speed-policy timing improves wall time `13.21s -> 12.34s`, prefill `9174.13ms -> 8268.24ms`, MLP `5601.07ms -> 4939.77ms`, and QKV projection `2071.98ms -> 1845.34ms` while tracked transient peak stays `3.79 MiB`. A 1024-token speed-policy confirmation completes at `20.13s` / `0.795 tok/s` / `98.92 MiB RSS` with no model-specific branches.
 
 ---
 
