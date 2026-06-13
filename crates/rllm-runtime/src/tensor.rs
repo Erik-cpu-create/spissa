@@ -129,8 +129,7 @@ fn decode_chunks_8(bytes: &[u8], f: impl Fn(u64) -> f32) -> Result<Vec<f32>> {
         .collect())
 }
 
-/// Convert IEEE-754 binary16 bits to `f32`.
-pub fn fp16_to_f32(bits: u16) -> f32 {
+const fn fp16_to_f32_const(bits: u16) -> f32 {
     let sign = ((bits & 0x8000) as u32) << 16;
     let exp = (bits >> 10) & 0x1f;
     let frac = (bits & 0x03ff) as u32;
@@ -159,6 +158,24 @@ pub fn fp16_to_f32(bits: u16) -> f32 {
     };
 
     f32::from_bits(f32_bits)
+}
+
+const fn generate_fp16_lut() -> [f32; 65536] {
+    let mut lut = [0.0; 65536];
+    let mut i = 0;
+    while i < 65536 {
+        lut[i] = fp16_to_f32_const(i as u16);
+        i += 1;
+    }
+    lut
+}
+
+pub static FP16_TO_F32_LUT: [f32; 65536] = generate_fp16_lut();
+
+/// Convert IEEE-754 binary16 bits to `f32` using a fast 256KB Lookup Table.
+#[inline(always)]
+pub fn fp16_to_f32(bits: u16) -> f32 {
+    FP16_TO_F32_LUT[bits as usize]
 }
 
 /// Convert bfloat16 bits to `f32`.
