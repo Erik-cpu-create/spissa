@@ -56,8 +56,8 @@ pub use rotary::{
 };
 pub use streaming::{
     streaming_attention_from_model, streaming_attention_with_runtime_from_model,
-    streaming_linear_from_model, streaming_mlp_from_model, streaming_tile_linear_from_model,
-    streaming_transformer_block_from_model,
+    streaming_linear_from_model, streaming_mlp_from_model, streaming_tile_linear_argmax_from_model,
+    streaming_tile_linear_from_model, streaming_transformer_block_from_model,
     streaming_transformer_block_with_runtime_and_timing_from_model,
     streaming_transformer_block_with_runtime_from_model, StreamingAttentionConfig,
     StreamingAttentionRuntime, StreamingBlockConfig, StreamingBlockParameters,

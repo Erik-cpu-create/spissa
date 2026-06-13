@@ -288,6 +288,70 @@ impl LazyRllmModel {
         Ok(tensor)
     }
 
+    /// Expose the raw compressed chunk bytes directly without decoding.
+    /// Used for specialized kernels like Fused Decode-MatMul for specific codecs.
+    pub fn with_raw_chunk<R>(
+        &mut self,
+        chunk_id: u64,
+        budget: &mut MemoryBudget,
+        f: impl FnOnce(&[u8], &mut MemoryBudget) -> Result<R>,
+    ) -> Result<R> {
+        let chunk = self
+            .chunks_by_id
+            .get(&chunk_id)
+            .ok_or_else(|| RuntimeError::InvalidTensorData(format!("missing chunk {chunk_id}")))?
+            .clone();
+        let tensor_name = self
+            .tensors_by_id
+            .get(&chunk.tensor_id)
+            .map(|tensor| tensor.name.clone());
+
+        let compressed_label = format!("compressed chunk {}", chunk.chunk_id);
+        budget.reserve(chunk.compressed_size as usize, compressed_label.clone())?;
+        let read_start = Instant::now();
+        let compressed = match self.reader.read_chunk(chunk.chunk_id) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                return Err(err.into());
+            }
+        };
+        self.record_rama_chunk_event(
+            "chunk_read",
+            format!("read chunk {}", chunk.chunk_id),
+            &chunk,
+            tensor_name.as_deref(),
+            read_start,
+            read_start.elapsed(),
+            budget,
+        );
+
+        let compressed_checksum_start = Instant::now();
+        let compressed_verified = match self.verify_compressed_chunk_if_needed(&chunk, &compressed)
+        {
+            Ok(verified) => verified,
+            Err(err) => {
+                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                return Err(err);
+            }
+        };
+        if compressed_verified {
+            self.record_rama_chunk_event(
+                "chunk_compressed_checksum",
+                format!("verify compressed chunk {}", chunk.chunk_id),
+                &chunk,
+                tensor_name.as_deref(),
+                compressed_checksum_start,
+                compressed_checksum_start.elapsed(),
+                budget,
+            );
+        }
+
+        let result = f(&compressed, budget);
+        budget.release(chunk.compressed_size as usize, compressed_label)?;
+        result
+    }
+
     /// Decode a single compressed chunk, run a closure with the decoded bytes,
     /// and release both compressed and decoded buffers before returning.
     pub fn with_decoded_chunk<R>(

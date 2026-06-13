@@ -186,6 +186,7 @@ fn run_generation(
         GptNeoxRamaGenerationOptions {
             timing: rama_timing.is_some(),
             prefill_chunk_tokens: effective_prefill_chunk_tokens,
+            collect_logits: logits_out.is_some(),
         },
     )?;
     let generated_text = tokenizer
@@ -260,7 +261,7 @@ fn run_generation(
         write_rama_timing_json(rama_timing_out, timing)?;
         println!("RAMA timing JSON: {}", rama_timing_out);
     }
-    println!("\n[phase-7.12B] Tokenizer-backed tiled RAMA generation completed.");
+    println!("\n[phase-7.12C] Tokenizer-backed tiled RAMA generation completed.");
 
     Ok(())
 }

@@ -2,7 +2,7 @@ use crate::RamaGenerationTiming;
 use crate::{
     gpt_neox_rotary_dim, layer_norm, sample_argmax, sample_top_p,
     streaming_echo_transformer_generate_from_model, streaming_embedding_lookup_from_model,
-    streaming_tile_linear_from_model,
+    streaming_tile_linear_argmax_from_model, streaming_tile_linear_from_model,
     streaming_transformer_block_with_runtime_and_timing_from_model, LazyRllmModel, MemoryBudget,
     RamaContextState, Result, RllmTokenizer, RuntimeError, StreamingAttentionRuntime,
     StreamingBlockConfig, StreamingBlockParameters, StreamingBlockRuntime,
@@ -71,7 +71,7 @@ impl RamaPrefillPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct GptNeoxRamaGenerationOptions {
     /// Collect low-overhead aggregate phase timings without buffering per-chunk trace events.
     pub timing: bool,
@@ -82,6 +82,22 @@ pub struct GptNeoxRamaGenerationOptions {
     /// projection because only the last prompt token produces the first generated
     /// token.
     pub prefill_chunk_tokens: Option<usize>,
+    /// Preserve full per-step logits for parity/debug output.
+    ///
+    /// CLI argmax generation can set this false to stream the lm-head argmax
+    /// without materializing/storing full vocabulary logits. Top-p sampling and
+    /// `--logits-out` callers still require full logits.
+    pub collect_logits: bool,
+}
+
+impl Default for GptNeoxRamaGenerationOptions {
+    fn default() -> Self {
+        Self {
+            timing: false,
+            prefill_chunk_tokens: None,
+            collect_logits: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -279,7 +295,11 @@ impl LayerDecodedGptNeoxRamaTransformer {
 
         let mut token_ids = prompt_token_ids.to_vec();
         let mut generated_token_ids = Vec::with_capacity(self.config.max_new_tokens);
-        let mut step_logits = Vec::with_capacity(self.config.max_new_tokens);
+        let mut step_logits = if options.collect_logits {
+            Vec::with_capacity(self.config.max_new_tokens)
+        } else {
+            Vec::new()
+        };
 
         let mut prefill_position = 0usize;
         let mut prefill = None;
@@ -293,6 +313,7 @@ impl LayerDecodedGptNeoxRamaTransformer {
                 &mut state,
                 budget,
                 is_last_prompt_chunk,
+                options.collect_logits,
                 true,
                 timing.as_mut(),
             )?;
@@ -305,11 +326,13 @@ impl LayerDecodedGptNeoxRamaTransformer {
             prefill_position += chunk.len();
         }
         let prefill = prefill.ok_or_else(|| {
-            RuntimeError::InvalidTensorData("RAMA prefill produced no logits".to_string())
+            RuntimeError::InvalidTensorData("RAMA prefill produced no next token".to_string())
         })?;
         generated_token_ids.push(prefill.token_id);
         token_ids.push(prefill.token_id);
-        step_logits.push(prefill.logits);
+        if options.collect_logits {
+            step_logits.push(prefill.logits);
+        }
 
         while generated_token_ids.len() < self.config.max_new_tokens {
             let input_token = *generated_token_ids.last().ok_or_else(|| {
@@ -325,6 +348,7 @@ impl LayerDecodedGptNeoxRamaTransformer {
                     &mut state,
                     budget,
                     true,
+                    options.collect_logits,
                     false,
                     timing.as_mut(),
                 )?
@@ -338,7 +362,9 @@ impl LayerDecodedGptNeoxRamaTransformer {
             }
             generated_token_ids.push(step.token_id);
             token_ids.push(step.token_id);
-            step_logits.push(step.logits);
+            if options.collect_logits {
+                step_logits.push(step.logits);
+            }
         }
 
         let context_echo_bytes = state.resident_bytes();
@@ -382,6 +408,7 @@ impl LayerDecodedGptNeoxRamaTransformer {
         state: &mut RamaContextState,
         budget: &mut MemoryBudget,
         emit_logits: bool,
+        collect_logits: bool,
         record_prefill_detail: bool,
         mut timing: Option<&mut RamaGenerationTiming>,
     ) -> Result<Option<StreamingNextTokenResult>> {
@@ -562,39 +589,70 @@ impl LayerDecodedGptNeoxRamaTransformer {
             RuntimeError::Shape("gpt-neox RAMA last hidden offset overflow".to_string())
         })?;
         let last_hidden = &final_norm[last_hidden_start..last_hidden_start + hidden_size];
-        let lm_head_started = Instant::now();
-        let logits = match streaming_tile_linear_from_model(
-            model,
-            &self.lm_head_weight,
-            last_hidden,
-            self.lm_head_bias.as_deref(),
-            StreamingTileLinearConfig {
-                linear: StreamingLinearConfig {
-                    batch: 1,
-                    in_features: hidden_size,
-                    out_features: self.config.vocab_size,
-                },
-                tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+        let lm_head_config = StreamingTileLinearConfig {
+            linear: StreamingLinearConfig {
+                batch: 1,
+                in_features: hidden_size,
+                out_features: self.config.vocab_size,
             },
-            budget,
-        ) {
-            Ok(values) => values,
-            Err(err) => {
-                budget.release(sequence_bytes, final_norm_label)?;
-                return Err(err);
-            }
+            tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
         };
-        if let Some(timing) = timing.as_deref_mut() {
-            timing.record_lm_head(elapsed_ns_u64(lm_head_started.elapsed()));
-        }
+        let lm_head_started = Instant::now();
+        let (logits, token_id) =
+            if !collect_logits && matches!(self.config.sampling, StreamingSamplingConfig::Argmax) {
+                let token_id = match streaming_tile_linear_argmax_from_model(
+                    model,
+                    &self.lm_head_weight,
+                    last_hidden,
+                    self.lm_head_bias.as_deref(),
+                    lm_head_config,
+                    budget,
+                ) {
+                    Ok(token_id) => token_id,
+                    Err(err) => {
+                        budget.release(sequence_bytes, final_norm_label)?;
+                        return Err(err);
+                    }
+                };
+                if let Some(timing) = timing.as_deref_mut() {
+                    timing.record_lm_head(elapsed_ns_u64(lm_head_started.elapsed()));
+                }
+                (Vec::new(), token_id)
+            } else {
+                let logits = match streaming_tile_linear_from_model(
+                    model,
+                    &self.lm_head_weight,
+                    last_hidden,
+                    self.lm_head_bias.as_deref(),
+                    lm_head_config,
+                    budget,
+                ) {
+                    Ok(values) => values,
+                    Err(err) => {
+                        budget.release(sequence_bytes, final_norm_label)?;
+                        return Err(err);
+                    }
+                };
+                if let Some(timing) = timing.as_deref_mut() {
+                    timing.record_lm_head(elapsed_ns_u64(lm_head_started.elapsed()));
+                }
+
+                let sampling_started = Instant::now();
+                let token_id = match sample_gpt_neox_logits(&logits, self.config.sampling) {
+                    Ok(token_id) => token_id,
+                    Err(err) => {
+                        budget.release(sequence_bytes, final_norm_label)?;
+                        return Err(err);
+                    }
+                };
+                if let Some(timing) = timing.as_deref_mut() {
+                    timing.record_sampling(elapsed_ns_u64(sampling_started.elapsed()));
+                }
+                let logits = if collect_logits { logits } else { Vec::new() };
+                (logits, token_id)
+            };
         drop(final_norm);
         budget.release(sequence_bytes, final_norm_label)?;
-
-        let sampling_started = Instant::now();
-        let token_id = sample_gpt_neox_logits(&logits, self.config.sampling)?;
-        if let Some(timing) = timing.as_deref_mut() {
-            timing.record_sampling(elapsed_ns_u64(sampling_started.elapsed()));
-        }
         Ok(Some(StreamingNextTokenResult { logits, token_id }))
     }
 
@@ -2233,6 +2291,52 @@ mod tests {
     }
 
     #[test]
+    fn layer_decoded_gpt_neox_can_skip_logit_collection_for_argmax_generation() {
+        let path = temp_path("layer-decode-no-logits");
+        write_gpt_neox_stack_model(&path);
+        let mut logits_model = LazyRllmModel::open(&path).unwrap();
+        let mut no_logits_model = LazyRllmModel::open(&path).unwrap();
+        let prompt = [0, 2, 1];
+        let build = build_config(3);
+        let logits_transformer =
+            prepare_gpt_neox_rama_layer_decode_transformer_from_model(&mut logits_model, build)
+                .unwrap();
+        let no_logits_transformer =
+            prepare_gpt_neox_rama_layer_decode_transformer_from_model(&mut no_logits_model, build)
+                .unwrap();
+        let mut logits_budget = MemoryBudget::new(32768);
+        let mut no_logits_budget = MemoryBudget::new(32768);
+
+        let expected = logits_transformer
+            .generate_from_model(&mut logits_model, &prompt, &mut logits_budget)
+            .unwrap();
+        let actual = no_logits_transformer
+            .generate_from_model_with_options(
+                &mut no_logits_model,
+                &prompt,
+                &mut no_logits_budget,
+                GptNeoxRamaGenerationOptions {
+                    timing: true,
+                    prefill_chunk_tokens: Some(2),
+                    collect_logits: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(actual.generated_token_ids, expected.generated_token_ids);
+        assert_eq!(actual.token_ids, expected.token_ids);
+        assert!(actual.step_logits.is_empty());
+        assert_eq!(
+            actual.context_memory_bytes(),
+            expected.context_memory_bytes()
+        );
+        assert_eq!(logits_budget.current_bytes(), 0);
+        assert_eq!(no_logits_budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn layer_decoded_gpt_neox_chunked_prefill_matches_full_prefill() {
         let path = temp_path("layer-decode-chunked-prefill");
         write_gpt_neox_stack_model(&path);
@@ -2260,6 +2364,7 @@ mod tests {
                 GptNeoxRamaGenerationOptions {
                     timing: true,
                     prefill_chunk_tokens: Some(2),
+                    collect_logits: true,
                 },
             )
             .unwrap();
@@ -2325,6 +2430,7 @@ mod tests {
                 GptNeoxRamaGenerationOptions {
                     timing: false,
                     prefill_chunk_tokens: Some(0),
+                    collect_logits: true,
                 },
             )
             .unwrap_err();
