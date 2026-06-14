@@ -73,6 +73,7 @@ pub use streaming::{
     streaming_mlp_from_model, streaming_silu_gate_up_from_model,
     streaming_sparse_silu_gate_up_from_model, streaming_sparse_tile_linear_from_model,
     streaming_tile_linear_argmax_candidate_rows_from_model,
+    streaming_tile_linear_argmax_candidate_rows_range_from_model,
     streaming_tile_linear_argmax_from_model, streaming_tile_linear_argmax_prefix_from_model,
     streaming_tile_linear_from_model, streaming_tile_linear_multiply_into_from_model,
     streaming_transformer_block_from_model,

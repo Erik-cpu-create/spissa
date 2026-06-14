@@ -653,6 +653,60 @@ mod tests {
     }
 
     #[test]
+    fn streaming_tile_linear_argmax_candidate_rows_range_scores_only_candidates() {
+        let path = temp_path("tile-linear-argmax-candidate-ranges-bf16");
+        let weight_bf16 = vec![
+            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0x4040,
+            0x0000, 0x3f80,
+        ];
+        let weight_f32: Vec<f32> = weight_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "linear.argmax.candidate-ranges.bf16.weight",
+            vec![4, 3],
+            &weight_bf16,
+            10,
+        );
+        writer.finalize().unwrap();
+
+        let input = vec![1.0, 2.0, 3.0];
+        let logits = linear(&input, &weight_f32, None, 1, 3, 4).unwrap();
+        assert_eq!(sample_argmax(&logits).unwrap(), 2);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(64);
+
+        let actual = streaming_tile_linear_argmax_candidate_rows_range_from_model(
+            &mut model,
+            "linear.argmax.candidate-ranges.bf16.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 3,
+                    out_features: 4,
+                },
+                tile_elements: 2,
+            },
+            &[1, 3],
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(actual, 3);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(budget.peak_bytes() < 64);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn streaming_tile_linear_argmax_uses_raw_bf16_batch1_path() {
         let path = temp_path("tile-linear-argmax-bf16");
         let weight_bf16 = vec![
