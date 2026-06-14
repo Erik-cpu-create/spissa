@@ -2086,6 +2086,26 @@ fn accumulate_raw_16bit_chunk_argmax(
     state: &mut StreamingLinearArgmaxState<'_>,
     weight_name: &str,
 ) -> Result<()> {
+    accumulate_raw_16bit_chunk_argmax_row_blocked(
+        input,
+        raw_bytes,
+        element_start,
+        config,
+        dtype,
+        state,
+        weight_name,
+    )
+}
+
+fn accumulate_raw_16bit_chunk_argmax_row_blocked(
+    input: &[f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    dtype: rllm_container::DType,
+    state: &mut StreamingLinearArgmaxState<'_>,
+    weight_name: &str,
+) -> Result<()> {
     if !raw_bytes.len().is_multiple_of(2) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "Raw 16-bit argmax stream for {weight_name} has odd length"
@@ -2116,6 +2136,93 @@ fn accumulate_raw_16bit_chunk_argmax(
 
     let mut local_idx = 0usize;
     let mut global_idx = element_start;
+
+    while local_idx < weight_elements && !global_idx.is_multiple_of(config.in_features) {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        while state.current_out_feature < out_feature {
+            state.finish_current(config, weight_name)?;
+        }
+        if state.current_out_feature != out_feature {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+                out_feature, state.current_out_feature
+            )));
+        }
+
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+        state.current_acc +=
+            raw_16bit_dot_segment(input, raw_bytes, local_idx, in_feature, row_len, dtype)?;
+
+        local_idx += row_len;
+        global_idx += row_len;
+        if global_idx.is_multiple_of(config.in_features) {
+            state.finish_current(config, weight_name)?;
+        }
+    }
+
+    let row_block_elements = config.in_features.checked_mul(4).ok_or_else(|| {
+        RuntimeError::Shape("argmax row block element count overflow".to_string())
+    })?;
+    while local_idx + row_block_elements <= weight_elements {
+        let out_feature = global_idx / config.in_features;
+        if out_feature + 3 >= config.out_features {
+            break;
+        }
+        while state.current_out_feature < out_feature {
+            state.finish_current(config, weight_name)?;
+        }
+        if state.current_out_feature != out_feature {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+                out_feature, state.current_out_feature
+            )));
+        }
+
+        let row0_start = local_idx;
+        let row1_start = row0_start + config.in_features;
+        let row2_start = row1_start + config.in_features;
+        let row3_start = row2_start + config.in_features;
+        let mut acc0 = state.current_acc;
+        let mut acc1 = state
+            .bias
+            .and_then(|values| values.get(out_feature + 1))
+            .copied()
+            .unwrap_or(0.0);
+        let mut acc2 = state
+            .bias
+            .and_then(|values| values.get(out_feature + 2))
+            .copied()
+            .unwrap_or(0.0);
+        let mut acc3 = state
+            .bias
+            .and_then(|values| values.get(out_feature + 3))
+            .copied()
+            .unwrap_or(0.0);
+
+        let mut idx = 0usize;
+        while idx < config.in_features {
+            let x = input[idx];
+            acc0 += x * raw_16bit_weight_at(raw_bytes, row0_start + idx, dtype);
+            acc1 += x * raw_16bit_weight_at(raw_bytes, row1_start + idx, dtype);
+            acc2 += x * raw_16bit_weight_at(raw_bytes, row2_start + idx, dtype);
+            acc3 += x * raw_16bit_weight_at(raw_bytes, row3_start + idx, dtype);
+            idx += 1;
+        }
+
+        state.current_acc = acc0;
+        state.finish_current(config, weight_name)?;
+        state.current_acc = acc1;
+        state.finish_current(config, weight_name)?;
+        state.current_acc = acc2;
+        state.finish_current(config, weight_name)?;
+        state.current_acc = acc3;
+        state.finish_current(config, weight_name)?;
+
+        local_idx += row_block_elements;
+        global_idx += row_block_elements;
+    }
+
     while local_idx < weight_elements {
         let out_feature = global_idx / config.in_features;
         let in_feature = global_idx % config.in_features;
@@ -3885,6 +3992,45 @@ mod tests {
         );
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn raw_bf16_argmax_row_block_kernel_matches_materialized_partial_chunk() {
+        let weight_bf16 = vec![
+            0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000, 0xbf00,
+            0x3f40, 0x3f80, 0x4000, 0x4040, 0xc040, 0x3f00, 0x3e80,
+        ];
+        let raw = bf16_bytes(&weight_bf16);
+        let weight_f32: Vec<f32> = weight_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let input = vec![1.5, -2.0, 0.25];
+        let bias = vec![0.25, -0.5, 0.75, 1.0, -1.25, 1.5];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 3,
+            out_features: 6,
+        };
+        let expected_logits = linear(&input, &weight_f32, Some(&bias), 1, 3, 6).unwrap();
+        let expected = sample_argmax(&expected_logits).unwrap();
+        let mut state = StreamingLinearArgmaxState::new(Some(&bias));
+
+        accumulate_raw_16bit_chunk_argmax_row_blocked(
+            &input,
+            &raw[2..],
+            1,
+            config,
+            DType::Bf16,
+            &mut state,
+            "linear.argmax.bf16.row-block.weight",
+        )
+        .unwrap();
+        let actual = state
+            .finish(config, "linear.argmax.bf16.row-block.weight")
+            .unwrap();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
