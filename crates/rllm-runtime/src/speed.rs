@@ -5,6 +5,7 @@ pub const RLLM_AIP_ATTENTION_TOPK_ENV: &str = "RLLM_AIP_ATTENTION_TOPK";
 pub const RLLM_AIP_MLP_TOPK_ENV: &str = "RLLM_AIP_MLP_TOPK";
 pub const RLLM_AIP_DOWN_TOPK_ENV: &str = "RLLM_AIP_DOWN_TOPK";
 pub const RLLM_AIP_LM_HEAD_TOPK_ENV: &str = "RLLM_AIP_LM_HEAD_TOPK";
+pub const RLLM_AIP_LM_HEAD_RESCORE_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE";
 pub const RLLM_AIP_LM_HEAD_ROWS_ENV: &str = "RLLM_AIP_LM_HEAD_ROWS";
 pub const RLLM_AIP_COLUMN_CACHE_ENV: &str = "RLLM_AIP_COLUMN_CACHE";
 pub const RLLM_AIP_INPUT_TILES_ENV: &str = "RLLM_AIP_INPUT_TILES";
@@ -65,6 +66,7 @@ pub struct RamaExperimentalSpeedConfig {
     pub aip_mlp_topk: Option<usize>,
     pub aip_down_topk: Option<usize>,
     pub aip_lm_head_topk: Option<usize>,
+    pub aip_lm_head_rescore: Option<usize>,
     pub aip_lm_head_rows: Option<usize>,
     pub aip_column_cache: bool,
     pub aip_input_tiles: bool,
@@ -91,6 +93,9 @@ impl RamaExperimentalSpeedConfig {
             aip_lm_head_topk: parse_aip_topk(
                 std::env::var(RLLM_AIP_LM_HEAD_TOPK_ENV).ok().as_deref(),
             ),
+            aip_lm_head_rescore: parse_aip_lm_head_rescore(
+                std::env::var(RLLM_AIP_LM_HEAD_RESCORE_ENV).ok().as_deref(),
+            ),
             aip_lm_head_rows: parse_aip_lm_head_rows(
                 std::env::var(RLLM_AIP_LM_HEAD_ROWS_ENV).ok().as_deref(),
             ),
@@ -115,6 +120,7 @@ impl RamaExperimentalSpeedConfig {
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -370,6 +376,10 @@ pub fn parse_aip_lm_head_rows(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
 
+pub fn parse_aip_lm_head_rescore(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
 pub fn parse_aip_column_cache_enabled(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
@@ -461,6 +471,7 @@ mod tests {
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -477,6 +488,7 @@ mod tests {
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -581,6 +593,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_lm_head_rescore_keeps_only_positive_values() {
+        assert_eq!(parse_aip_lm_head_rescore(Some("8")), Some(8));
+        assert_eq!(parse_aip_lm_head_rescore(Some("1")), Some(1));
+        assert_eq!(parse_aip_lm_head_rescore(Some("0")), None);
+        assert_eq!(parse_aip_lm_head_rescore(Some("-2")), None);
+        assert_eq!(parse_aip_lm_head_rescore(Some("bad")), None);
+        assert_eq!(parse_aip_lm_head_rescore(None), None);
+    }
+
+    #[test]
     fn lm_head_prefix_rows_are_bounded_and_only_when_enabled() {
         let config = RamaExperimentalSpeedConfig {
             enabled: true,
@@ -590,6 +612,7 @@ mod tests {
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
             aip_lm_head_rows: Some(512),
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -607,6 +630,7 @@ mod tests {
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
             aip_lm_head_rows: Some(512),
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -625,6 +649,7 @@ mod tests {
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -659,6 +684,7 @@ mod tests {
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -685,6 +711,7 @@ mod tests {
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -711,6 +738,7 @@ mod tests {
             aip_mlp_topk: None,
             aip_down_topk: Some(2),
             aip_lm_head_topk: Some(16),
+            aip_lm_head_rescore: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,

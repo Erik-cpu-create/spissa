@@ -344,6 +344,22 @@ pub fn sample_argmax_excluding(logits: &[f32], excluded_token: Option<usize>) ->
     })
 }
 
+pub fn select_top_indices_by_value(values: &[f32], limit: usize) -> Vec<usize> {
+    let limit = limit.min(values.len());
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut scored: Vec<(usize, f32)> = values.iter().copied().enumerate().collect();
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    scored.into_iter().take(limit).map(|(idx, _)| idx).collect()
+}
+
 /// Deterministic temperature + top-p sampling.
 ///
 /// Uses a tiny in-house xorshift PRNG so tests and prompts can be reproduced
@@ -530,6 +546,17 @@ mod tests {
             1
         );
         assert_eq!(sample_argmax_excluding(&[2.0], Some(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn top_indices_by_value_are_deterministic_candidates() {
+        let logits = [0.5, 4.0, 4.0, -1.0, 3.5];
+        assert_eq!(select_top_indices_by_value(&logits, 3), vec![1, 2, 4]);
+        assert_eq!(
+            select_top_indices_by_value(&logits, 99),
+            vec![1, 2, 4, 0, 3]
+        );
+        assert!(select_top_indices_by_value(&logits, 0).is_empty());
     }
 
     #[test]
