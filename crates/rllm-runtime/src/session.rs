@@ -97,6 +97,32 @@ impl RamaSessionPhaseTimings {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RamaRollingStats {
+    pub submitted_tasks: usize,
+    pub worker_wakeups: usize,
+    pub sequential_fallbacks: usize,
+    pub peak_scratch_bytes: usize,
+}
+
+impl RamaRollingStats {
+    pub fn add_assign(&mut self, other: RamaRollingStats) {
+        self.submitted_tasks = self.submitted_tasks.saturating_add(other.submitted_tasks);
+        self.worker_wakeups = self.worker_wakeups.saturating_add(other.worker_wakeups);
+        self.sequential_fallbacks = self
+            .sequential_fallbacks
+            .saturating_add(other.sequential_fallbacks);
+        self.peak_scratch_bytes = self.peak_scratch_bytes.max(other.peak_scratch_bytes);
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.submitted_tasks == 0
+            && self.worker_wakeups == 0
+            && self.sequential_fallbacks == 0
+            && self.peak_scratch_bytes == 0
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RamaSessionTurnMetrics {
     pub input_tokens: usize,
@@ -112,6 +138,7 @@ pub struct RamaSessionTurnMetrics {
     pub end_to_end_tok_s: f64,
     pub context_memory_bytes: usize,
     pub peak_transient_bytes: usize,
+    pub rolling_stats: RamaRollingStats,
     pub phase_timings: RamaSessionPhaseTimings,
 }
 
@@ -155,6 +182,10 @@ pub trait RamaSessionAdapter {
     ) -> Result<Option<RamaSessionStep>>;
 
     fn take_last_phase_timings(&mut self) -> Option<RamaSessionPhaseTimings> {
+        None
+    }
+
+    fn take_last_rolling_stats(&mut self) -> Option<RamaRollingStats> {
         None
     }
 }
@@ -231,6 +262,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
         let turn_start = Instant::now();
         let mut flushed_pending_tokens = 0usize;
         let mut phase_timings = RamaSessionPhaseTimings::default();
+        let mut rolling_stats = RamaRollingStats::default();
         if let Some(token) = self.pending_uncached_token {
             let emitted = self.adapter.append_tokens(&[token], budget, false)?;
             if emitted.is_some() {
@@ -240,6 +272,9 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
             }
             if let Some(timings) = self.adapter.take_last_phase_timings() {
                 phase_timings.add_assign(timings);
+            }
+            if let Some(stats) = self.adapter.take_last_rolling_stats() {
+                rolling_stats.add_assign(stats);
             }
             self.pending_uncached_token = None;
             flushed_pending_tokens = 1;
@@ -256,6 +291,9 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
             })?;
         if let Some(timings) = self.adapter.take_last_phase_timings() {
             phase_timings.add_assign(timings);
+        }
+        if let Some(stats) = self.adapter.take_last_rolling_stats() {
+            rolling_stats.add_assign(stats);
         }
         let prefill_ms = prefill_start.elapsed().as_secs_f64() * 1000.0;
         let ttft_ms = turn_start.elapsed().as_secs_f64() * 1000.0;
@@ -283,6 +321,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     end_to_end_tok_s: 1.0 / (end_to_end_ms / 1000.0).max(f64::EPSILON),
                     context_memory_bytes: self.adapter.context_memory_bytes(),
                     peak_transient_bytes: budget.peak_bytes(),
+                    rolling_stats,
                     phase_timings,
                 },
             ));
@@ -303,6 +342,9 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                 })?;
             if let Some(timings) = self.adapter.take_last_phase_timings() {
                 phase_timings.add_assign(timings);
+            }
+            if let Some(stats) = self.adapter.take_last_rolling_stats() {
+                rolling_stats.add_assign(stats);
             }
             generated_token_ids.push(step.token_id);
             self.token_history.push(step.token_id);
@@ -337,6 +379,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     / (end_to_end_ms / 1000.0).max(f64::EPSILON),
                 context_memory_bytes: self.adapter.context_memory_bytes(),
                 peak_transient_bytes: budget.peak_bytes(),
+                rolling_stats,
                 phase_timings,
             },
         ))
@@ -361,15 +404,17 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug)]
     struct RecordingAdapter {
         max_seq_len: usize,
         context_len: usize,
         sample_base: usize,
+        steps: Vec<Result<Option<RamaSessionStep>>>,
         appends: Vec<(Vec<usize>, bool)>,
         faults: Vec<AppendFault>,
         transient_bytes: usize,
         phase_timings: Vec<RamaSessionPhaseTimings>,
+        rolling_stats: Vec<RamaRollingStats>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,10 +437,12 @@ mod tests {
                 max_seq_len,
                 context_len: 0,
                 sample_base: 100,
+                steps: Vec::new(),
                 appends: Vec::new(),
                 faults: Vec::new(),
                 transient_bytes: 0,
                 phase_timings: Vec::new(),
+                rolling_stats: Vec::new(),
             }
         }
 
@@ -469,6 +516,15 @@ mod tests {
                     })),
                 };
             }
+            let scripted_step = if emit_logits && !self.steps.is_empty() {
+                match self.steps.remove(0) {
+                    Ok(Some(step)) => Some(step),
+                    Ok(None) => return Ok(None),
+                    Err(err) => return Err(err),
+                }
+            } else {
+                None
+            };
             if self.transient_bytes > 0 {
                 budget.reserve(self.transient_bytes, "recording adapter transient")?;
                 budget.release(self.transient_bytes, "recording adapter transient")?;
@@ -476,12 +532,16 @@ mod tests {
             self.appends.push((tokens.to_vec(), emit_logits));
             self.context_len += tokens.len();
             if emit_logits {
-                let token_id = self.sample_base + self.appends.len();
-                Ok(Some(RamaSessionStep {
-                    token_id,
-                    logits: None,
-                    cached_context_len_after: self.context_len,
-                }))
+                if let Some(step) = scripted_step {
+                    Ok(Some(step))
+                } else {
+                    let token_id = self.sample_base + self.appends.len();
+                    Ok(Some(RamaSessionStep {
+                        token_id,
+                        logits: None,
+                        cached_context_len_after: self.context_len,
+                    }))
+                }
             } else {
                 Ok(None)
             }
@@ -492,6 +552,14 @@ mod tests {
                 None
             } else {
                 Some(self.phase_timings.remove(0))
+            }
+        }
+
+        fn take_last_rolling_stats(&mut self) -> Option<RamaRollingStats> {
+            if self.rolling_stats.is_empty() {
+                None
+            } else {
+                Some(self.rolling_stats.remove(0))
             }
         }
     }
@@ -775,5 +843,32 @@ mod tests {
         assert_eq!(result.metrics.phase_timings.transformer_ms, 22.0);
         assert_eq!(result.metrics.phase_timings.final_norm_ms, 33.0);
         assert_eq!(result.metrics.phase_timings.lm_head_ms, 44.0);
+    }
+
+    #[test]
+    fn turn_metrics_collect_adapter_rolling_stats() {
+        let mut adapter = RecordingAdapter::new(16);
+        adapter.steps = vec![Ok(Some(RamaSessionStep {
+            token_id: 7,
+            logits: None,
+            cached_context_len_after: 1,
+        }))];
+        adapter.rolling_stats.push(RamaRollingStats {
+            submitted_tasks: 3,
+            worker_wakeups: 2,
+            sequential_fallbacks: 1,
+            peak_scratch_bytes: 64,
+        });
+        let mut session = RamaChatSession::new(adapter);
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session
+            .generate_turn(&[1], 1, &mut budget, |_| true)
+            .unwrap();
+
+        assert_eq!(result.metrics.rolling_stats.submitted_tasks, 3);
+        assert_eq!(result.metrics.rolling_stats.worker_wakeups, 2);
+        assert_eq!(result.metrics.rolling_stats.sequential_fallbacks, 1);
+        assert_eq!(result.metrics.rolling_stats.peak_scratch_bytes, 64);
     }
 }
