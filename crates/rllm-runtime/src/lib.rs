@@ -57,11 +57,12 @@ pub use rotary::{
 };
 pub use speed::{
     parse_aip_column_cache_enabled, parse_aip_edge_layers, parse_aip_edge_topk,
-    parse_aip_input_tiles_enabled, parse_aip_lm_head_agreement_enabled, parse_aip_lm_head_rescore,
-    parse_aip_lm_head_rows, parse_aip_no_repeat_last_enabled, parse_aip_policy,
-    parse_aip_repeat_run_limit, parse_aip_topk, parse_experimental_speed_enabled, parse_turbo_topk,
-    select_top_abs_indices, RamaAipPolicyKind, RamaAipProjectionDecision, RamaAipProjectionKind,
-    RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats,
+    parse_aip_input_tiles_enabled, parse_aip_lm_head_agreement_enabled,
+    parse_aip_lm_head_repeat_margin_milli, parse_aip_lm_head_rescore, parse_aip_lm_head_rows,
+    parse_aip_no_repeat_last_enabled, parse_aip_policy, parse_aip_repeat_run_limit, parse_aip_topk,
+    parse_experimental_speed_enabled, parse_turbo_topk, select_top_abs_indices, RamaAipPolicyKind,
+    RamaAipProjectionDecision, RamaAipProjectionKind, RamaExperimentalSpeedConfig,
+    RamaExperimentalSpeedStats,
 };
 pub use streaming::{
     input_tile_sidecar_weight_name, streaming_attention_from_model,

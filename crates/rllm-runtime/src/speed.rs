@@ -10,6 +10,7 @@ pub const RLLM_AIP_LM_HEAD_TOPK_ENV: &str = "RLLM_AIP_LM_HEAD_TOPK";
 pub const RLLM_AIP_LM_HEAD_RESCORE_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE";
 pub const RLLM_AIP_LM_HEAD_AGREEMENT_ENV: &str = "RLLM_AIP_LM_HEAD_AGREEMENT";
 pub const RLLM_AIP_LM_HEAD_ROWS_ENV: &str = "RLLM_AIP_LM_HEAD_ROWS";
+pub const RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI_ENV: &str = "RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI";
 pub const RLLM_AIP_COLUMN_CACHE_ENV: &str = "RLLM_AIP_COLUMN_CACHE";
 pub const RLLM_AIP_INPUT_TILES_ENV: &str = "RLLM_AIP_INPUT_TILES";
 pub const RLLM_AIP_NO_REPEAT_LAST_ENV: &str = "RLLM_AIP_NO_REPEAT_LAST";
@@ -75,6 +76,7 @@ pub struct RamaExperimentalSpeedConfig {
     pub aip_lm_head_rescore: Option<usize>,
     pub aip_lm_head_agreement: bool,
     pub aip_lm_head_rows: Option<usize>,
+    pub aip_lm_head_repeat_margin_milli: Option<usize>,
     pub aip_column_cache: bool,
     pub aip_input_tiles: bool,
     pub aip_no_repeat_last: bool,
@@ -118,6 +120,11 @@ impl RamaExperimentalSpeedConfig {
             aip_lm_head_rows: parse_aip_lm_head_rows(
                 std::env::var(RLLM_AIP_LM_HEAD_ROWS_ENV).ok().as_deref(),
             ),
+            aip_lm_head_repeat_margin_milli: parse_aip_lm_head_repeat_margin_milli(
+                std::env::var(RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
             aip_column_cache: parse_aip_column_cache_enabled(
                 std::env::var(RLLM_AIP_COLUMN_CACHE_ENV).ok().as_deref(),
             ),
@@ -147,6 +154,7 @@ impl RamaExperimentalSpeedConfig {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -473,6 +481,10 @@ pub fn parse_aip_lm_head_rows(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
 
+pub fn parse_aip_lm_head_repeat_margin_milli(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
 pub fn parse_aip_lm_head_rescore(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
@@ -592,6 +604,7 @@ mod tests {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -613,6 +626,7 @@ mod tests {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -744,6 +758,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_lm_head_repeat_margin_milli_keeps_only_positive_values() {
+        assert_eq!(
+            parse_aip_lm_head_repeat_margin_milli(Some("250")),
+            Some(250)
+        );
+        assert_eq!(parse_aip_lm_head_repeat_margin_milli(Some("1")), Some(1));
+        assert_eq!(parse_aip_lm_head_repeat_margin_milli(Some("0")), None);
+        assert_eq!(parse_aip_lm_head_repeat_margin_milli(Some("-2")), None);
+        assert_eq!(parse_aip_lm_head_repeat_margin_milli(Some("bad")), None);
+        assert_eq!(parse_aip_lm_head_repeat_margin_milli(None), None);
+    }
+
+    #[test]
     fn parse_aip_lm_head_rescore_keeps_only_positive_values() {
         assert_eq!(parse_aip_lm_head_rescore(Some("8")), Some(8));
         assert_eq!(parse_aip_lm_head_rescore(Some("1")), Some(1));
@@ -798,6 +825,7 @@ mod tests {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: Some(512),
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -820,6 +848,7 @@ mod tests {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: Some(512),
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -843,6 +872,7 @@ mod tests {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -882,6 +912,7 @@ mod tests {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -913,6 +944,7 @@ mod tests {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -944,6 +976,7 @@ mod tests {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -980,6 +1013,7 @@ mod tests {
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
