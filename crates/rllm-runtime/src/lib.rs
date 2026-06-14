@@ -17,6 +17,7 @@ mod ops;
 mod planner;
 mod rolling;
 mod rotary;
+mod speed;
 mod streaming;
 mod tensor;
 mod tiny;
@@ -52,6 +53,10 @@ pub use planner::{
 pub use rotary::{
     apply_gpt_neox_rotary_inplace, gpt_neox_rotary_dim, scaled_dot_product_attention_with_cache,
     KvAttentionConfig, KvCache, RotaryEmbeddingConfig,
+};
+pub use speed::{
+    parse_experimental_speed_enabled, parse_turbo_topk, select_top_abs_indices,
+    RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats,
 };
 pub use streaming::{
     streaming_attention_from_model, streaming_attention_with_runtime_from_model,
