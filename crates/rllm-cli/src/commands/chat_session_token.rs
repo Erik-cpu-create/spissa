@@ -6,8 +6,8 @@ use rllm_runtime::{
         LlamaRamaGenerationConfig, LlamaRamaGenerationOptions, LlamaRamaSessionAdapter,
         LlamaTextGenerationResult,
     },
-    LazyRllmModel, MemoryBudget, RamaChatSession, RamaIntegrityMode, RamaSessionTurnResult,
-    StreamingSamplingConfig,
+    LazyRllmModel, MemoryBudget, RamaChatSession, RamaIntegrityMode, RamaSessionPhaseTimings,
+    RamaSessionTurnResult, StreamingSamplingConfig,
 };
 use std::fs;
 use std::path::Path;
@@ -200,6 +200,17 @@ fn token_match_summary(baseline: &[usize], session: &[usize]) -> TokenMatchSumma
     }
 }
 
+fn format_phase_timing_note(timings: RamaSessionPhaseTimings) -> String {
+    format!(
+        "embedding={:.2}ms transformer={:.2}ms final_norm={:.2}ms lm_head={:.2}ms profiled_total={:.2}ms",
+        timings.embedding_ms,
+        timings.transformer_ms,
+        timings.final_norm_ms,
+        timings.lm_head_ms,
+        timings.total_ms()
+    )
+}
+
 fn write_report(
     out: &str,
     file: &str,
@@ -237,11 +248,11 @@ fn write_report(
     body.push('\n');
     body.push_str("```\n\n");
     body.push_str("## Results\n\n");
-    body.push_str("| turn | baseline input tokens | session input tokens | baseline generated | session generated | baseline TTFT | session TTFT | baseline decode ms | session decode ms | baseline e2e ms | session e2e ms | baseline decode tok/s | session decode tok/s | baseline e2e tok/s | session e2e tok/s | token match | history match | notes |\n");
-    body.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|\n");
+    body.push_str("| turn | baseline input tokens | session input tokens | baseline generated | session generated | baseline TTFT | session TTFT | baseline decode ms | session decode ms | baseline e2e ms | session e2e ms | baseline decode tok/s | session decode tok/s | baseline e2e tok/s | session e2e tok/s | token match | history match | session phase timing | notes |\n");
+    body.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|\n");
     for row in rows {
         body.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {:.2} ms | {:.2} ms | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {} | session_replayed={} flushed={} baseline_peak={} session_peak={} |\n",
+            "| {} | {} | {} | {} | {} | {:.2} ms | {:.2} ms | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {} | {} | session_replayed={} flushed={} baseline_peak={} session_peak={} |\n",
             row.turn_index,
             row.baseline_input_tokens,
             row.session_input_tokens,
@@ -259,6 +270,7 @@ fn write_report(
             row.session_result.metrics.end_to_end_tok_s,
             row.generated_match.note,
             row.history_match.note,
+            format_phase_timing_note(row.session_result.metrics.phase_timings),
             row.session_result.metrics.replayed_tokens,
             row.session_result.metrics.flushed_pending_tokens,
             row.baseline_peak_transient_bytes,
@@ -271,12 +283,13 @@ fn write_report(
     } else {
         body.push_str("Baseline and session token streams diverged. Treat timing as inconclusive until the mismatch is explained.\n\n");
     }
+    body.push_str("R3 phase timing is aggregated from LLaMA session adapter append calls for the measured turn. Treat it as coarse wall-clock evidence for choosing the next hot-path target, not cycle-level profiling.\n\n");
     body.push_str("## Decision\n\n");
     body.push_str("needs follow-up\n\n");
     body.push_str("Reason: review the active report and move it to success, failed, or inconclusive after comparing the measured rows.\n\n");
     body.push_str("Paper value:\n\n- not paper-worthy yet\n\n");
     body.push_str("## Next Experiment\n\n");
-    body.push_str("Use the validated token-native rows to decide whether R3 should attack replay, matmul/projection, or memory bandwidth first.\n");
+    body.push_str("Use the R3 phase timing columns to decide whether the next pass should target LM head/sampling, transformer matmul, KV-cache layout, or memory bandwidth.\n");
     fs::write(out, body)?;
     Ok(())
 }
@@ -391,7 +404,11 @@ fn normalized_path_components(path: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_token_turns, token_match_summary, validate_report_output_path};
+    use super::{
+        format_phase_timing_note, parse_token_turns, token_match_summary,
+        validate_report_output_path,
+    };
+    use rllm_runtime::RamaSessionPhaseTimings;
 
     #[test]
     fn parse_token_turns_accepts_comma_separated_turns() {
@@ -452,6 +469,22 @@ mod tests {
         let mismatched = token_match_summary(&[1, 2], &[1, 3]);
         assert!(!mismatched.matched);
         assert!(mismatched.note.contains("baseline=[1, 2] session=[1, 3]"));
+    }
+
+    #[test]
+    fn format_phase_timing_note_summarizes_decode_subphases() {
+        let note = format_phase_timing_note(RamaSessionPhaseTimings {
+            embedding_ms: 1.25,
+            transformer_ms: 8.5,
+            final_norm_ms: 0.75,
+            lm_head_ms: 2.0,
+        });
+
+        assert!(note.contains("embedding=1.25ms"));
+        assert!(note.contains("transformer=8.50ms"));
+        assert!(note.contains("final_norm=0.75ms"));
+        assert!(note.contains("lm_head=2.00ms"));
+        assert!(note.contains("profiled_total=12.50ms"));
     }
 
     #[test]
