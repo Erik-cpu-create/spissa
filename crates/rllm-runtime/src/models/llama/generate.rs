@@ -9,9 +9,9 @@ use crate::{
     scaled_dot_product_attention_with_cache, streaming_silu_gate_up_from_model,
     streaming_sparse_silu_gate_up_from_model, streaming_sparse_tile_linear_from_model,
     streaming_tile_linear_from_model, streaming_tile_linear_multiply_into_from_model,
-    LazyRllmModel, MemoryBudget, RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats,
-    RamaTransformerPhaseTimings, Result, StreamingLinearConfig, StreamingTileLinearConfig,
-    DEFAULT_STREAMING_TILE_ELEMENTS,
+    LazyRllmModel, MemoryBudget, RamaAipProjectionKind, RamaExperimentalSpeedConfig,
+    RamaExperimentalSpeedStats, RamaTransformerPhaseTimings, Result, StreamingLinearConfig,
+    StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use std::time::Instant;
 
@@ -26,6 +26,8 @@ pub struct LlamaStreamingBlockConfig {
     pub rope_theta: f32,
     pub causal: bool,
     pub position_offset: usize,
+    pub layer_index: usize,
+    pub total_layers: usize,
     pub experimental_speed: RamaExperimentalSpeedConfig,
 }
 
@@ -212,15 +214,28 @@ pub fn streaming_llama_transformer_block_with_timing(
         tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
     };
     let started = Instant::now();
-    let sparse_gate_up = if config.experimental_speed.enabled {
+    let gate_up_aip_decision = config.experimental_speed.aip_decision_for_projection(
+        config.layer_index,
+        config.total_layers,
+        RamaAipProjectionKind::MlpGateUp,
+        config.hidden_size,
+        128,
+    );
+    let sparse_gate_up = if gate_up_aip_decision.enabled {
         if let Some(stats) = &mut experimental_speed_stats {
+            stats.record_aip_policy(config.experimental_speed.aip_policy);
+            let sparse_config = crate::RamaExperimentalSpeedConfig {
+                enabled: true,
+                aip_policy: config.experimental_speed.aip_policy,
+                aip_topk: Some(gate_up_aip_decision.topk),
+            };
             streaming_sparse_silu_gate_up_from_model(
                 model,
                 &names.gate_weight,
                 &names.up_weight,
                 &mlp_input,
                 mlp_config,
-                config.experimental_speed,
+                sparse_config,
                 stats,
                 budget,
             )?
@@ -291,15 +306,28 @@ pub fn streaming_llama_transformer_block_with_timing(
         tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
     };
     let started = Instant::now();
-    let sparse_down = if config.experimental_speed.enabled {
+    let down_aip_decision = config.experimental_speed.aip_decision_for_projection(
+        config.layer_index,
+        config.total_layers,
+        RamaAipProjectionKind::MlpDown,
+        config.intermediate_size,
+        512,
+    );
+    let sparse_down = if down_aip_decision.enabled {
         if let Some(stats) = &mut experimental_speed_stats {
+            stats.record_aip_policy(config.experimental_speed.aip_policy);
+            let sparse_config = crate::RamaExperimentalSpeedConfig {
+                enabled: true,
+                aip_policy: config.experimental_speed.aip_policy,
+                aip_topk: Some(down_aip_decision.topk),
+            };
             streaming_sparse_tile_linear_from_model(
                 model,
                 &names.down_weight,
                 &gate,
                 None,
                 down_config,
-                config.experimental_speed,
+                sparse_config,
                 stats,
                 budget,
             )?

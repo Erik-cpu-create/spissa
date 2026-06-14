@@ -1254,7 +1254,8 @@ mod tests {
             },
             crate::RamaExperimentalSpeedConfig {
                 enabled: true,
-                turbo_topk: Some(2),
+                aip_policy: crate::RamaAipPolicyKind::Speed,
+                aip_topk: Some(2),
             },
             &mut stats,
             &mut budget,
@@ -1321,7 +1322,8 @@ mod tests {
             },
             crate::RamaExperimentalSpeedConfig {
                 enabled: true,
-                turbo_topk: Some(2),
+                aip_policy: crate::RamaAipPolicyKind::Speed,
+                aip_topk: Some(2),
             },
             &mut stats,
             &mut budget,

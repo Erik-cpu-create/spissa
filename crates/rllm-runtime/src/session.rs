@@ -123,6 +123,53 @@ impl RamaRollingStats {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RamaRepetitionStats {
+    pub generated_tokens: usize,
+    pub unique_generated_tokens: usize,
+    pub max_repeated_token_run: usize,
+    pub repeated_token_ratio: f64,
+}
+
+impl RamaRepetitionStats {
+    pub fn from_tokens(tokens: &[usize]) -> Self {
+        if tokens.is_empty() {
+            return Self::default();
+        }
+
+        let mut unique = std::collections::HashSet::new();
+        let mut max_run = 1usize;
+        let mut current_run = 1usize;
+        let mut adjacent_repeats = 0usize;
+        unique.insert(tokens[0]);
+
+        for window in tokens.windows(2) {
+            unique.insert(window[1]);
+            if window[0] == window[1] {
+                adjacent_repeats = adjacent_repeats.saturating_add(1);
+                current_run = current_run.saturating_add(1);
+                max_run = max_run.max(current_run);
+            } else {
+                current_run = 1;
+            }
+        }
+
+        let denominator = tokens.len().saturating_sub(1);
+        let repeated_token_ratio = if denominator == 0 {
+            0.0
+        } else {
+            adjacent_repeats as f64 / denominator as f64
+        };
+
+        Self {
+            generated_tokens: tokens.len(),
+            unique_generated_tokens: unique.len(),
+            max_repeated_token_run: max_run,
+            repeated_token_ratio,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RamaSessionTurnMetrics {
     pub input_tokens: usize,
@@ -141,6 +188,7 @@ pub struct RamaSessionTurnMetrics {
     pub rolling_stats: RamaRollingStats,
     pub experimental_speed_stats: RamaExperimentalSpeedStats,
     pub phase_timings: RamaSessionPhaseTimings,
+    pub repetition_stats: RamaRepetitionStats,
 }
 
 #[derive(Debug, Clone)]
@@ -318,7 +366,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
             let end_to_end_ms = turn_start.elapsed().as_secs_f64() * 1000.0;
             return Ok(self.turn_result(
                 user_token_ids,
-                generated_token_ids,
+                generated_token_ids.clone(),
                 RamaSessionTurnMetrics {
                     input_tokens: user_token_ids.len(),
                     generated_tokens: 1,
@@ -336,6 +384,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     rolling_stats,
                     experimental_speed_stats,
                     phase_timings,
+                    repetition_stats: RamaRepetitionStats::from_tokens(&generated_token_ids),
                 },
             ));
         }
@@ -398,6 +447,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                 rolling_stats,
                 experimental_speed_stats,
                 phase_timings,
+                repetition_stats: RamaRepetitionStats::from_tokens(&generated_token_ids),
             },
         ))
     }
@@ -931,6 +981,7 @@ mod tests {
         adapter
             .experimental_speed_stats
             .push(RamaExperimentalSpeedStats {
+                aip_policy: None,
                 sparse_projection_calls: 2,
                 exact_fallbacks: 1,
                 selected_topk_sum: 128,
@@ -941,6 +992,7 @@ mod tests {
         adapter
             .experimental_speed_stats
             .push(RamaExperimentalSpeedStats {
+                aip_policy: None,
                 sparse_projection_calls: 3,
                 exact_fallbacks: 0,
                 selected_topk_sum: 256,
@@ -982,6 +1034,68 @@ mod tests {
         assert_eq!(
             result.metrics.experimental_speed_stats.peak_scratch_bytes,
             512
+        );
+    }
+
+    #[test]
+    fn repetition_stats_from_tokens_detects_runs_and_unique_count() {
+        let stats = RamaRepetitionStats::from_tokens(&[7, 7, 7, 8, 9, 9]);
+
+        assert_eq!(stats.generated_tokens, 6);
+        assert_eq!(stats.unique_generated_tokens, 3);
+        assert_eq!(stats.max_repeated_token_run, 3);
+        assert!((stats.repeated_token_ratio - 0.6).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn repetition_stats_from_empty_tokens_are_zero() {
+        let stats = RamaRepetitionStats::from_tokens(&[]);
+
+        assert_eq!(stats.generated_tokens, 0);
+        assert_eq!(stats.unique_generated_tokens, 0);
+        assert_eq!(stats.max_repeated_token_run, 0);
+        assert_eq!(stats.repeated_token_ratio, 0.0);
+    }
+
+    #[test]
+    fn turn_metrics_include_repetition_stats() {
+        let mut adapter = RecordingAdapter::new(16);
+        adapter.steps = vec![
+            Ok(Some(RamaSessionStep {
+                token_id: 7,
+                logits: None,
+                cached_context_len_after: 1,
+            })),
+            Ok(Some(RamaSessionStep {
+                token_id: 7,
+                logits: None,
+                cached_context_len_after: 2,
+            })),
+            Ok(Some(RamaSessionStep {
+                token_id: 8,
+                logits: None,
+                cached_context_len_after: 3,
+            })),
+            Ok(Some(RamaSessionStep {
+                token_id: 8,
+                logits: None,
+                cached_context_len_after: 4,
+            })),
+        ];
+        let mut session = RamaChatSession::new(adapter);
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session
+            .generate_turn(&[1], 4, &mut budget, |_| true)
+            .unwrap();
+
+        assert_eq!(result.generated_token_ids, [7, 7, 8, 8]);
+        assert_eq!(result.metrics.repetition_stats.generated_tokens, 4);
+        assert_eq!(result.metrics.repetition_stats.unique_generated_tokens, 2);
+        assert_eq!(result.metrics.repetition_stats.max_repeated_token_run, 2);
+        assert!(
+            (result.metrics.repetition_stats.repeated_token_ratio - (2.0 / 3.0)).abs()
+                < f64::EPSILON
         );
     }
 }

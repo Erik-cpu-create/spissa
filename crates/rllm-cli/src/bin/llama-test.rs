@@ -47,17 +47,33 @@ fn format_rolling_suffix(stats: rllm_runtime::RamaRollingStats) -> String {
     }
 }
 
-fn format_experimental_speed_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
+fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
     if stats.is_empty() {
         String::new()
     } else {
+        let policy_str = stats.aip_policy.map(|p| p.as_str()).unwrap_or("none");
         format!(
-            " | ExperimentalSpeed: sparse_calls={} fallbacks={} max_topk={} skipped_madds={} scratch={} bytes",
+            " | AIP: policy={} calls={} fallbacks={} max_topk={} skipped_madds={} scratch={} bytes",
+            policy_str,
             stats.sparse_projection_calls,
             stats.exact_fallbacks,
             stats.max_selected_topk,
             stats.estimated_skipped_madds,
             stats.peak_scratch_bytes
+        )
+    }
+}
+
+fn format_repetition_suffix(stats: rllm_runtime::RamaRepetitionStats) -> String {
+    if stats.generated_tokens == 0 {
+        String::new()
+    } else {
+        format!(
+            " | Repetition: ratio={:.2} max_run={} unique={}/{}",
+            stats.repeated_token_ratio,
+            stats.max_repeated_token_run,
+            stats.unique_generated_tokens,
+            stats.generated_tokens
         )
     }
 }
@@ -141,10 +157,10 @@ fn main() -> Result<()> {
 
         println!();
         let rolling_suffix = format_rolling_suffix(result.metrics.rolling_stats);
-        let experimental_speed_suffix =
-            format_experimental_speed_suffix(result.metrics.experimental_speed_stats);
+        let aip_suffix = format_aip_suffix(result.metrics.experimental_speed_stats);
+        let repetition_suffix = format_repetition_suffix(result.metrics.repetition_stats);
         println!(
-            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes{}{}]",
+            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes{}{}{}]",
             result.metrics.ttft_ms / 1000.0,
             result.metrics.decode_tok_s,
             result.metrics.end_to_end_tok_s,
@@ -152,7 +168,8 @@ fn main() -> Result<()> {
             session.token_history().len(),
             result.metrics.peak_transient_bytes,
             rolling_suffix,
-            experimental_speed_suffix
+            aip_suffix,
+            repetition_suffix
         );
         has_context = true;
     }
@@ -192,16 +209,17 @@ mod tests {
     }
 
     #[test]
-    fn experimental_speed_suffix_is_empty_without_activity() {
+    fn aip_suffix_is_empty_without_activity() {
         assert_eq!(
-            format_experimental_speed_suffix(rllm_runtime::RamaExperimentalSpeedStats::default()),
+            format_aip_suffix(rllm_runtime::RamaExperimentalSpeedStats::default()),
             ""
         );
     }
 
     #[test]
-    fn experimental_speed_suffix_reports_nonzero_activity() {
-        let suffix = format_experimental_speed_suffix(rllm_runtime::RamaExperimentalSpeedStats {
+    fn aip_suffix_reports_nonzero_activity() {
+        let suffix = format_aip_suffix(rllm_runtime::RamaExperimentalSpeedStats {
+            aip_policy: Some(rllm_runtime::RamaAipPolicyKind::Quality),
             sparse_projection_calls: 4,
             exact_fallbacks: 1,
             selected_topk_sum: 256,
@@ -210,10 +228,34 @@ mod tests {
             peak_scratch_bytes: 512,
         });
 
-        assert!(suffix.contains("sparse_calls=4"));
+        assert!(suffix.contains("AIP: policy=quality"));
+        assert!(suffix.contains("policy=quality"));
+        assert!(suffix.contains("calls=4"));
         assert!(suffix.contains("fallbacks=1"));
         assert!(suffix.contains("max_topk=128"));
         assert!(suffix.contains("skipped_madds=2048"));
+    }
+
+    #[test]
+    fn repetition_suffix_is_empty_without_activity() {
+        assert_eq!(
+            format_repetition_suffix(rllm_runtime::RamaRepetitionStats::default()),
+            ""
+        );
+    }
+
+    #[test]
+    fn repetition_suffix_reports_nonzero_activity() {
+        let suffix = format_repetition_suffix(rllm_runtime::RamaRepetitionStats {
+            generated_tokens: 10,
+            unique_generated_tokens: 5,
+            max_repeated_token_run: 3,
+            repeated_token_ratio: 0.25,
+        });
+
+        assert!(suffix.contains("ratio=0.25"));
+        assert!(suffix.contains("max_run=3"));
+        assert!(suffix.contains("unique=5/10"));
     }
 
     #[test]
