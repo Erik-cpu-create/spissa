@@ -548,6 +548,177 @@ pub fn streaming_tile_linear_from_model(
     Ok(output)
 }
 
+/// Streaming single-pass linear projection multiplied into an existing output.
+///
+/// This computes `target *= Linear(input, weight, bias)` without materializing
+/// the full linear output. It is intended for gated MLP decode paths such as
+/// LLaMA `silu(gate_proj(x)) * up_proj(x)`, where the left-hand activation
+/// already lives in `target`.
+pub fn streaming_tile_linear_multiply_into_from_model(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    bias: Option<&[f32]>,
+    target: &mut [f32],
+    config: StreamingTileLinearConfig,
+    budget: &mut MemoryBudget,
+) -> Result<()> {
+    validate_tile_linear_config(config)?;
+    validate_linear_shapes(input, bias, config.linear)?;
+    let target_len = config
+        .linear
+        .batch
+        .checked_mul(config.linear.out_features)
+        .ok_or_else(|| RuntimeError::Shape("target len overflow".to_string()))?;
+    if target.len() != target_len {
+        return Err(RuntimeError::Shape(format!(
+            "target len {} does not match batch*out_features = {}",
+            target.len(),
+            target_len
+        )));
+    }
+
+    let tensor = model.tensor(weight_name)?.clone();
+    validate_weight_tensor(&tensor, config.linear)?;
+
+    let chunks: Vec<ChunkMeta> = model.chunks_for_tensor(tensor.tensor_id).to_vec();
+    if chunks.is_empty() {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} has no chunks"
+        )));
+    }
+
+    let dtype_size = tensor.dtype.size_bytes();
+    let mut byte_offset = 0usize;
+    let mut state = StreamingLinearMultiplyIntoState::new(target, bias, config.linear);
+    for chunk in chunks {
+        if !byte_offset.is_multiple_of(dtype_size) {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
+            )));
+        }
+        let element_start = byte_offset / dtype_size;
+        let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} uncompressed size does not fit usize",
+                chunk.chunk_id
+            ))
+        })?;
+
+        if chunk.codec_id == "rtc-raw-v1" && tensor.dtype == rllm_container::DType::Fp16 {
+            model.with_raw_chunk(chunk.chunk_id, budget, |compressed_bytes, _budget| {
+                if compressed_bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} raw byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        compressed_bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_multiply_raw_fp16_chunk(
+                    input,
+                    compressed_bytes,
+                    element_start,
+                    config.linear,
+                    &mut state,
+                    weight_name,
+                )
+            })?;
+        } else {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                if bytes.len() % dtype_size != 0 {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} byte len {} is not aligned to dtype size {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        dtype_size
+                    )));
+                }
+
+                let elements_in_chunk = bytes.len() / dtype_size;
+                let mut local_element_start = 0usize;
+                while local_element_start < elements_in_chunk {
+                    let tile_len = config
+                        .tile_elements
+                        .min(elements_in_chunk - local_element_start);
+                    let tile_byte_start =
+                        local_element_start.checked_mul(dtype_size).ok_or_else(|| {
+                            RuntimeError::Shape("tile byte start overflow".to_string())
+                        })?;
+                    let tile_byte_len = tile_len
+                        .checked_mul(dtype_size)
+                        .ok_or_else(|| RuntimeError::Shape("tile byte len overflow".to_string()))?;
+                    let tile_byte_end = tile_byte_start
+                        .checked_add(tile_byte_len)
+                        .ok_or_else(|| RuntimeError::Shape("tile byte end overflow".to_string()))?;
+                    let scratch_bytes = tile_len
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or_else(|| {
+                            RuntimeError::Shape("tile f32 scratch overflow".to_string())
+                        })?;
+                    let scratch_label = format!(
+                        "streaming multiply tile f32 scratch chunk {} elements {}..{}",
+                        chunk.chunk_id,
+                        local_element_start,
+                        local_element_start + tile_len
+                    );
+
+                    budget.reserve(scratch_bytes, scratch_label.clone())?;
+                    let weights =
+                        match decode_to_f32(tensor.dtype, &bytes[tile_byte_start..tile_byte_end]) {
+                            Ok(values) => values,
+                            Err(err) => {
+                                budget.release(scratch_bytes, scratch_label)?;
+                                return Err(err);
+                            }
+                        };
+                    let result = accumulate_weight_chunk_multiply_into(
+                        input,
+                        &weights,
+                        element_start + local_element_start,
+                        config.linear,
+                        &mut state,
+                        weight_name,
+                    );
+                    drop(weights);
+                    budget.release(scratch_bytes, scratch_label)?;
+                    result?;
+                    local_element_start += tile_len;
+                }
+                Ok(())
+            })?;
+        }
+
+        byte_offset = byte_offset
+            .checked_add(expected_chunk_bytes)
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData("chunk byte offset overflow".to_string())
+            })?;
+    }
+
+    let expected_weight_bytes = config
+        .linear
+        .out_features
+        .checked_mul(config.linear.in_features)
+        .and_then(|elements| elements.checked_mul(dtype_size))
+        .ok_or_else(|| RuntimeError::Shape("weight byte size overflow".to_string()))?;
+    if byte_offset != expected_weight_bytes {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} streamed {byte_offset} bytes, expected {expected_weight_bytes}"
+        )));
+    }
+
+    state.finish(config.linear, weight_name)
+}
+
 /// Streaming single-row linear argmax without materializing full output logits.
 ///
 /// This is intended for CLI/generation argmax sampling paths where callers only
@@ -1568,6 +1739,61 @@ impl<'a> StreamingLinearArgmaxState<'a> {
     }
 }
 
+struct StreamingLinearMultiplyIntoState<'a> {
+    target: &'a mut [f32],
+    bias: Option<&'a [f32]>,
+    current_out_feature: usize,
+    current_acc: Vec<f32>,
+}
+
+impl<'a> StreamingLinearMultiplyIntoState<'a> {
+    fn new(target: &'a mut [f32], bias: Option<&'a [f32]>, config: StreamingLinearConfig) -> Self {
+        let initial = bias
+            .and_then(|values| values.first())
+            .copied()
+            .unwrap_or(0.0);
+        Self {
+            target,
+            bias,
+            current_out_feature: 0,
+            current_acc: vec![initial; config.batch],
+        }
+    }
+
+    fn finish_current(&mut self, config: StreamingLinearConfig, weight_name: &str) -> Result<()> {
+        if self.current_out_feature >= config.out_features {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed more rows than expected {}",
+                config.out_features
+            )));
+        }
+        for batch_idx in 0..config.batch {
+            let target_idx = batch_idx * config.out_features + self.current_out_feature;
+            self.target[target_idx] *= self.current_acc[batch_idx];
+        }
+        self.current_out_feature += 1;
+        if self.current_out_feature < config.out_features {
+            let next = self
+                .bias
+                .and_then(|values| values.get(self.current_out_feature))
+                .copied()
+                .unwrap_or(0.0);
+            self.current_acc.fill(next);
+        }
+        Ok(())
+    }
+
+    fn finish(self, config: StreamingLinearConfig, weight_name: &str) -> Result<()> {
+        if self.current_out_feature != config.out_features {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed {} complete rows, expected {}",
+                self.current_out_feature, config.out_features
+            )));
+        }
+        Ok(())
+    }
+}
+
 fn accumulate_weight_chunk_argmax(
     input: &[f32],
     weights: &[f32],
@@ -1618,6 +1844,72 @@ fn accumulate_weight_chunk_argmax(
         while idx < row_len {
             state.current_acc += input_row[idx] * weight_row[idx];
             idx += 1;
+        }
+
+        local_idx += row_len;
+        global_idx += row_len;
+        if global_idx.is_multiple_of(config.in_features) {
+            state.finish_current(config, weight_name)?;
+        }
+    }
+    Ok(())
+}
+
+fn accumulate_weight_chunk_multiply_into(
+    input: &[f32],
+    weights: &[f32],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    state: &mut StreamingLinearMultiplyIntoState<'_>,
+    weight_name: &str,
+) -> Result<()> {
+    let weight_elements = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
+    let element_end = element_start
+        .checked_add(weights.len())
+        .ok_or_else(|| RuntimeError::Shape("weight chunk element range overflow".to_string()))?;
+    if element_end > weight_elements {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} chunk elements {element_start}..{element_end} exceed expected {weight_elements}"
+        )));
+    }
+
+    let mut local_idx = 0usize;
+    let mut global_idx = element_start;
+    while local_idx < weights.len() {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        while state.current_out_feature < out_feature {
+            state.finish_current(config, weight_name)?;
+        }
+        if state.current_out_feature != out_feature {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+                out_feature, state.current_out_feature
+            )));
+        }
+
+        let row_len = (config.in_features - in_feature).min(weights.len() - local_idx);
+        let weight_row = &weights[local_idx..local_idx + row_len];
+        for batch_idx in 0..config.batch {
+            let input_start = batch_idx * config.in_features + in_feature;
+            let input_row = &input[input_start..input_start + row_len];
+            let mut acc = state.current_acc[batch_idx];
+            let mut idx = 0usize;
+            while idx + 4 <= row_len {
+                acc += weight_row[idx] * input_row[idx]
+                    + weight_row[idx + 1] * input_row[idx + 1]
+                    + weight_row[idx + 2] * input_row[idx + 2]
+                    + weight_row[idx + 3] * input_row[idx + 3];
+                idx += 4;
+            }
+            while idx < row_len {
+                acc += weight_row[idx] * input_row[idx];
+                idx += 1;
+            }
+            state.current_acc[batch_idx] = acc;
         }
 
         local_idx += row_len;
@@ -1858,6 +2150,17 @@ fn accumulate_fused_raw_fp16_chunk(
         )));
     }
 
+    if config.batch == 1 {
+        return accumulate_fused_raw_fp16_chunk_batch1(
+            input,
+            output,
+            raw_bytes,
+            element_start,
+            config,
+            weight_name,
+        );
+    }
+
     let weight_elements = raw_bytes.len() / 2;
     let mut local_idx = 0usize;
     let mut global_idx = element_start;
@@ -2045,6 +2348,210 @@ fn accumulate_fused_raw_fp16_chunk(
     Ok(())
 }
 
+fn accumulate_fused_raw_fp16_chunk_batch1(
+    input: &[f32],
+    output: &mut [f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    weight_name: &str,
+) -> Result<()> {
+    if !raw_bytes.len().is_multiple_of(2) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "Raw FP16 stream for {weight_name} has odd length"
+        )));
+    }
+
+    let weight_elements = raw_bytes.len() / 2;
+    let mut local_idx = 0usize;
+    let mut global_idx = element_start;
+    while local_idx < weight_elements {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+        let mut acc = output[out_feature];
+        let mut idx = 0usize;
+
+        while idx + 4 <= row_len {
+            let byte_idx = (local_idx + idx) * 2;
+            let bytes = &raw_bytes[byte_idx..byte_idx + 8];
+            let w0 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+            let w1 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
+            let w2 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[4], bytes[5]]));
+            let w3 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[6], bytes[7]]));
+            let input_start = in_feature + idx;
+            acc += input[input_start] * w0
+                + input[input_start + 1] * w1
+                + input[input_start + 2] * w2
+                + input[input_start + 3] * w3;
+            idx += 4;
+        }
+        while idx < row_len {
+            let byte_idx = (local_idx + idx) * 2;
+            let weight = crate::tensor::fp16_to_f32(u16::from_le_bytes([
+                raw_bytes[byte_idx],
+                raw_bytes[byte_idx + 1],
+            ]));
+            acc += input[in_feature + idx] * weight;
+            idx += 1;
+        }
+
+        output[out_feature] = acc;
+        local_idx += row_len;
+        global_idx += row_len;
+    }
+
+    Ok(())
+}
+
+fn accumulate_multiply_raw_fp16_chunk(
+    input: &[f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    state: &mut StreamingLinearMultiplyIntoState<'_>,
+    weight_name: &str,
+) -> Result<()> {
+    if !raw_bytes.len().is_multiple_of(2) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "Raw FP16 stream for {weight_name} has odd length"
+        )));
+    }
+
+    if config.batch == 1 {
+        return accumulate_multiply_raw_fp16_chunk_batch1(
+            input,
+            raw_bytes,
+            element_start,
+            config,
+            state,
+            weight_name,
+        );
+    }
+
+    let weight_elements = raw_bytes.len() / 2;
+    let mut local_idx = 0usize;
+    let mut global_idx = element_start;
+
+    const BLOCK_SIZE: usize = 128;
+    let mut w_block = [0.0f32; BLOCK_SIZE];
+
+    while local_idx < weight_elements {
+        let in_feature = global_idx % config.in_features;
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+
+        let mut row_idx = 0usize;
+        while row_idx < row_len {
+            let block_len = (row_len - row_idx).min(BLOCK_SIZE);
+            let byte_start = (local_idx + row_idx) * 2;
+            let block_bytes = &raw_bytes[byte_start..byte_start + block_len * 2];
+
+            let mut idx = 0usize;
+            while idx + 4 <= block_len {
+                let bytes = &block_bytes[idx * 2..idx * 2 + 8];
+                w_block[idx] = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+                w_block[idx + 1] =
+                    crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
+                w_block[idx + 2] =
+                    crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[4], bytes[5]]));
+                w_block[idx + 3] =
+                    crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[6], bytes[7]]));
+                idx += 4;
+            }
+            while idx < block_len {
+                let bytes = &block_bytes[idx * 2..idx * 2 + 2];
+                w_block[idx] = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+                idx += 1;
+            }
+
+            accumulate_weight_chunk_multiply_into(
+                input,
+                &w_block[..block_len],
+                global_idx + row_idx,
+                config,
+                state,
+                weight_name,
+            )?;
+
+            row_idx += block_len;
+        }
+
+        local_idx += row_len;
+        global_idx += row_len;
+    }
+
+    Ok(())
+}
+
+fn accumulate_multiply_raw_fp16_chunk_batch1(
+    input: &[f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    state: &mut StreamingLinearMultiplyIntoState<'_>,
+    weight_name: &str,
+) -> Result<()> {
+    if !raw_bytes.len().is_multiple_of(2) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "Raw FP16 stream for {weight_name} has odd length"
+        )));
+    }
+
+    let weight_elements = raw_bytes.len() / 2;
+    let mut local_idx = 0usize;
+    let mut global_idx = element_start;
+    while local_idx < weight_elements {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        while state.current_out_feature < out_feature {
+            state.finish_current(config, weight_name)?;
+        }
+        if state.current_out_feature != out_feature {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+                out_feature, state.current_out_feature
+            )));
+        }
+
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+        let mut acc = state.current_acc[0];
+        let mut idx = 0usize;
+
+        while idx + 4 <= row_len {
+            let byte_idx = (local_idx + idx) * 2;
+            let bytes = &raw_bytes[byte_idx..byte_idx + 8];
+            let w0 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+            let w1 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
+            let w2 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[4], bytes[5]]));
+            let w3 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[6], bytes[7]]));
+            let input_start = in_feature + idx;
+            acc += input[input_start] * w0
+                + input[input_start + 1] * w1
+                + input[input_start + 2] * w2
+                + input[input_start + 3] * w3;
+            idx += 4;
+        }
+        while idx < row_len {
+            let byte_idx = (local_idx + idx) * 2;
+            let weight = crate::tensor::fp16_to_f32(u16::from_le_bytes([
+                raw_bytes[byte_idx],
+                raw_bytes[byte_idx + 1],
+            ]));
+            acc += input[in_feature + idx] * weight;
+            idx += 1;
+        }
+
+        state.current_acc[0] = acc;
+        local_idx += row_len;
+        global_idx += row_len;
+        if global_idx.is_multiple_of(config.in_features) {
+            state.finish_current(config, weight_name)?;
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2059,6 +2566,14 @@ mod tests {
 
     fn f32_bytes(values: &[f32]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn fp16_bytes(values: &[u16]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(values.len() * 2);
         for value in values {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
@@ -2381,6 +2896,46 @@ mod tests {
             .unwrap();
     }
 
+    fn add_fp16_tensor(
+        writer: &mut RllmWriter,
+        tensor_id: u64,
+        name: &str,
+        shape: Vec<u64>,
+        values: &[u16],
+        split_at: usize,
+    ) {
+        let bytes = fp16_bytes(values);
+        writer.add_tensor(TensorMeta {
+            tensor_id,
+            name: name.to_string(),
+            shape,
+            dtype: DType::Fp16,
+            original_size_bytes: bytes.len() as u64,
+            compressed_size_bytes: bytes.len() as u64,
+            original_sha256: sha256_array(&bytes),
+            chunk_count: 2,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(
+                tensor_id,
+                "rtc-raw-v1",
+                &bytes[..split_at],
+                &bytes[..split_at],
+                0,
+            )
+            .unwrap();
+        writer
+            .write_chunk(
+                tensor_id,
+                "rtc-raw-v1",
+                &bytes[split_at..],
+                &bytes[split_at..],
+                1,
+            )
+            .unwrap();
+    }
+
     #[test]
     fn streaming_tile_linear_argmax_matches_full_logits_across_split_rows() {
         let path = temp_path("tile-linear-argmax");
@@ -2436,6 +2991,185 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(logits_budget.current_bytes(), 0);
         assert_eq!(argmax_budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_multiply_into_matches_materialized_linear() {
+        let path = temp_path("tile-linear-multiply-into");
+        let weight = vec![
+            0.5, -1.0, 2.0, -2.0, 0.25, 0.5, 1.0, 1.0, -1.0, 0.0, -0.5, 0.75,
+        ];
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_f32_tensor(
+            &mut writer,
+            0,
+            "linear.multiply.weight",
+            vec![4, 3],
+            &weight,
+            20,
+        );
+        writer.finalize().unwrap();
+
+        let input = vec![1.5, -2.0, 0.25, -0.5, 0.75, 2.0]; // [batch=2, in=3]
+        let mut target = vec![0.2, -0.3, 0.4, 0.5, -1.0, 1.25, -1.5, 2.0];
+        let bias = vec![0.0, 0.5, -1.0, 4.0];
+        let config = StreamingTileLinearConfig {
+            linear: StreamingLinearConfig {
+                batch: 2,
+                in_features: 3,
+                out_features: 4,
+            },
+            tile_elements: 2,
+        };
+        let mut materialized_model = LazyRllmModel::open(&path).unwrap();
+        let mut fused_model = LazyRllmModel::open(&path).unwrap();
+        let mut materialized_budget = MemoryBudget::new(512);
+        let mut fused_budget = MemoryBudget::new(512);
+
+        let materialized = streaming_tile_linear_from_model(
+            &mut materialized_model,
+            "linear.multiply.weight",
+            &input,
+            Some(&bias),
+            config,
+            &mut materialized_budget,
+        )
+        .unwrap();
+        let mut expected = target.clone();
+        for (dst, value) in expected.iter_mut().zip(materialized.iter()) {
+            *dst *= *value;
+        }
+
+        streaming_tile_linear_multiply_into_from_model(
+            &mut fused_model,
+            "linear.multiply.weight",
+            &input,
+            Some(&bias),
+            &mut target,
+            config,
+            &mut fused_budget,
+        )
+        .unwrap();
+
+        assert_close_vec(&target, &expected, 1e-6);
+        assert_eq!(materialized_budget.current_bytes(), 0);
+        assert_eq!(fused_budget.current_bytes(), 0);
+        assert!(
+            fused_budget.peak_bytes() <= materialized_budget.peak_bytes(),
+            "fused peak {} exceeded materialized peak {}",
+            fused_budget.peak_bytes(),
+            materialized_budget.peak_bytes()
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_matches_raw_fp16_batch1_linear() {
+        let path = temp_path("tile-linear-fp16-batch1");
+        let weight_fp16 = vec![
+            0x3800, 0xbc00, 0x4000, 0xc000, 0x3400, 0x3800, 0x3c00, 0x3c00, 0xbc00, 0x0000, 0xb800,
+            0x3a00,
+        ];
+        let weight_f32: Vec<f32> = weight_fp16
+            .iter()
+            .map(|bits| crate::tensor::fp16_to_f32(*bits))
+            .collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_fp16_tensor(
+            &mut writer,
+            0,
+            "linear.fp16.batch1.weight",
+            vec![4, 3],
+            &weight_fp16,
+            14,
+        );
+        writer.finalize().unwrap();
+
+        let input = vec![1.5, -2.0, 0.25];
+        let bias = vec![0.0, 0.5, -1.0, 4.0];
+        let expected = linear(&input, &weight_f32, Some(&bias), 1, 3, 4).unwrap();
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(512);
+        let actual = streaming_tile_linear_from_model(
+            &mut model,
+            "linear.fp16.batch1.weight",
+            &input,
+            Some(&bias),
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 3,
+                    out_features: 4,
+                },
+                tile_elements: 2,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_close_vec(&actual, &expected, 1e-6);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_multiply_into_uses_raw_fp16_path() {
+        let path = temp_path("tile-linear-multiply-into-fp16");
+        let weight_fp16 = vec![
+            0x3800, 0xbc00, 0x4000, 0xc000, 0x3400, 0x3800, 0x3c00, 0x3c00, 0xbc00, 0x0000, 0xb800,
+            0x3a00,
+        ];
+        let weight_f32: Vec<f32> = weight_fp16
+            .iter()
+            .map(|bits| crate::tensor::fp16_to_f32(*bits))
+            .collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_fp16_tensor(
+            &mut writer,
+            0,
+            "linear.multiply.fp16.weight",
+            vec![4, 3],
+            &weight_fp16,
+            14,
+        );
+        writer.finalize().unwrap();
+
+        let input = vec![1.5, -2.0, 0.25];
+        let mut target = vec![0.2, -0.3, 0.4, 0.5];
+        let bias = vec![0.0, 0.5, -1.0, 4.0];
+        let config = StreamingTileLinearConfig {
+            linear: StreamingLinearConfig {
+                batch: 1,
+                in_features: 3,
+                out_features: 4,
+            },
+            tile_elements: 2,
+        };
+        let materialized = linear(&input, &weight_f32, Some(&bias), 1, 3, 4).unwrap();
+        let mut expected = target.clone();
+        for (dst, value) in expected.iter_mut().zip(materialized.iter()) {
+            *dst *= *value;
+        }
+
+        let mut fused_model = LazyRllmModel::open(&path).unwrap();
+        let mut fused_budget = MemoryBudget::new(512);
+        streaming_tile_linear_multiply_into_from_model(
+            &mut fused_model,
+            "linear.multiply.fp16.weight",
+            &input,
+            Some(&bias),
+            &mut target,
+            config,
+            &mut fused_budget,
+        )
+        .unwrap();
+
+        assert_close_vec(&target, &expected, 1e-6);
+        assert_eq!(fused_budget.current_bytes(), 0);
 
         std::fs::remove_file(&path).ok();
     }
