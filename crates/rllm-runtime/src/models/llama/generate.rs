@@ -6,9 +6,10 @@ use crate::rotary::{
 };
 use crate::{
     ops::{add_inplace, rms_norm, silu_inplace},
-    scaled_dot_product_attention_with_cache, streaming_tile_linear_from_model, LazyRllmModel,
-    MemoryBudget, RamaTransformerPhaseTimings, Result, StreamingLinearConfig,
-    StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
+    scaled_dot_product_attention_with_cache, streaming_tile_linear_from_model,
+    streaming_tile_linear_multiply_into_from_model, LazyRllmModel, MemoryBudget,
+    RamaTransformerPhaseTimings, Result, StreamingLinearConfig, StreamingTileLinearConfig,
+    DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use std::time::Instant;
 
@@ -226,24 +227,17 @@ pub fn streaming_llama_transformer_block_with_timing(
     }
 
     let started = Instant::now();
-    let up = streaming_tile_linear_from_model(
+    streaming_tile_linear_multiply_into_from_model(
         model,
         &names.up_weight,
         &mlp_input,
         None,
+        &mut gate,
         mlp_config,
         budget,
     )?;
     if let Some(timing) = timing.as_deref_mut() {
         timing.up_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
-    }
-
-    let started = Instant::now();
-    for (g, u) in gate.iter_mut().zip(up.iter()) {
-        *g *= *u;
-    }
-    if let Some(timing) = timing.as_deref_mut() {
-        timing.activation_multiply_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
 
     let down_config = StreamingTileLinearConfig {
