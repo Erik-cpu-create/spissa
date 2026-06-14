@@ -318,6 +318,9 @@ fn parse_token_turns(turns: &[String]) -> Result<Vec<Vec<usize>>> {
     if turns.is_empty() {
         anyhow::bail!("chat-session-token requires at least one --turn-ids");
     }
+    if turns.len() < 2 {
+        anyhow::bail!("chat-session-token requires at least two --turn-ids values");
+    }
     turns
         .iter()
         .enumerate()
@@ -406,15 +409,19 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("at least one"));
-        assert!(parse_token_turns(&["".to_string()])
+        assert!(parse_token_turns(&["1".to_string()])
+            .unwrap_err()
+            .to_string()
+            .contains("at least two"));
+        assert!(parse_token_turns(&["".to_string(), "1".to_string()])
             .unwrap_err()
             .to_string()
             .contains("empty"));
-        assert!(parse_token_turns(&["1,,2".to_string()])
+        assert!(parse_token_turns(&["1,,2".to_string(), "3".to_string()])
             .unwrap_err()
             .to_string()
             .contains("empty token id"));
-        assert!(parse_token_turns(&["1,nope".to_string()])
+        assert!(parse_token_turns(&["1,nope".to_string(), "3".to_string()])
             .unwrap_err()
             .to_string()
             .contains("invalid token id"));
