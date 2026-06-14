@@ -17,17 +17,7 @@ pub fn run(
     ctx: usize,
     out: &str,
 ) -> Result<()> {
-    if turns.is_empty() {
-        anyhow::bail!("chat-session requires at least one --turn");
-    }
-    for (idx, turn) in turns.iter().enumerate() {
-        if turn.trim().is_empty() {
-            anyhow::bail!(
-                "chat-session turn {} must not be empty or whitespace-only",
-                idx + 1
-            );
-        }
-    }
+    validate_turns(turns)?;
     if max_new_tokens == 0 {
         anyhow::bail!("--max-new-tokens must be greater than zero");
     }
@@ -43,6 +33,7 @@ pub fn run(
         .as_ref()
         .context("model metadata does not include tokenizer metadata")?;
     let tokenizer = RllmTokenizer::from_metadata(tokenizer_meta)?;
+    let eos_token_id = tokenizer_meta.eos_token_id;
     let prepared = prepare_llama_rama_layer_decode_transformer_from_metadata(
         &mut model,
         LlamaRamaGenerationConfig {
@@ -60,7 +51,9 @@ pub fn run(
     for (idx, turn) in turns.iter().enumerate() {
         let input_token_ids = tokenizer.encode(turn)?;
         let result =
-            session.generate_turn(&input_token_ids, max_new_tokens, &mut budget, |_| true)?;
+            session.generate_turn(&input_token_ids, max_new_tokens, &mut budget, |token| {
+                Some(token as u64) != eos_token_id
+            })?;
         println!(
             "turn {}: input={} generated={} replayed={} ttft_ms={:.2} decode_tok_s={:.2}",
             idx + 1,
@@ -107,14 +100,15 @@ fn write_report(
     body.push_str("- Expected bottleneck: full-history replay and memory bandwidth\n");
     body.push_str("- Bottleneck tag: cache locality\n\n");
     body.push_str("## Setup\n\n");
-    body.push_str("Commands:\n\n```bash\n");
-    body.push_str(&format!(
-        "cargo run -p rllm-cli -- chat-session {}{} --max-new-tokens {max_new_tokens} --ctx {ctx} --out {}\n",
+    body.push_str("Commands:\n\n");
+    let replay_command = format!(
+        "cargo run -p rllm-cli -- chat-session {}{} --max-new-tokens {max_new_tokens} --ctx {ctx} --out {}",
         shell_quote(file),
-        format_turn_args(turns),
+        format_turn_args(turns.iter().map(|(_, text, _)| text.as_str())),
         shell_quote(out)
-    ));
-    body.push_str("```\n\n");
+    );
+    body.push_str(&markdown_code_fence(&replay_command));
+    body.push('\n');
     body.push_str("## Results\n\n");
     body.push_str("| run | prompt/input tokens | generated tokens | TTFT/prefill | decode tok/s | end-to-end tok/s | RSS | peak transient | notes |\n");
     body.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---|\n");
@@ -144,10 +138,29 @@ fn write_report(
     Ok(())
 }
 
-fn format_turn_args(turns: &[(usize, String, rllm_runtime::RamaSessionTurnResult)]) -> String {
+fn validate_turns(turns: &[String]) -> Result<()> {
+    if turns.is_empty() {
+        anyhow::bail!("chat-session requires at least one --turn");
+    }
+    for (idx, turn) in turns.iter().enumerate() {
+        if turn.trim().is_empty() {
+            anyhow::bail!(
+                "chat-session turn {} must not be empty or whitespace-only",
+                idx + 1
+            );
+        }
+    }
+    Ok(())
+}
+
+fn format_turn_args<I, S>(turns: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     turns
-        .iter()
-        .map(|(_, text, _)| format!(" --turn {}", shell_quote(text)))
+        .into_iter()
+        .map(|text| format!(" --turn={}", shell_quote(text.as_ref())))
         .collect::<String>()
 }
 
@@ -161,6 +174,55 @@ fn markdown_code_span(text: &str) -> String {
     format!("{delimiter} {text} {delimiter}")
 }
 
+fn markdown_code_fence(contents: &str) -> String {
+    let longest_backtick_run = contents
+        .split(|ch| ch != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    let delimiter = "`".repeat(3.max(longest_backtick_run + 1));
+    format!("{delimiter}bash\n{contents}\n{delimiter}\n")
+}
+
 fn shell_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_turn_args, markdown_code_fence, shell_quote, validate_turns};
+
+    #[test]
+    fn format_turn_args_uses_equals_form_for_hyphen_leading_turns() {
+        assert_eq!(format_turn_args(["-x"]), " --turn='-x'");
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("can't stop"), "'can'\\''t stop'");
+    }
+
+    #[test]
+    fn markdown_code_fence_extends_past_backticks_in_contents() {
+        let fenced = markdown_code_fence("cargo run -- --turn='contains ``` fence'");
+
+        assert!(fenced.starts_with("````bash\n"));
+        assert!(fenced.contains("cargo run -- --turn='contains ``` fence'"));
+        assert!(fenced.ends_with("\n````\n"));
+    }
+
+    #[test]
+    fn validate_turns_rejects_empty_and_whitespace_turns() {
+        let no_turns = validate_turns(&[]);
+        assert!(no_turns
+            .unwrap_err()
+            .to_string()
+            .contains("requires at least one --turn"));
+
+        let blank_turn = validate_turns(&["ok".to_string(), "  ".to_string()]);
+        assert!(blank_turn
+            .unwrap_err()
+            .to_string()
+            .contains("turn 2 must not be empty"));
+    }
 }
