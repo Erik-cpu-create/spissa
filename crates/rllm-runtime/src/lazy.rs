@@ -1,6 +1,6 @@
 use crate::loader::{
-    codec_for_id, verify_compressed_chunk_checksum, verify_original_chunk_checksum,
-    verify_tensor_checksum,
+    chunk_range_for_original_bytes, codec_for_id, verify_compressed_chunk_checksum,
+    verify_compressed_chunk_range_checksum, verify_original_chunk_checksum, verify_tensor_checksum,
 };
 use crate::{MemoryBudget, RamaTrace, RamaTraceEventInput, Result, RuntimeError, Tensor};
 use rllm_container::{ChunkMeta, GlobalMetadata, RllmReader, TensorMeta};
@@ -39,6 +39,7 @@ pub struct LazyRllmModel {
     rama_trace: Option<RamaTrace>,
     integrity_mode: RamaIntegrityMode,
     verified_compressed_chunks: HashSet<u64>,
+    verified_compressed_chunk_ranges: HashSet<(u64, u64, u64)>,
     verified_original_chunks: HashSet<u64>,
 }
 
@@ -106,6 +107,7 @@ impl LazyRllmModel {
             rama_trace: None,
             integrity_mode: RamaIntegrityMode::Strict,
             verified_compressed_chunks: HashSet::new(),
+            verified_compressed_chunk_ranges: HashSet::new(),
             verified_original_chunks: HashSet::new(),
         })
     }
@@ -136,6 +138,7 @@ impl LazyRllmModel {
     pub fn set_rama_integrity_mode(&mut self, mode: RamaIntegrityMode) {
         if self.integrity_mode != mode {
             self.verified_compressed_chunks.clear();
+            self.verified_compressed_chunk_ranges.clear();
             self.verified_original_chunks.clear();
         }
         self.integrity_mode = mode;
@@ -216,6 +219,31 @@ impl LazyRllmModel {
         verify_compressed_chunk_checksum(chunk, compressed)?;
         if self.integrity_mode == RamaIntegrityMode::VerifyOnce {
             self.verified_compressed_chunks.insert(chunk.chunk_id);
+        }
+        Ok(true)
+    }
+
+    fn verify_compressed_chunk_range_if_needed(
+        &mut self,
+        chunk: &ChunkMeta,
+        byte_offset: u64,
+        byte_len: u64,
+        compressed_range: &[u8],
+    ) -> Result<bool> {
+        let range = chunk_range_for_original_bytes(chunk, byte_offset, byte_len)?;
+        let key = (
+            chunk.chunk_id,
+            range.compressed_offset,
+            range.compressed_size,
+        );
+        if self.integrity_mode == RamaIntegrityMode::VerifyOnce
+            && self.verified_compressed_chunk_ranges.contains(&key)
+        {
+            return Ok(false);
+        }
+        verify_compressed_chunk_range_checksum(range, compressed_range)?;
+        if self.integrity_mode == RamaIntegrityMode::VerifyOnce {
+            self.verified_compressed_chunk_ranges.insert(key);
         }
         Ok(true)
     }
@@ -365,6 +393,138 @@ impl LazyRllmModel {
         let result = f(compressed, budget);
         if is_bounded {
             budget.release(chunk.compressed_size as usize, compressed_label)?;
+        }
+        result
+    }
+
+    /// Expose a raw identity chunk byte range without touching the full chunk.
+    ///
+    /// The requested range must have persisted range checksum metadata. This is
+    /// the runtime primitive for input-major sidecar tensors where one selected
+    /// activation feature maps to one contiguous weight range.
+    pub fn with_raw_chunk_range<R>(
+        &mut self,
+        chunk_id: u64,
+        byte_offset: u64,
+        byte_len: u64,
+        budget: &mut MemoryBudget,
+        f: impl FnOnce(&[u8], &mut MemoryBudget) -> Result<R>,
+    ) -> Result<R> {
+        let chunk = self
+            .chunks_by_id
+            .get(&chunk_id)
+            .ok_or_else(|| RuntimeError::InvalidTensorData(format!("missing chunk {chunk_id}")))?
+            .clone();
+        if chunk.codec_id != "rtc-raw-v1" {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "raw chunk range requires rtc-raw-v1, got {} for chunk {}",
+                chunk.codec_id, chunk.chunk_id
+            )));
+        }
+
+        let end = byte_offset.checked_add(byte_len).ok_or_else(|| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} raw range [{byte_offset}, +{byte_len}) overflows",
+                chunk.chunk_id
+            ))
+        })?;
+        if end > chunk.compressed_size {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "chunk {} raw range [{byte_offset}, {end}) exceeds compressed size {}",
+                chunk.chunk_id, chunk.compressed_size
+            )));
+        }
+
+        let is_bounded = budget.limit_bytes() != usize::MAX;
+        let range_bytes = usize::try_from(byte_len).map_err(|_| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} raw range len {byte_len} overflows usize",
+                chunk.chunk_id
+            ))
+        })?;
+        let range_label = if is_bounded {
+            format!(
+                "raw chunk {} byte range [{}..{})",
+                chunk.chunk_id, byte_offset, end
+            )
+        } else {
+            String::new()
+        };
+        if is_bounded {
+            budget.reserve(range_bytes, range_label.clone())?;
+        }
+
+        let read_start = Instant::now();
+        let compressed_range =
+            match self
+                .reader
+                .read_chunk_range_slice(chunk.chunk_id, byte_offset, byte_len)
+            {
+                Ok(bytes) => unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) },
+                Err(err) => {
+                    if is_bounded {
+                        budget.release(range_bytes, range_label)?;
+                    }
+                    return Err(err.into());
+                }
+            };
+
+        if self.rama_trace.is_some() {
+            let tensor_name = self
+                .tensors_by_id
+                .get(&chunk.tensor_id)
+                .map(|t| t.name.clone());
+            self.record_rama_chunk_event(
+                "chunk_range_read",
+                format!(
+                    "read chunk {} range {}..{}",
+                    chunk.chunk_id, byte_offset, end
+                ),
+                &chunk,
+                tensor_name.as_deref(),
+                read_start,
+                read_start.elapsed(),
+                budget,
+            );
+        }
+
+        let checksum_start = Instant::now();
+        let compressed_verified = match self.verify_compressed_chunk_range_if_needed(
+            &chunk,
+            byte_offset,
+            byte_len,
+            compressed_range,
+        ) {
+            Ok(verified) => verified,
+            Err(err) => {
+                if is_bounded {
+                    budget.release(range_bytes, range_label)?;
+                }
+                return Err(err);
+            }
+        };
+        if compressed_verified && self.rama_trace.is_some() {
+            let tensor_name = self
+                .tensors_by_id
+                .get(&chunk.tensor_id)
+                .map(|t| t.name.clone());
+            self.record_rama_chunk_event(
+                "chunk_range_checksum",
+                format!(
+                    "verify chunk {} range {}..{}",
+                    chunk.chunk_id, byte_offset, end
+                ),
+                &chunk,
+                tensor_name.as_deref(),
+                checksum_start,
+                checksum_start.elapsed(),
+                budget,
+            );
+        }
+
+        let result = f(compressed_range, budget);
+        if is_bounded {
+            budget.release(range_bytes, range_label)?;
         }
         result
     }

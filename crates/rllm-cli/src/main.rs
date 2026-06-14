@@ -51,6 +51,22 @@ enum Commands {
         #[arg(long)]
         tile_block_elements: Option<usize>,
 
+        /// Add input-major sidecar tensors for Llama MLP projections.
+        #[arg(long)]
+        llama_mlp_input_tiles: bool,
+
+        /// Add input-major sidecar tensors for Llama attention projections.
+        #[arg(long)]
+        llama_attention_input_tiles: bool,
+
+        /// Add input-major sidecar tensor for the Llama LM head.
+        #[arg(long)]
+        llama_lm_head_input_tiles: bool,
+
+        /// Number of input features stored in each input-tile sidecar chunk.
+        #[arg(long, default_value_t = 16)]
+        input_tile_features: usize,
+
         /// Optional HuggingFace config.json path. Defaults to sibling config.json when present.
         #[arg(long)]
         config: Option<String>,
@@ -232,6 +248,10 @@ fn main() -> Result<()> {
             codec,
             range_checksum_size,
             tile_block_elements,
+            llama_mlp_input_tiles,
+            llama_attention_input_tiles,
+            llama_lm_head_input_tiles,
+            input_tile_features,
             config,
             tokenizer,
             no_tokenizer,
@@ -242,6 +262,10 @@ fn main() -> Result<()> {
             &codec,
             range_checksum_size.as_deref(),
             tile_block_elements,
+            llama_mlp_input_tiles,
+            llama_attention_input_tiles,
+            llama_lm_head_input_tiles,
+            input_tile_features,
             config.as_deref(),
             tokenizer.as_deref(),
             no_tokenizer,

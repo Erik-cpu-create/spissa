@@ -8,7 +8,9 @@ use crate::{
     ops::{add_inplace, rms_norm, silu_inplace},
     scaled_dot_product_attention_with_cache,
     streaming_column_cached_sparse_silu_gate_up_from_model,
-    streaming_column_cached_sparse_tile_linear_from_model, streaming_silu_gate_up_from_model,
+    streaming_column_cached_sparse_tile_linear_from_model,
+    streaming_input_tiled_sparse_silu_gate_up_from_model,
+    streaming_input_tiled_sparse_tile_linear_from_model, streaming_silu_gate_up_from_model,
     streaming_sparse_silu_gate_up_from_model, streaming_sparse_tile_linear_from_model,
     streaming_tile_linear_from_model, streaming_tile_linear_multiply_into_from_model,
     LazyRllmModel, MemoryBudget, RamaAipProjectionKind, RamaExperimentalSpeedConfig,
@@ -31,6 +33,43 @@ pub struct LlamaStreamingBlockConfig {
     pub layer_index: usize,
     pub total_layers: usize,
     pub experimental_speed: RamaExperimentalSpeedConfig,
+}
+
+fn optional_input_tiled_sparse_linear(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    linear_config: StreamingTileLinearConfig,
+    speed_config: RamaExperimentalSpeedConfig,
+    default_topk: usize,
+    stats: Option<&mut RamaExperimentalSpeedStats>,
+    budget: &mut MemoryBudget,
+) -> Result<Option<Vec<f32>>> {
+    if !speed_config.enabled || !speed_config.aip_input_tiles {
+        return Ok(None);
+    }
+    let Some(stats) = stats else {
+        return Ok(None);
+    };
+    stats.record_aip_policy(speed_config.aip_policy);
+    let sparse_config = RamaExperimentalSpeedConfig {
+        enabled: true,
+        aip_policy: speed_config.aip_policy,
+        aip_topk: Some(speed_config.topk_for_input(linear_config.linear.in_features, default_topk)),
+        aip_lm_head_rows: None,
+        aip_column_cache: false,
+        aip_input_tiles: true,
+    };
+    streaming_input_tiled_sparse_tile_linear_from_model(
+        model,
+        weight_name,
+        input,
+        None,
+        linear_config,
+        sparse_config,
+        stats,
+        budget,
+    )
 }
 
 pub fn streaming_llama_transformer_block(
@@ -94,40 +133,76 @@ pub fn streaming_llama_transformer_block_with_timing(
     };
 
     let started = Instant::now();
-    let mut q = streaming_tile_linear_from_model(
+    let mut q = match optional_input_tiled_sparse_linear(
         model,
         &names.q_weight,
         &attention_input,
-        None,
         q_config,
+        config.experimental_speed,
+        128,
+        experimental_speed_stats.as_deref_mut(),
         budget,
-    )?;
+    )? {
+        Some(output) => output,
+        None => streaming_tile_linear_from_model(
+            model,
+            &names.q_weight,
+            &attention_input,
+            None,
+            q_config,
+            budget,
+        )?,
+    };
     if let Some(timing) = timing.as_deref_mut() {
         timing.q_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
 
     let started = Instant::now();
-    let mut k = streaming_tile_linear_from_model(
+    let mut k = match optional_input_tiled_sparse_linear(
         model,
         &names.k_weight,
         &attention_input,
-        None,
         kv_config,
+        config.experimental_speed,
+        128,
+        experimental_speed_stats.as_deref_mut(),
         budget,
-    )?;
+    )? {
+        Some(output) => output,
+        None => streaming_tile_linear_from_model(
+            model,
+            &names.k_weight,
+            &attention_input,
+            None,
+            kv_config,
+            budget,
+        )?,
+    };
     if let Some(timing) = timing.as_deref_mut() {
         timing.k_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
 
     let started = Instant::now();
-    let v = streaming_tile_linear_from_model(
+    let v = match optional_input_tiled_sparse_linear(
         model,
         &names.v_weight,
         &attention_input,
-        None,
         kv_config,
+        config.experimental_speed,
+        128,
+        experimental_speed_stats.as_deref_mut(),
         budget,
-    )?;
+    )? {
+        Some(output) => output,
+        None => streaming_tile_linear_from_model(
+            model,
+            &names.v_weight,
+            &attention_input,
+            None,
+            kv_config,
+            budget,
+        )?,
+    };
     if let Some(timing) = timing.as_deref_mut() {
         timing.v_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
@@ -178,14 +253,26 @@ pub fn streaming_llama_transformer_block_with_timing(
         tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
     };
     let started = Instant::now();
-    let o = streaming_tile_linear_from_model(
+    let o = match optional_input_tiled_sparse_linear(
         model,
         &names.o_weight,
         &attn_out,
-        None,
         o_config,
+        config.experimental_speed,
+        128,
+        experimental_speed_stats.as_deref_mut(),
         budget,
-    )?;
+    )? {
+        Some(output) => output,
+        None => streaming_tile_linear_from_model(
+            model,
+            &names.o_weight,
+            &attn_out,
+            None,
+            o_config,
+            budget,
+        )?,
+    };
     if let Some(timing) = timing.as_deref_mut() {
         timing.o_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
@@ -233,8 +320,25 @@ pub fn streaming_llama_transformer_block_with_timing(
                 aip_topk: Some(gate_up_aip_decision.topk),
                 aip_lm_head_rows: None,
                 aip_column_cache: config.experimental_speed.aip_column_cache,
+                aip_input_tiles: config.experimental_speed.aip_input_tiles,
             };
-            if let Some(cache) = sparse_column_cache.as_mut() {
+            let input_tiled = if sparse_config.aip_input_tiles {
+                streaming_input_tiled_sparse_silu_gate_up_from_model(
+                    model,
+                    &names.gate_weight,
+                    &names.up_weight,
+                    &mlp_input,
+                    mlp_config,
+                    sparse_config,
+                    stats,
+                    budget,
+                )?
+            } else {
+                None
+            };
+            if input_tiled.is_some() {
+                input_tiled
+            } else if let Some(cache) = sparse_column_cache.as_mut() {
                 match streaming_column_cached_sparse_silu_gate_up_from_model(
                     model,
                     &names.gate_weight,
@@ -353,8 +457,25 @@ pub fn streaming_llama_transformer_block_with_timing(
                 aip_topk: Some(down_aip_decision.topk),
                 aip_lm_head_rows: None,
                 aip_column_cache: config.experimental_speed.aip_column_cache,
+                aip_input_tiles: config.experimental_speed.aip_input_tiles,
             };
-            if let Some(cache) = sparse_column_cache.as_mut() {
+            let input_tiled = if sparse_config.aip_input_tiles {
+                streaming_input_tiled_sparse_tile_linear_from_model(
+                    model,
+                    &names.down_weight,
+                    &gate,
+                    None,
+                    down_config,
+                    sparse_config,
+                    stats,
+                    budget,
+                )?
+            } else {
+                None
+            };
+            if input_tiled.is_some() {
+                input_tiled
+            } else if let Some(cache) = sparse_column_cache.as_mut() {
                 match streaming_column_cached_sparse_tile_linear_from_model(
                     model,
                     &names.down_weight,

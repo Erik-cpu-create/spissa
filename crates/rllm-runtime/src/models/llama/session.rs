@@ -17,7 +17,8 @@ use crate::streaming::{
     streaming_tile_linear_argmax_with_rolling_from_model,
 };
 use crate::{
-    embedding_lookup, rms_norm, sample_top_p, streaming_tile_linear_argmax_from_model,
+    embedding_lookup, rms_norm, sample_argmax, sample_top_p,
+    streaming_input_tiled_sparse_tile_linear_from_model, streaming_tile_linear_argmax_from_model,
     streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
 };
 use crate::{RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats};
@@ -408,6 +409,58 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                         prefix_rows,
                         budget,
                     )?
+                } else if self.experimental_speed_config.enabled
+                    && self.experimental_speed_config.aip_input_tiles
+                {
+                    experimental_speed_stats
+                        .record_aip_policy(self.experimental_speed_config.aip_policy);
+                    let sparse_config = RamaExperimentalSpeedConfig {
+                        enabled: true,
+                        aip_policy: self.experimental_speed_config.aip_policy,
+                        aip_topk: Some(
+                            self.experimental_speed_config
+                                .topk_for_input(self.hidden_size, 128),
+                        ),
+                        aip_lm_head_rows: None,
+                        aip_column_cache: false,
+                        aip_input_tiles: true,
+                    };
+                    match streaming_input_tiled_sparse_tile_linear_from_model(
+                        self.model,
+                        &self.prepared.lm_head_weight,
+                        last_hidden,
+                        None,
+                        lm_head_config,
+                        sparse_config,
+                        &mut experimental_speed_stats,
+                        budget,
+                    )? {
+                        Some(logits) => sample_argmax(&logits)?,
+                        None => {
+                            if let Some(executor) = self.rolling_executor.as_mut() {
+                                let token = streaming_tile_linear_argmax_with_rolling_from_model(
+                                    self.model,
+                                    &self.prepared.lm_head_weight,
+                                    last_hidden,
+                                    None,
+                                    lm_head_config,
+                                    budget,
+                                    Some(executor),
+                                )?;
+                                self.last_rolling_stats = Some(executor.take_stats());
+                                token
+                            } else {
+                                streaming_tile_linear_argmax_from_model(
+                                    self.model,
+                                    &self.prepared.lm_head_weight,
+                                    last_hidden,
+                                    None,
+                                    lm_head_config,
+                                    budget,
+                                )?
+                            }
+                        }
+                    }
                 } else if let Some(executor) = self.rolling_executor.as_mut() {
                     let token = streaming_tile_linear_argmax_with_rolling_from_model(
                         self.model,
@@ -1225,6 +1278,7 @@ mod tests {
             aip_topk: Some(1),
             aip_lm_head_rows: None,
             aip_column_cache: false,
+            aip_input_tiles: false,
         });
 
         adapter.append_tokens(&[0], &mut budget, true).unwrap();
@@ -1256,6 +1310,7 @@ mod tests {
             aip_topk: Some(1),
             aip_lm_head_rows: None,
             aip_column_cache: false,
+            aip_input_tiles: false,
         });
         quality_adapter
             .append_tokens(&[0], &mut quality_budget, true)
@@ -1276,6 +1331,7 @@ mod tests {
             aip_topk: Some(1),
             aip_lm_head_rows: None,
             aip_column_cache: false,
+            aip_input_tiles: false,
         });
         speed_adapter
             .append_tokens(&[0], &mut speed_budget, true)

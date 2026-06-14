@@ -1038,6 +1038,8 @@ mod tests {
                 column_cache_misses: 0,
                 column_cache_resident_columns: 0,
                 column_cache_resident_bytes: 0,
+                input_tile_range_reads: 0,
+                input_tile_range_bytes: 0,
             });
         adapter
             .experimental_speed_stats
@@ -1055,6 +1057,8 @@ mod tests {
                 column_cache_misses: 0,
                 column_cache_resident_columns: 0,
                 column_cache_resident_bytes: 0,
+                input_tile_range_reads: 0,
+                input_tile_range_bytes: 0,
             });
         let mut session = RamaChatSession::new(adapter);
         let mut budget = MemoryBudget::unbounded();

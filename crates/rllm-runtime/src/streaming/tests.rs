@@ -2,7 +2,7 @@
 mod tests {
     use super::*;
     use crate::{linear, sample_argmax};
-    use rllm_container::{DType, GlobalMetadata, RllmWriter, TensorMeta};
+    use rllm_container::{ChunkRangeSpec, DType, GlobalMetadata, RllmWriter, TensorMeta};
     use rtc_codec::{EncodeMeta, RleCodec, TensorCodec};
     use sha2::{Digest, Sha256};
 
@@ -424,6 +424,69 @@ mod tests {
                 1,
             )
             .unwrap();
+    }
+
+    fn add_bf16_input_tile_sidecar_tensor(
+        writer: &mut RllmWriter,
+        tensor_id: u64,
+        source_name: &str,
+        out_features: usize,
+        in_features: usize,
+        row_major_values: &[u16],
+        tile_features: usize,
+    ) {
+        assert_eq!(row_major_values.len(), out_features * in_features);
+        let sidecar_name = crate::input_tile_sidecar_weight_name(source_name);
+        let mut input_major = vec![0u8; row_major_values.len() * 2];
+        for in_feature in 0..in_features {
+            for out_feature in 0..out_features {
+                let source_idx = out_feature * in_features + in_feature;
+                let dst_idx = in_feature * out_features + out_feature;
+                input_major[dst_idx * 2..dst_idx * 2 + 2]
+                    .copy_from_slice(&row_major_values[source_idx].to_le_bytes());
+            }
+        }
+
+        writer.add_tensor(TensorMeta {
+            tensor_id,
+            name: sidecar_name,
+            shape: vec![in_features as u64, out_features as u64],
+            dtype: DType::Bf16,
+            original_size_bytes: input_major.len() as u64,
+            compressed_size_bytes: input_major.len() as u64,
+            original_sha256: sha256_array(&input_major),
+            chunk_count: 0,
+            chunk_start_index: 0,
+        });
+
+        let column_bytes = (out_features * 2) as u64;
+        let chunk_columns = tile_features.max(1);
+        for feature_start in (0..in_features).step_by(chunk_columns) {
+            let feature_end = (feature_start + chunk_columns).min(in_features);
+            let byte_start = feature_start * out_features * 2;
+            let byte_end = feature_end * out_features * 2;
+            let chunk = &input_major[byte_start..byte_end];
+            let mut ranges = Vec::new();
+            for feature in feature_start..feature_end {
+                let offset = ((feature - feature_start) as u64) * column_bytes;
+                ranges.push(ChunkRangeSpec {
+                    original_offset: offset,
+                    original_size: column_bytes,
+                    compressed_offset: offset,
+                    compressed_size: column_bytes,
+                });
+            }
+            writer
+                .write_chunk_with_range_specs(
+                    tensor_id,
+                    "rtc-raw-v1",
+                    chunk,
+                    chunk,
+                    (feature_start * out_features) as u64,
+                    &ranges,
+                )
+                .unwrap();
+        }
     }
 
     #[test]
@@ -1321,6 +1384,7 @@ mod tests {
                 aip_topk: Some(2),
                 aip_lm_head_rows: None,
                 aip_column_cache: false,
+                aip_input_tiles: false,
             },
             &mut stats,
             &mut budget,
@@ -1391,6 +1455,7 @@ mod tests {
                 aip_topk: Some(2),
                 aip_lm_head_rows: None,
                 aip_column_cache: false,
+                aip_input_tiles: false,
             },
             &mut stats,
             &mut budget,
@@ -1427,6 +1492,186 @@ mod tests {
     }
 
     #[test]
+    fn input_tiled_sparse_raw_bf16_linear_matches_manual_topk_projection() {
+        let path = temp_path("input-tiled-sparse-linear-bf16");
+        let weight_bf16 = vec![
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
+            0x4000, 0x4040,
+        ];
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "linear.input-tile.bf16.weight",
+            vec![3, 4],
+            &weight_bf16,
+            14,
+        );
+        add_bf16_input_tile_sidecar_tensor(
+            &mut writer,
+            1,
+            "linear.input-tile.bf16.weight",
+            3,
+            4,
+            &weight_bf16,
+            2,
+        );
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        model.set_rama_integrity_mode(crate::RamaIntegrityMode::VerifyOnce);
+        let mut budget = MemoryBudget::new(128);
+        let mut stats = crate::RamaExperimentalSpeedStats::default();
+        let output = streaming_input_tiled_sparse_tile_linear_from_model(
+            &mut model,
+            "linear.input-tile.bf16.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 4,
+                    out_features: 3,
+                },
+                tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+            },
+            crate::RamaExperimentalSpeedConfig {
+                enabled: true,
+                aip_policy: crate::RamaAipPolicyKind::Speed,
+                aip_topk: Some(2),
+                aip_lm_head_rows: None,
+                aip_column_cache: false,
+                aip_input_tiles: true,
+            },
+            &mut stats,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(output.len(), 3);
+        assert!((output[0] - 12.0).abs() < 1e-4);
+        assert!((output[1] + 12.0).abs() < 1e-4);
+        assert!((output[2] - 13.0).abs() < 1e-4);
+        assert_eq!(stats.sparse_projection_calls, 1);
+        assert_eq!(stats.input_tile_range_reads, 2);
+        assert_eq!(stats.input_tile_range_bytes, 12);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn input_tiled_sparse_silu_gate_up_matches_manual_topk_projection() {
+        let path = temp_path("input-tiled-sparse-gate-up-bf16");
+        let gate_bf16 = vec![
+            0x3f80, 0x4000, 0x4040, 0x4080, 0x4000, 0x4040, 0x4080, 0x40a0,
+        ];
+        let up_bf16 = vec![
+            0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x4000, 0x4000, 0x4000, 0x4000,
+        ];
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "mlp.gate.input-tile.bf16.weight",
+            vec![2, 4],
+            &gate_bf16,
+            10,
+        );
+        add_bf16_tensor(
+            &mut writer,
+            1,
+            "mlp.up.input-tile.bf16.weight",
+            vec![2, 4],
+            &up_bf16,
+            10,
+        );
+        add_bf16_input_tile_sidecar_tensor(
+            &mut writer,
+            2,
+            "mlp.gate.input-tile.bf16.weight",
+            2,
+            4,
+            &gate_bf16,
+            2,
+        );
+        add_bf16_input_tile_sidecar_tensor(
+            &mut writer,
+            3,
+            "mlp.up.input-tile.bf16.weight",
+            2,
+            4,
+            &up_bf16,
+            2,
+        );
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        model.set_rama_integrity_mode(crate::RamaIntegrityMode::VerifyOnce);
+        let mut budget = MemoryBudget::new(128);
+        let mut stats = crate::RamaExperimentalSpeedStats::default();
+        let output = streaming_input_tiled_sparse_silu_gate_up_from_model(
+            &mut model,
+            "mlp.gate.input-tile.bf16.weight",
+            "mlp.up.input-tile.bf16.weight",
+            &input,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 4,
+                    out_features: 2,
+                },
+                tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+            },
+            crate::RamaExperimentalSpeedConfig {
+                enabled: true,
+                aip_policy: crate::RamaAipPolicyKind::Speed,
+                aip_topk: Some(2),
+                aip_lm_head_rows: None,
+                aip_column_cache: false,
+                aip_input_tiles: true,
+            },
+            &mut stats,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+
+        let selected = crate::select_top_abs_indices(&input, 2);
+        let gate_f32: Vec<f32> = gate_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let up_f32: Vec<f32> = up_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let mut expected = Vec::new();
+        for row in 0..2 {
+            let mut gate_acc = 0.0;
+            let mut up_acc = 0.0;
+            for &idx in &selected {
+                gate_acc += input[idx] * gate_f32[row * 4 + idx];
+                up_acc += input[idx] * up_f32[row * 4 + idx];
+            }
+            expected.push(crate::silu(gate_acc) * up_acc);
+        }
+
+        assert_close_vec(&output, &expected, 1e-4);
+        assert_eq!(stats.sparse_projection_calls, 1);
+        assert_eq!(stats.input_tile_range_reads, 4);
+        assert_eq!(stats.input_tile_range_bytes, 16);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn column_cached_sparse_raw_bf16_linear_matches_manual_topk_and_reuses_columns() {
         let path = temp_path("column-cache-sparse-linear-bf16");
         let weight_bf16 = vec![
@@ -1456,6 +1701,7 @@ mod tests {
             aip_topk: Some(2),
             aip_lm_head_rows: None,
             aip_column_cache: true,
+            aip_input_tiles: false,
         };
         let config = StreamingTileLinearConfig {
             linear: StreamingLinearConfig {
@@ -1550,6 +1796,7 @@ mod tests {
             aip_topk: Some(2),
             aip_lm_head_rows: None,
             aip_column_cache: true,
+            aip_input_tiles: false,
         };
         let output = streaming_column_cached_sparse_silu_gate_up_from_model(
             &mut model,
