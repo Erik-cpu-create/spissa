@@ -82,10 +82,6 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
         &self.adapter
     }
 
-    pub fn adapter_mut(&mut self) -> &mut A {
-        &mut self.adapter
-    }
-
     pub fn generate_turn(
         &mut self,
         user_token_ids: &[usize],
@@ -118,15 +114,17 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
             )));
         }
 
+        budget.reset_peak();
         let turn_start = Instant::now();
         let mut flushed_pending_tokens = 0usize;
-        if let Some(token) = self.pending_uncached_token.take() {
+        if let Some(token) = self.pending_uncached_token {
             let emitted = self.adapter.append_tokens(&[token], budget, false)?;
             if emitted.is_some() {
                 return Err(RuntimeError::InvalidTensorData(
                     "chat session pending-token flush unexpectedly emitted logits".to_string(),
                 ));
             }
+            self.pending_uncached_token = None;
             flushed_pending_tokens = 1;
         }
 
@@ -170,7 +168,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
 
         let decode_start = Instant::now();
         while generated_token_ids.len() < max_new_tokens {
-            let previous = self.pending_uncached_token.take().ok_or_else(|| {
+            let previous = self.pending_uncached_token.ok_or_else(|| {
                 RuntimeError::InvalidTensorData("chat session missing pending token".to_string())
             })?;
             let step = self
@@ -243,6 +241,22 @@ mod tests {
         context_len: usize,
         sample_base: usize,
         appends: Vec<(Vec<usize>, bool)>,
+        faults: Vec<AppendFault>,
+        transient_bytes: usize,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AppendFaultKind {
+        Error,
+        None,
+        UnexpectedLogits,
+    }
+
+    #[derive(Debug, Clone)]
+    struct AppendFault {
+        tokens: Vec<usize>,
+        emit_logits: bool,
+        kind: AppendFaultKind,
     }
 
     impl RecordingAdapter {
@@ -252,7 +266,36 @@ mod tests {
                 context_len: 0,
                 sample_base: 100,
                 appends: Vec::new(),
+                faults: Vec::new(),
+                transient_bytes: 0,
             }
+        }
+
+        fn with_fault(
+            mut self,
+            tokens: &[usize],
+            emit_logits: bool,
+            kind: AppendFaultKind,
+        ) -> Self {
+            self.faults.push(AppendFault {
+                tokens: tokens.to_vec(),
+                emit_logits,
+                kind,
+            });
+            self
+        }
+
+        fn with_transient_bytes(mut self, transient_bytes: usize) -> Self {
+            self.transient_bytes = transient_bytes;
+            self
+        }
+
+        fn take_fault(&mut self, tokens: &[usize], emit_logits: bool) -> Option<AppendFaultKind> {
+            let index = self
+                .faults
+                .iter()
+                .position(|fault| fault.tokens == tokens && fault.emit_logits == emit_logits)?;
+            Some(self.faults.remove(index).kind)
         }
     }
 
@@ -272,7 +315,7 @@ mod tests {
         fn append_tokens(
             &mut self,
             tokens: &[usize],
-            _budget: &mut MemoryBudget,
+            budget: &mut MemoryBudget,
             emit_logits: bool,
         ) -> Result<Option<RamaSessionStep>> {
             if tokens.is_empty() {
@@ -284,6 +327,23 @@ mod tests {
                 return Err(RuntimeError::Shape(
                     "recording adapter overflow".to_string(),
                 ));
+            }
+            if let Some(fault) = self.take_fault(tokens, emit_logits) {
+                return match fault {
+                    AppendFaultKind::Error => Err(RuntimeError::InvalidTensorData(
+                        "recording adapter injected failure".to_string(),
+                    )),
+                    AppendFaultKind::None => Ok(None),
+                    AppendFaultKind::UnexpectedLogits => Ok(Some(RamaSessionStep {
+                        token_id: self.sample_base + self.appends.len() + 1,
+                        logits: None,
+                        cached_context_len_after: self.context_len,
+                    })),
+                };
+            }
+            if self.transient_bytes > 0 {
+                budget.reserve(self.transient_bytes, "recording adapter transient")?;
+                budget.release(self.transient_bytes, "recording adapter transient")?;
             }
             self.appends.push((tokens.to_vec(), emit_logits));
             self.context_len += tokens.len();
@@ -341,5 +401,112 @@ mod tests {
         assert!(result.is_err());
         assert!(session.token_history().is_empty());
         assert!(session.adapter().appends.is_empty());
+    }
+
+    #[test]
+    fn flush_failure_preserves_pending_tail_and_can_retry_turn() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16).with_fault(
+            &[101],
+            false,
+            AppendFaultKind::Error,
+        ));
+        let mut budget = MemoryBudget::unbounded();
+
+        let turn1 = session
+            .generate_turn(&[1], 1, &mut budget, |_| true)
+            .unwrap();
+        assert_eq!(turn1.generated_token_ids, [101]);
+
+        let result = session.generate_turn(&[2], 1, &mut budget, |_| true);
+
+        assert!(result.is_err());
+        assert_eq!(session.pending_uncached_token(), Some(101));
+        assert_eq!(session.token_history(), &[1, 101]);
+        assert_eq!(session.cached_context_len(), 1);
+
+        let retry = session
+            .generate_turn(&[2], 1, &mut budget, |_| true)
+            .unwrap();
+        assert_eq!(retry.metrics.flushed_pending_tokens, 1);
+        assert_eq!(retry.generated_token_ids, [103]);
+        assert_eq!(session.pending_uncached_token(), Some(103));
+        assert_eq!(session.token_history(), &[1, 101, 2, 103]);
+    }
+
+    #[test]
+    fn decode_failure_preserves_pending_tail_and_visible_history_can_continue() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16).with_fault(
+            &[101],
+            true,
+            AppendFaultKind::Error,
+        ));
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session.generate_turn(&[1], 2, &mut budget, |_| true);
+
+        assert!(result.is_err());
+        assert_eq!(session.pending_uncached_token(), Some(101));
+        assert_eq!(session.token_history(), &[1, 101]);
+        assert_eq!(session.cached_context_len(), 1);
+
+        let retry = session
+            .generate_turn(&[2], 1, &mut budget, |_| true)
+            .unwrap();
+        assert_eq!(retry.metrics.flushed_pending_tokens, 1);
+        assert_eq!(retry.generated_token_ids, [103]);
+        assert_eq!(session.pending_uncached_token(), Some(103));
+        assert_eq!(session.token_history(), &[1, 101, 2, 103]);
+    }
+
+    #[test]
+    fn flush_unexpected_logits_preserves_pending_tail() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16).with_fault(
+            &[101],
+            false,
+            AppendFaultKind::UnexpectedLogits,
+        ));
+        let mut budget = MemoryBudget::unbounded();
+
+        session
+            .generate_turn(&[1], 1, &mut budget, |_| true)
+            .unwrap();
+        let result = session.generate_turn(&[2], 1, &mut budget, |_| true);
+
+        assert!(result.is_err());
+        assert_eq!(session.pending_uncached_token(), Some(101));
+        assert_eq!(session.token_history(), &[1, 101]);
+    }
+
+    #[test]
+    fn decode_none_preserves_pending_tail() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16).with_fault(
+            &[101],
+            true,
+            AppendFaultKind::None,
+        ));
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session.generate_turn(&[1], 2, &mut budget, |_| true);
+
+        assert!(result.is_err());
+        assert_eq!(session.pending_uncached_token(), Some(101));
+        assert_eq!(session.token_history(), &[1, 101]);
+        assert_eq!(session.cached_context_len(), 1);
+    }
+
+    #[test]
+    fn peak_transient_bytes_reports_per_turn_peak_after_reset() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16).with_transient_bytes(64));
+        let mut budget = MemoryBudget::new(1024);
+        budget.reserve(512, "old peak").unwrap();
+        budget.release(512, "old peak").unwrap();
+        assert_eq!(budget.peak_bytes(), 512);
+
+        let turn = session
+            .generate_turn(&[1], 1, &mut budget, |_| true)
+            .unwrap();
+
+        assert_eq!(turn.metrics.peak_transient_bytes, 64);
+        assert_eq!(budget.current_bytes(), 0);
     }
 }
