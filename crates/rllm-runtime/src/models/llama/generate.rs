@@ -41,6 +41,9 @@ fn optional_input_tiled_sparse_linear(
     input: &[f32],
     linear_config: StreamingTileLinearConfig,
     speed_config: RamaExperimentalSpeedConfig,
+    projection: RamaAipProjectionKind,
+    layer_index: usize,
+    total_layers: usize,
     default_topk: usize,
     stats: Option<&mut RamaExperimentalSpeedStats>,
     budget: &mut MemoryBudget,
@@ -51,14 +54,29 @@ fn optional_input_tiled_sparse_linear(
     let Some(stats) = stats else {
         return Ok(None);
     };
+    let decision = speed_config.aip_decision_for_projection(
+        layer_index,
+        total_layers,
+        projection,
+        linear_config.linear.in_features,
+        default_topk,
+    );
+    if !decision.enabled {
+        return Ok(None);
+    }
     stats.record_aip_policy(speed_config.aip_policy);
     let sparse_config = RamaExperimentalSpeedConfig {
         enabled: true,
         aip_policy: speed_config.aip_policy,
-        aip_topk: Some(speed_config.topk_for_input(linear_config.linear.in_features, default_topk)),
+        aip_topk: Some(decision.topk),
+        aip_attention_topk: None,
+        aip_mlp_topk: None,
+        aip_down_topk: None,
+        aip_lm_head_topk: None,
         aip_lm_head_rows: None,
         aip_column_cache: false,
         aip_input_tiles: true,
+        aip_no_repeat_last: false,
     };
     streaming_input_tiled_sparse_tile_linear_from_model(
         model,
@@ -139,6 +157,9 @@ pub fn streaming_llama_transformer_block_with_timing(
         &attention_input,
         q_config,
         config.experimental_speed,
+        RamaAipProjectionKind::Attention,
+        config.layer_index,
+        config.total_layers,
         128,
         experimental_speed_stats.as_deref_mut(),
         budget,
@@ -164,6 +185,9 @@ pub fn streaming_llama_transformer_block_with_timing(
         &attention_input,
         kv_config,
         config.experimental_speed,
+        RamaAipProjectionKind::Attention,
+        config.layer_index,
+        config.total_layers,
         128,
         experimental_speed_stats.as_deref_mut(),
         budget,
@@ -189,6 +213,9 @@ pub fn streaming_llama_transformer_block_with_timing(
         &attention_input,
         kv_config,
         config.experimental_speed,
+        RamaAipProjectionKind::Attention,
+        config.layer_index,
+        config.total_layers,
         128,
         experimental_speed_stats.as_deref_mut(),
         budget,
@@ -259,6 +286,9 @@ pub fn streaming_llama_transformer_block_with_timing(
         &attn_out,
         o_config,
         config.experimental_speed,
+        RamaAipProjectionKind::Attention,
+        config.layer_index,
+        config.total_layers,
         128,
         experimental_speed_stats.as_deref_mut(),
         budget,
@@ -318,9 +348,14 @@ pub fn streaming_llama_transformer_block_with_timing(
                 enabled: true,
                 aip_policy: config.experimental_speed.aip_policy,
                 aip_topk: Some(gate_up_aip_decision.topk),
+                aip_attention_topk: None,
+                aip_mlp_topk: None,
+                aip_down_topk: None,
+                aip_lm_head_topk: None,
                 aip_lm_head_rows: None,
                 aip_column_cache: config.experimental_speed.aip_column_cache,
                 aip_input_tiles: config.experimental_speed.aip_input_tiles,
+                aip_no_repeat_last: false,
             };
             let input_tiled = if sparse_config.aip_input_tiles {
                 streaming_input_tiled_sparse_silu_gate_up_from_model(
@@ -455,9 +490,14 @@ pub fn streaming_llama_transformer_block_with_timing(
                 enabled: true,
                 aip_policy: config.experimental_speed.aip_policy,
                 aip_topk: Some(down_aip_decision.topk),
+                aip_attention_topk: None,
+                aip_mlp_topk: None,
+                aip_down_topk: None,
+                aip_lm_head_topk: None,
                 aip_lm_head_rows: None,
                 aip_column_cache: config.experimental_speed.aip_column_cache,
                 aip_input_tiles: config.experimental_speed.aip_input_tiles,
+                aip_no_repeat_last: false,
             };
             let input_tiled = if sparse_config.aip_input_tiles {
                 streaming_input_tiled_sparse_tile_linear_from_model(

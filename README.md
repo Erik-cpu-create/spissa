@@ -121,9 +121,10 @@ cargo run --release -p rllm-cli --bin llama-test -- \
   --ctx 2048 \
   --max-new-tokens 64
 
-# Experimental R25 speed artifact for Llama 3.2 1B.
-# This reaches the 30-40 tok/s speed range in sparse research mode, but output
-# quality is still repetitive and should not be treated as chat-ready.
+# Experimental R26 speed artifact for Llama 3.2 1B.
+# This reaches the 30-40 tok/s speed range in sparse research mode. The
+# no-repeat guard reduces adjacent token collapse, but output is still not
+# chat-ready.
 cargo build --release -p rllm-cli --bin rllm --bin llama-test
 target/release/rllm pack \
   models/downloads/llama-3.2-1b-instruct-unsloth/model.safetensors \
@@ -137,11 +138,16 @@ target/release/rllm pack \
   --llama-lm-head-input-tiles \
   --input-tile-features 16
 printf 'good morning\nexit\n' | \
-  RLLM_AIP_INPUT_TILES=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=4 \
+  RLLM_AIP_INPUT_TILES=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed \
+  RLLM_AIP_TOPK=4 RLLM_AIP_NO_REPEAT_LAST=1 \
   target/release/llama-test \
     --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
     --ctx 2048 \
     --max-new-tokens 64
+
+# Optional projection-specific AIP knobs for R26 experiments:
+# RLLM_AIP_ATTENTION_TOPK, RLLM_AIP_MLP_TOPK, RLLM_AIP_DOWN_TOPK,
+# RLLM_AIP_LM_HEAD_TOPK.
 
 # Force the runtime worker count for CPU-only benchmarks.
 RLLM_THREADS=1 cargo run --release -p rllm-cli --bin llama-test -- \

@@ -320,6 +320,30 @@ pub fn sample_argmax(logits: &[f32]) -> Result<usize> {
     Ok(best_index)
 }
 
+pub fn sample_argmax_excluding(logits: &[f32], excluded_token: Option<usize>) -> Result<usize> {
+    let Some(excluded_token) = excluded_token else {
+        return sample_argmax(logits);
+    };
+    if excluded_token >= logits.len() || logits.len() <= 1 {
+        return sample_argmax(logits);
+    }
+
+    let mut best: Option<(usize, f32)> = None;
+    for (idx, &value) in logits.iter().enumerate() {
+        if idx == excluded_token {
+            continue;
+        }
+        match best {
+            Some((_, best_value)) if value <= best_value => {}
+            _ => best = Some((idx, value)),
+        }
+    }
+
+    best.map(|(idx, _)| idx).ok_or_else(|| {
+        RuntimeError::InvalidTensorData("cannot sample from empty logits".to_string())
+    })
+}
+
 /// Deterministic temperature + top-p sampling.
 ///
 /// Uses a tiny in-house xorshift PRNG so tests and prompts can be reproduced
@@ -493,6 +517,19 @@ mod tests {
     #[test]
     fn sample_argmax_is_deterministic() {
         assert_eq!(sample_argmax(&[0.1, 2.0, 1.9]).unwrap(), 1);
+    }
+
+    #[test]
+    fn sample_argmax_excluding_uses_next_best_token() {
+        assert_eq!(
+            sample_argmax_excluding(&[0.1, 2.0, 1.9], Some(1)).unwrap(),
+            2
+        );
+        assert_eq!(
+            sample_argmax_excluding(&[0.1, 2.0, 1.9], Some(99)).unwrap(),
+            1
+        );
+        assert_eq!(sample_argmax_excluding(&[2.0], Some(0)).unwrap(), 0);
     }
 
     #[test]
