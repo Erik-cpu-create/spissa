@@ -258,7 +258,7 @@ fn normalized_path_components(path: &str) -> Vec<String> {
                     components.push(part.to_string());
                 }
             }
-            _ => components.push(part.to_string()),
+            _ => components.push(part.to_ascii_lowercase()),
         }
     }
     components
@@ -370,6 +370,12 @@ mod tests {
         let traversal =
             validate_report_output_path("docs/benchmarks/trials/active/../success/replay.md");
         assert!(traversal
+            .unwrap_err()
+            .to_string()
+            .contains("writes active reports"));
+
+        let case_variant = validate_report_output_path("docs/benchmarks/trials/Success/replay.md");
+        assert!(case_variant
             .unwrap_err()
             .to_string()
             .contains("writes active reports"));
