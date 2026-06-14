@@ -2356,52 +2356,153 @@ fn accumulate_fused_raw_fp16_chunk_batch1(
     config: StreamingLinearConfig,
     weight_name: &str,
 ) -> Result<()> {
+    accumulate_fused_raw_fp16_chunk_batch1_row_blocked(
+        input,
+        output,
+        raw_bytes,
+        element_start,
+        config,
+        weight_name,
+    )
+}
+
+fn accumulate_fused_raw_fp16_chunk_batch1_row_blocked(
+    input: &[f32],
+    output: &mut [f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    weight_name: &str,
+) -> Result<()> {
     if !raw_bytes.len().is_multiple_of(2) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "Raw FP16 stream for {weight_name} has odd length"
         )));
     }
 
+    if config.batch != 1 {
+        return Err(RuntimeError::Shape(format!(
+            "raw FP16 batch1 row-block kernel requires batch=1, got {}",
+            config.batch
+        )));
+    }
+
+    let expected_weight_elements = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
     let weight_elements = raw_bytes.len() / 2;
+    let element_end = element_start
+        .checked_add(weight_elements)
+        .ok_or_else(|| RuntimeError::Shape("weight chunk element range overflow".to_string()))?;
+    if element_end > expected_weight_elements {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} chunk elements {element_start}..{element_end} exceed expected {expected_weight_elements}"
+        )));
+    }
+
     let mut local_idx = 0usize;
     let mut global_idx = element_start;
+
+    while local_idx < weight_elements && !global_idx.is_multiple_of(config.in_features) {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+        let mut acc = output[out_feature];
+        acc += raw_fp16_dot_segment(input, raw_bytes, local_idx, in_feature, row_len)?;
+        output[out_feature] = acc;
+        local_idx += row_len;
+        global_idx += row_len;
+    }
+
+    let row_block_elements = config
+        .in_features
+        .checked_mul(4)
+        .ok_or_else(|| RuntimeError::Shape("row block element count overflow".to_string()))?;
+    while local_idx + row_block_elements <= weight_elements {
+        let out_feature = global_idx / config.in_features;
+        if out_feature + 3 >= config.out_features {
+            break;
+        }
+
+        let mut acc0 = output[out_feature];
+        let mut acc1 = output[out_feature + 1];
+        let mut acc2 = output[out_feature + 2];
+        let mut acc3 = output[out_feature + 3];
+        let row0_start = local_idx;
+        let row1_start = local_idx + config.in_features;
+        let row2_start = row1_start + config.in_features;
+        let row3_start = row2_start + config.in_features;
+
+        let mut idx = 0usize;
+        while idx < config.in_features {
+            let x = input[idx];
+            acc0 += x * fp16_weight_at(raw_bytes, row0_start + idx);
+            acc1 += x * fp16_weight_at(raw_bytes, row1_start + idx);
+            acc2 += x * fp16_weight_at(raw_bytes, row2_start + idx);
+            acc3 += x * fp16_weight_at(raw_bytes, row3_start + idx);
+            idx += 1;
+        }
+
+        output[out_feature] = acc0;
+        output[out_feature + 1] = acc1;
+        output[out_feature + 2] = acc2;
+        output[out_feature + 3] = acc3;
+        local_idx += row_block_elements;
+        global_idx += row_block_elements;
+    }
+
     while local_idx < weight_elements {
         let out_feature = global_idx / config.in_features;
         let in_feature = global_idx % config.in_features;
         let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
         let mut acc = output[out_feature];
-        let mut idx = 0usize;
-
-        while idx + 4 <= row_len {
-            let byte_idx = (local_idx + idx) * 2;
-            let bytes = &raw_bytes[byte_idx..byte_idx + 8];
-            let w0 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
-            let w1 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
-            let w2 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[4], bytes[5]]));
-            let w3 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[6], bytes[7]]));
-            let input_start = in_feature + idx;
-            acc += input[input_start] * w0
-                + input[input_start + 1] * w1
-                + input[input_start + 2] * w2
-                + input[input_start + 3] * w3;
-            idx += 4;
-        }
-        while idx < row_len {
-            let byte_idx = (local_idx + idx) * 2;
-            let weight = crate::tensor::fp16_to_f32(u16::from_le_bytes([
-                raw_bytes[byte_idx],
-                raw_bytes[byte_idx + 1],
-            ]));
-            acc += input[in_feature + idx] * weight;
-            idx += 1;
-        }
-
+        acc += raw_fp16_dot_segment(input, raw_bytes, local_idx, in_feature, row_len)?;
         output[out_feature] = acc;
         local_idx += row_len;
         global_idx += row_len;
     }
 
     Ok(())
+}
+
+fn raw_fp16_dot_segment(
+    input: &[f32],
+    raw_bytes: &[u8],
+    local_idx: usize,
+    in_feature: usize,
+    row_len: usize,
+) -> Result<f32> {
+    let mut acc = 0.0f32;
+    let mut idx = 0usize;
+    while idx + 4 <= row_len {
+        let byte_idx = (local_idx + idx) * 2;
+        let bytes = &raw_bytes[byte_idx..byte_idx + 8];
+        let w0 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+        let w1 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
+        let w2 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[4], bytes[5]]));
+        let w3 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[6], bytes[7]]));
+        let input_start = in_feature + idx;
+        acc += input[input_start] * w0
+            + input[input_start + 1] * w1
+            + input[input_start + 2] * w2
+            + input[input_start + 3] * w3;
+        idx += 4;
+    }
+    while idx < row_len {
+        acc += input[in_feature + idx] * fp16_weight_at(raw_bytes, local_idx + idx);
+        idx += 1;
+    }
+    Ok(acc)
+}
+
+#[inline(always)]
+fn fp16_weight_at(raw_bytes: &[u8], element_idx: usize) -> f32 {
+    let byte_idx = element_idx * 2;
+    crate::tensor::fp16_to_f32(u16::from_le_bytes([
+        raw_bytes[byte_idx],
+        raw_bytes[byte_idx + 1],
+    ]))
 }
 
 fn accumulate_multiply_raw_fp16_chunk(
@@ -2491,15 +2592,145 @@ fn accumulate_multiply_raw_fp16_chunk_batch1(
     state: &mut StreamingLinearMultiplyIntoState<'_>,
     weight_name: &str,
 ) -> Result<()> {
+    accumulate_multiply_raw_fp16_chunk_batch1_row_blocked(
+        input,
+        raw_bytes,
+        element_start,
+        config,
+        state,
+        weight_name,
+    )
+}
+
+fn accumulate_multiply_raw_fp16_chunk_batch1_row_blocked(
+    input: &[f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    state: &mut StreamingLinearMultiplyIntoState<'_>,
+    weight_name: &str,
+) -> Result<()> {
     if !raw_bytes.len().is_multiple_of(2) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "Raw FP16 stream for {weight_name} has odd length"
         )));
     }
 
+    if config.batch != 1 {
+        return Err(RuntimeError::Shape(format!(
+            "raw FP16 batch1 multiply row-block kernel requires batch=1, got {}",
+            config.batch
+        )));
+    }
+
+    let expected_weight_elements = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
     let weight_elements = raw_bytes.len() / 2;
+    let element_end = element_start
+        .checked_add(weight_elements)
+        .ok_or_else(|| RuntimeError::Shape("weight chunk element range overflow".to_string()))?;
+    if element_end > expected_weight_elements {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} chunk elements {element_start}..{element_end} exceed expected {expected_weight_elements}"
+        )));
+    }
+
     let mut local_idx = 0usize;
     let mut global_idx = element_start;
+
+    while local_idx < weight_elements && !global_idx.is_multiple_of(config.in_features) {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        while state.current_out_feature < out_feature {
+            state.finish_current(config, weight_name)?;
+        }
+        if state.current_out_feature != out_feature {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+                out_feature, state.current_out_feature
+            )));
+        }
+
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+        let mut acc = state.current_acc[0];
+        acc += raw_fp16_dot_segment(input, raw_bytes, local_idx, in_feature, row_len)?;
+        state.current_acc[0] = acc;
+        local_idx += row_len;
+        global_idx += row_len;
+        if global_idx.is_multiple_of(config.in_features) {
+            state.finish_current(config, weight_name)?;
+        }
+    }
+
+    let row_block_elements = config
+        .in_features
+        .checked_mul(4)
+        .ok_or_else(|| RuntimeError::Shape("row block element count overflow".to_string()))?;
+    while local_idx + row_block_elements <= weight_elements {
+        let out_feature = global_idx / config.in_features;
+        if out_feature + 3 >= config.out_features {
+            break;
+        }
+        while state.current_out_feature < out_feature {
+            state.finish_current(config, weight_name)?;
+        }
+        if state.current_out_feature != out_feature {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+                out_feature, state.current_out_feature
+            )));
+        }
+
+        let mut acc0 = state.current_acc[0];
+        let mut acc1 = state
+            .bias
+            .and_then(|values| values.get(out_feature + 1))
+            .copied()
+            .unwrap_or(0.0);
+        let mut acc2 = state
+            .bias
+            .and_then(|values| values.get(out_feature + 2))
+            .copied()
+            .unwrap_or(0.0);
+        let mut acc3 = state
+            .bias
+            .and_then(|values| values.get(out_feature + 3))
+            .copied()
+            .unwrap_or(0.0);
+        let row0_start = local_idx;
+        let row1_start = local_idx + config.in_features;
+        let row2_start = row1_start + config.in_features;
+        let row3_start = row2_start + config.in_features;
+
+        let mut idx = 0usize;
+        while idx < config.in_features {
+            let x = input[idx];
+            acc0 += x * fp16_weight_at(raw_bytes, row0_start + idx);
+            acc1 += x * fp16_weight_at(raw_bytes, row1_start + idx);
+            acc2 += x * fp16_weight_at(raw_bytes, row2_start + idx);
+            acc3 += x * fp16_weight_at(raw_bytes, row3_start + idx);
+            idx += 1;
+        }
+
+        state.target[out_feature] *= acc0;
+        state.target[out_feature + 1] *= acc1;
+        state.target[out_feature + 2] *= acc2;
+        state.target[out_feature + 3] *= acc3;
+        state.current_out_feature += 4;
+        if state.current_out_feature < config.out_features {
+            let next = state
+                .bias
+                .and_then(|values| values.get(state.current_out_feature))
+                .copied()
+                .unwrap_or(0.0);
+            state.current_acc[0] = next;
+        }
+        local_idx += row_block_elements;
+        global_idx += row_block_elements;
+    }
+
     while local_idx < weight_elements {
         let out_feature = global_idx / config.in_features;
         let in_feature = global_idx % config.in_features;
@@ -2515,32 +2746,7 @@ fn accumulate_multiply_raw_fp16_chunk_batch1(
 
         let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
         let mut acc = state.current_acc[0];
-        let mut idx = 0usize;
-
-        while idx + 4 <= row_len {
-            let byte_idx = (local_idx + idx) * 2;
-            let bytes = &raw_bytes[byte_idx..byte_idx + 8];
-            let w0 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
-            let w1 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
-            let w2 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[4], bytes[5]]));
-            let w3 = crate::tensor::fp16_to_f32(u16::from_le_bytes([bytes[6], bytes[7]]));
-            let input_start = in_feature + idx;
-            acc += input[input_start] * w0
-                + input[input_start + 1] * w1
-                + input[input_start + 2] * w2
-                + input[input_start + 3] * w3;
-            idx += 4;
-        }
-        while idx < row_len {
-            let byte_idx = (local_idx + idx) * 2;
-            let weight = crate::tensor::fp16_to_f32(u16::from_le_bytes([
-                raw_bytes[byte_idx],
-                raw_bytes[byte_idx + 1],
-            ]));
-            acc += input[in_feature + idx] * weight;
-            idx += 1;
-        }
-
+        acc += raw_fp16_dot_segment(input, raw_bytes, local_idx, in_feature, row_len)?;
         state.current_acc[0] = acc;
         local_idx += row_len;
         global_idx += row_len;
@@ -3114,6 +3320,91 @@ mod tests {
         assert_eq!(budget.current_bytes(), 0);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn raw_fp16_batch1_row_block_kernel_matches_rowwise_linear_across_partial_rows() {
+        let weight_fp16 = vec![
+            0x3800, 0xbc00, 0x4000, 0xc000, 0x3400, 0x3800, 0x3c00, 0x3c00, 0xbc00, 0x0000, 0xb800,
+            0x3a00, 0x3c00, 0x4000, 0x4200, 0xc200, 0x3800, 0x3400,
+        ];
+        let raw = fp16_bytes(&weight_fp16);
+        let weight_f32: Vec<f32> = weight_fp16
+            .iter()
+            .map(|bits| crate::tensor::fp16_to_f32(*bits))
+            .collect();
+        let input = vec![1.5, -2.0, 0.25];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 3,
+            out_features: 6,
+        };
+        let mut expected = vec![0.25, -0.5, 0.75, 1.0, -1.25, 1.5];
+        let mut actual = expected.clone();
+        for (global_idx, weight) in (1usize..).zip(weight_f32.iter().skip(1)) {
+            let out_feature = global_idx / config.in_features;
+            let in_feature = global_idx % config.in_features;
+            expected[out_feature] += input[in_feature] * weight;
+        }
+
+        accumulate_fused_raw_fp16_chunk_batch1_row_blocked(
+            &input,
+            &mut actual,
+            &raw[2..],
+            1,
+            config,
+            "linear.fp16.row-block.weight",
+        )
+        .unwrap();
+
+        assert_close_vec(&actual, &expected, 1e-6);
+    }
+
+    #[test]
+    fn raw_fp16_batch1_multiply_row_block_kernel_matches_materialized_partial_chunk() {
+        let weight_fp16 = vec![
+            0x3800, 0xbc00, 0x4000, 0xc000, 0x3400, 0x3800, 0x3c00, 0x3c00, 0xbc00, 0x0000, 0xb800,
+            0x3a00, 0x3c00, 0x4000, 0x4200, 0xc200, 0x3800, 0x3400,
+        ];
+        let raw = fp16_bytes(&weight_fp16);
+        let weight_f32: Vec<f32> = weight_fp16
+            .iter()
+            .map(|bits| crate::tensor::fp16_to_f32(*bits))
+            .collect();
+        let input = vec![1.5, -2.0, 0.25];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 3,
+            out_features: 6,
+        };
+        let initial = vec![0.25, -0.5, 0.75, 1.0, -1.25, 1.5];
+        let mut expected_linear = [0.0; 6];
+        for (global_idx, weight) in (1usize..).zip(weight_f32.iter().skip(1)) {
+            let out_feature = global_idx / config.in_features;
+            let in_feature = global_idx % config.in_features;
+            expected_linear[out_feature] += input[in_feature] * weight;
+        }
+        let mut expected = initial.clone();
+        for (dst, value) in expected.iter_mut().zip(expected_linear.iter()) {
+            *dst *= *value;
+        }
+        let mut actual = initial;
+        let mut state = StreamingLinearMultiplyIntoState::new(&mut actual, None, config);
+
+        accumulate_multiply_raw_fp16_chunk_batch1_row_blocked(
+            &input,
+            &raw[2..],
+            1,
+            config,
+            &mut state,
+            "linear.fp16.multiply-row-block.weight",
+        )
+        .unwrap();
+        state
+            .finish(config, "linear.fp16.multiply-row-block.weight")
+            .unwrap();
+
+        assert_close_vec(&actual, &expected, 1e-6);
     }
 
     #[test]
