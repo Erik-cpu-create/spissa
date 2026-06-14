@@ -172,7 +172,7 @@ enum Commands {
         file: String,
 
         /// Conversation turn text; pass this flag more than once
-        #[arg(long = "turn", required = true)]
+        #[arg(long = "turn", required = true, allow_hyphen_values = true)]
         turns: Vec<String>,
 
         /// Maximum assistant tokens per turn
