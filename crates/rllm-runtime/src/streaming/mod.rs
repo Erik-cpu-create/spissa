@@ -18,6 +18,10 @@ fn available_runtime_threads() -> usize {
         .unwrap_or(1)
 }
 
+pub(crate) fn streaming_available_threads() -> usize {
+    available_runtime_threads()
+}
+
 fn argmax_runtime_thread_count(out_features: usize) -> usize {
     effective_argmax_runtime_threads(
         std::env::var(RLLM_THREADS_ENV).ok().as_deref(),
