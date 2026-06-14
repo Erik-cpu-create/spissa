@@ -61,6 +61,7 @@ pub use speed::{
 pub use streaming::{
     streaming_attention_from_model, streaming_attention_with_runtime_from_model,
     streaming_linear_from_model, streaming_mlp_from_model, streaming_silu_gate_up_from_model,
+    streaming_sparse_silu_gate_up_from_model, streaming_sparse_tile_linear_from_model,
     streaming_tile_linear_argmax_from_model, streaming_tile_linear_from_model,
     streaming_tile_linear_multiply_into_from_model, streaming_transformer_block_from_model,
     streaming_transformer_block_with_runtime_and_timing_from_model,
