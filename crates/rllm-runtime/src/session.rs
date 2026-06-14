@@ -9,9 +9,76 @@ pub struct RamaSessionStep {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+pub struct RamaTransformerPhaseTimings {
+    pub attention_norm_ms: f64,
+    pub q_projection_ms: f64,
+    pub k_projection_ms: f64,
+    pub v_projection_ms: f64,
+    pub rotary_ms: f64,
+    pub attention_ms: f64,
+    pub kv_append_ms: f64,
+    pub o_projection_ms: f64,
+    pub attention_residual_ms: f64,
+    pub mlp_norm_ms: f64,
+    pub gate_projection_ms: f64,
+    pub up_projection_ms: f64,
+    pub activation_multiply_ms: f64,
+    pub down_projection_ms: f64,
+    pub mlp_residual_ms: f64,
+    pub profiled_layers: usize,
+}
+
+impl RamaTransformerPhaseTimings {
+    pub fn add_assign(&mut self, other: RamaTransformerPhaseTimings) {
+        self.attention_norm_ms += other.attention_norm_ms;
+        self.q_projection_ms += other.q_projection_ms;
+        self.k_projection_ms += other.k_projection_ms;
+        self.v_projection_ms += other.v_projection_ms;
+        self.rotary_ms += other.rotary_ms;
+        self.attention_ms += other.attention_ms;
+        self.kv_append_ms += other.kv_append_ms;
+        self.o_projection_ms += other.o_projection_ms;
+        self.attention_residual_ms += other.attention_residual_ms;
+        self.mlp_norm_ms += other.mlp_norm_ms;
+        self.gate_projection_ms += other.gate_projection_ms;
+        self.up_projection_ms += other.up_projection_ms;
+        self.activation_multiply_ms += other.activation_multiply_ms;
+        self.down_projection_ms += other.down_projection_ms;
+        self.mlp_residual_ms += other.mlp_residual_ms;
+        self.profiled_layers = self.profiled_layers.saturating_add(other.profiled_layers);
+    }
+
+    pub fn attention_total_ms(&self) -> f64 {
+        self.attention_norm_ms
+            + self.q_projection_ms
+            + self.k_projection_ms
+            + self.v_projection_ms
+            + self.rotary_ms
+            + self.attention_ms
+            + self.kv_append_ms
+            + self.o_projection_ms
+            + self.attention_residual_ms
+    }
+
+    pub fn mlp_total_ms(&self) -> f64 {
+        self.mlp_norm_ms
+            + self.gate_projection_ms
+            + self.up_projection_ms
+            + self.activation_multiply_ms
+            + self.down_projection_ms
+            + self.mlp_residual_ms
+    }
+
+    pub fn total_ms(&self) -> f64 {
+        self.attention_total_ms() + self.mlp_total_ms()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RamaSessionPhaseTimings {
     pub embedding_ms: f64,
     pub transformer_ms: f64,
+    pub transformer_detail: RamaTransformerPhaseTimings,
     pub final_norm_ms: f64,
     pub lm_head_ms: f64,
 }
@@ -20,6 +87,7 @@ impl RamaSessionPhaseTimings {
     pub fn add_assign(&mut self, other: RamaSessionPhaseTimings) {
         self.embedding_ms += other.embedding_ms;
         self.transformer_ms += other.transformer_ms;
+        self.transformer_detail.add_assign(other.transformer_detail);
         self.final_norm_ms += other.final_norm_ms;
         self.lm_head_ms += other.lm_head_ms;
     }
@@ -687,12 +755,14 @@ mod tests {
             transformer_ms: 2.0,
             final_norm_ms: 3.0,
             lm_head_ms: 4.0,
+            ..Default::default()
         });
         adapter.phase_timings.push(RamaSessionPhaseTimings {
             embedding_ms: 10.0,
             transformer_ms: 20.0,
             final_norm_ms: 30.0,
             lm_head_ms: 40.0,
+            ..Default::default()
         });
         let mut session = RamaChatSession::new(adapter);
         let mut budget = MemoryBudget::unbounded();

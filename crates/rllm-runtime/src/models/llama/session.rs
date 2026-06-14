@@ -2,7 +2,7 @@ use crate::models::llama::api::{
     decode_vector_tensor, require_config_usize, require_model_config, validate_llama_shape,
 };
 use crate::models::llama::generate::{
-    streaming_llama_transformer_block, LlamaStreamingBlockConfig,
+    streaming_llama_transformer_block_with_timing, LlamaStreamingBlockConfig,
 };
 use crate::models::llama::model::{
     LayerDecodedLlamaRamaTransformer, OwnedLlamaStreamingBlockParameters,
@@ -13,7 +13,9 @@ use crate::{
     embedding_lookup, rms_norm, sample_argmax, sample_top_p, LazyRllmModel, MemoryBudget, Result,
     RuntimeError,
 };
-use crate::{RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep};
+use crate::{
+    RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep, RamaTransformerPhaseTimings,
+};
 use std::time::Instant;
 
 pub struct LlamaRamaSessionAdapter<'a> {
@@ -276,7 +278,8 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 causal: self.prepared.config.causal,
                 position_offset,
             };
-            hidden = streaming_llama_transformer_block(
+            let mut transformer_detail = RamaTransformerPhaseTimings::default();
+            hidden = streaming_llama_transformer_block_with_timing(
                 self.model,
                 &hidden,
                 layer_names,
@@ -284,7 +287,11 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 config,
                 budget,
                 Some(&mut self.caches[i]),
+                Some(&mut transformer_detail),
             )?;
+            phase_timings
+                .transformer_detail
+                .add_assign(transformer_detail);
         }
         phase_timings.transformer_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -835,6 +842,9 @@ mod tests {
         assert!(step.is_some());
         assert!(timings.embedding_ms >= 0.0);
         assert!(timings.transformer_ms >= 0.0);
+        assert_eq!(timings.transformer_detail.profiled_layers, 1);
+        assert!(timings.transformer_detail.attention_total_ms() >= 0.0);
+        assert!(timings.transformer_detail.mlp_total_ms() >= 0.0);
         assert!(timings.final_norm_ms >= 0.0);
         assert!(timings.lm_head_ms >= 0.0);
         assert!(timings.total_ms() >= 0.0);

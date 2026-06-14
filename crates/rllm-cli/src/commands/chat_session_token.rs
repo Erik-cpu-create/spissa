@@ -201,13 +201,32 @@ fn token_match_summary(baseline: &[usize], session: &[usize]) -> TokenMatchSumma
 }
 
 fn format_phase_timing_note(timings: RamaSessionPhaseTimings) -> String {
+    let detail = timings.transformer_detail;
     format!(
-        "embedding={:.2}ms transformer={:.2}ms final_norm={:.2}ms lm_head={:.2}ms profiled_total={:.2}ms",
+        "embedding={:.2}ms transformer={:.2}ms final_norm={:.2}ms lm_head={:.2}ms profiled_total={:.2}ms layers={} attention_total={:.2}ms attention_norm={:.2}ms q={:.2}ms k={:.2}ms v={:.2}ms rotary={:.2}ms attention={:.2}ms kv_append={:.2}ms o={:.2}ms attention_residual={:.2}ms mlp_total={:.2}ms mlp_norm={:.2}ms gate={:.2}ms up={:.2}ms activation_multiply={:.2}ms down={:.2}ms mlp_residual={:.2}ms",
         timings.embedding_ms,
         timings.transformer_ms,
         timings.final_norm_ms,
         timings.lm_head_ms,
-        timings.total_ms()
+        timings.total_ms(),
+        detail.profiled_layers,
+        detail.attention_total_ms(),
+        detail.attention_norm_ms,
+        detail.q_projection_ms,
+        detail.k_projection_ms,
+        detail.v_projection_ms,
+        detail.rotary_ms,
+        detail.attention_ms,
+        detail.kv_append_ms,
+        detail.o_projection_ms,
+        detail.attention_residual_ms,
+        detail.mlp_total_ms(),
+        detail.mlp_norm_ms,
+        detail.gate_projection_ms,
+        detail.up_projection_ms,
+        detail.activation_multiply_ms,
+        detail.down_projection_ms,
+        detail.mlp_residual_ms
     )
 }
 
@@ -408,7 +427,7 @@ mod tests {
         format_phase_timing_note, parse_token_turns, token_match_summary,
         validate_report_output_path,
     };
-    use rllm_runtime::RamaSessionPhaseTimings;
+    use rllm_runtime::{RamaSessionPhaseTimings, RamaTransformerPhaseTimings};
 
     #[test]
     fn parse_token_turns_accepts_comma_separated_turns() {
@@ -476,6 +495,17 @@ mod tests {
         let note = format_phase_timing_note(RamaSessionPhaseTimings {
             embedding_ms: 1.25,
             transformer_ms: 8.5,
+            transformer_detail: RamaTransformerPhaseTimings {
+                q_projection_ms: 1.0,
+                k_projection_ms: 2.0,
+                v_projection_ms: 3.0,
+                o_projection_ms: 4.0,
+                gate_projection_ms: 5.0,
+                up_projection_ms: 6.0,
+                down_projection_ms: 7.0,
+                profiled_layers: 32,
+                ..Default::default()
+            },
             final_norm_ms: 0.75,
             lm_head_ms: 2.0,
         });
@@ -485,6 +515,14 @@ mod tests {
         assert!(note.contains("final_norm=0.75ms"));
         assert!(note.contains("lm_head=2.00ms"));
         assert!(note.contains("profiled_total=12.50ms"));
+        assert!(note.contains("layers=32"));
+        assert!(note.contains("q=1.00ms"));
+        assert!(note.contains("k=2.00ms"));
+        assert!(note.contains("v=3.00ms"));
+        assert!(note.contains("o=4.00ms"));
+        assert!(note.contains("gate=5.00ms"));
+        assert!(note.contains("up=6.00ms"));
+        assert!(note.contains("down=7.00ms"));
     }
 
     #[test]
