@@ -11,6 +11,7 @@ pub const RLLM_AIP_LM_HEAD_ROWS_ENV: &str = "RLLM_AIP_LM_HEAD_ROWS";
 pub const RLLM_AIP_COLUMN_CACHE_ENV: &str = "RLLM_AIP_COLUMN_CACHE";
 pub const RLLM_AIP_INPUT_TILES_ENV: &str = "RLLM_AIP_INPUT_TILES";
 pub const RLLM_AIP_NO_REPEAT_LAST_ENV: &str = "RLLM_AIP_NO_REPEAT_LAST";
+pub const RLLM_AIP_REPEAT_RUN_LIMIT_ENV: &str = "RLLM_AIP_REPEAT_RUN_LIMIT";
 pub const RLLM_TURBO_TOPK_ENV: &str = "RLLM_TURBO_TOPK";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -73,6 +74,7 @@ pub struct RamaExperimentalSpeedConfig {
     pub aip_column_cache: bool,
     pub aip_input_tiles: bool,
     pub aip_no_repeat_last: bool,
+    pub aip_repeat_run_limit: Option<usize>,
 }
 
 impl RamaExperimentalSpeedConfig {
@@ -115,6 +117,9 @@ impl RamaExperimentalSpeedConfig {
             aip_no_repeat_last: parse_aip_no_repeat_last_enabled(
                 std::env::var(RLLM_AIP_NO_REPEAT_LAST_ENV).ok().as_deref(),
             ),
+            aip_repeat_run_limit: parse_aip_repeat_run_limit(
+                std::env::var(RLLM_AIP_REPEAT_RUN_LIMIT_ENV).ok().as_deref(),
+            ),
         }
     }
 
@@ -133,6 +138,7 @@ impl RamaExperimentalSpeedConfig {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         }
     }
 
@@ -466,6 +472,10 @@ pub fn parse_aip_no_repeat_last_enabled(value: Option<&str>) -> bool {
     )
 }
 
+pub fn parse_aip_repeat_run_limit(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
 pub fn parse_turbo_topk(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
@@ -542,6 +552,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
         assert_eq!(config.topk_for_input(2048, 256), 512);
         assert_eq!(config.topk_for_input(128, 256), 128);
@@ -560,6 +571,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
         assert_eq!(defaulted.topk_for_input(2048, 256), 256);
         assert_eq!(defaulted.topk_for_input(32, 256), 32);
@@ -660,6 +672,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_repeat_run_limit_keeps_only_positive_values() {
+        assert_eq!(parse_aip_repeat_run_limit(Some("2")), Some(2));
+        assert_eq!(parse_aip_repeat_run_limit(Some("1")), Some(1));
+        assert_eq!(parse_aip_repeat_run_limit(Some("0")), None);
+        assert_eq!(parse_aip_repeat_run_limit(Some("-2")), None);
+        assert_eq!(parse_aip_repeat_run_limit(Some("bad")), None);
+        assert_eq!(parse_aip_repeat_run_limit(None), None);
+    }
+
+    #[test]
     fn parse_aip_lm_head_rescore_keeps_only_positive_values() {
         assert_eq!(parse_aip_lm_head_rescore(Some("8")), Some(8));
         assert_eq!(parse_aip_lm_head_rescore(Some("1")), Some(1));
@@ -715,6 +737,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
         assert_eq!(config.lm_head_prefix_rows(128_256), Some(512));
         assert_eq!(config.lm_head_prefix_rows(512), None);
@@ -734,6 +757,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
         assert_eq!(disabled.lm_head_prefix_rows(128_256), None);
     }
@@ -754,6 +778,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
 
         assert_eq!(
@@ -790,6 +815,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
 
         assert_eq!(
@@ -818,6 +844,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
 
         assert_eq!(
@@ -846,6 +873,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
 
         assert_eq!(

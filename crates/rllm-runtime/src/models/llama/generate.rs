@@ -79,6 +79,7 @@ fn optional_input_tiled_sparse_linear(
         aip_column_cache: false,
         aip_input_tiles: true,
         aip_no_repeat_last: false,
+        aip_repeat_run_limit: None,
     };
     streaming_input_tiled_sparse_tile_linear_from_model(
         model,
@@ -360,6 +361,7 @@ pub fn streaming_llama_transformer_block_with_timing(
                 aip_column_cache: config.experimental_speed.aip_column_cache,
                 aip_input_tiles: config.experimental_speed.aip_input_tiles,
                 aip_no_repeat_last: false,
+                aip_repeat_run_limit: None,
             };
             let input_tiled = if sparse_config.aip_input_tiles {
                 streaming_input_tiled_sparse_silu_gate_up_from_model(
@@ -504,6 +506,7 @@ pub fn streaming_llama_transformer_block_with_timing(
                 aip_column_cache: config.experimental_speed.aip_column_cache,
                 aip_input_tiles: config.experimental_speed.aip_input_tiles,
                 aip_no_repeat_last: false,
+                aip_repeat_run_limit: None,
             };
             let input_tiled = if sparse_config.aip_input_tiles {
                 streaming_input_tiled_sparse_tile_linear_from_model(

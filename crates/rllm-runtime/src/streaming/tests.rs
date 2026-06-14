@@ -1499,6 +1499,7 @@ mod tests {
                 aip_column_cache: false,
                 aip_input_tiles: false,
                 aip_no_repeat_last: false,
+                aip_repeat_run_limit: None,
             },
             &mut stats,
             &mut budget,
@@ -1577,6 +1578,7 @@ mod tests {
                 aip_column_cache: false,
                 aip_input_tiles: false,
                 aip_no_repeat_last: false,
+                aip_repeat_run_limit: None,
             },
             &mut stats,
             &mut budget,
@@ -1672,6 +1674,7 @@ mod tests {
                 aip_column_cache: false,
                 aip_input_tiles: true,
                 aip_no_repeat_last: false,
+                aip_repeat_run_limit: None,
             },
             &mut stats,
             &mut budget,
@@ -1770,6 +1773,7 @@ mod tests {
                 aip_column_cache: false,
                 aip_input_tiles: true,
                 aip_no_repeat_last: false,
+                aip_repeat_run_limit: None,
             },
             &mut stats,
             &mut budget,
@@ -1844,6 +1848,7 @@ mod tests {
             aip_column_cache: true,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
         let config = StreamingTileLinearConfig {
             linear: StreamingLinearConfig {
@@ -1946,6 +1951,7 @@ mod tests {
             aip_column_cache: true,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         };
         let output = streaming_column_cached_sparse_silu_gate_up_from_model(
             &mut model,
