@@ -963,9 +963,14 @@ fn accumulate_sparse_raw_16bit_linear_chunk_batch1(
 
     let first_row = element_start / config.in_features;
     let last_row = element_end.saturating_sub(1) / config.in_features;
-    for out_feature in first_row..=last_row {
+    for (out_feature, out_value) in output
+        .iter_mut()
+        .enumerate()
+        .take(last_row + 1)
+        .skip(first_row)
+    {
         let row_base = out_feature * config.in_features;
-        let mut acc = output[out_feature];
+        let mut acc = *out_value;
         for &in_feature in selected {
             let global = row_base + in_feature;
             if global >= element_start && global < element_end {
@@ -973,7 +978,7 @@ fn accumulate_sparse_raw_16bit_linear_chunk_batch1(
                 acc += input[in_feature] * raw_16bit_weight_at(raw_bytes, local, dtype);
             }
         }
-        output[out_feature] = acc;
+        *out_value = acc;
     }
     Ok(())
 }
