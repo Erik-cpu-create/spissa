@@ -9,7 +9,7 @@ use crate::{
 };
 use rllm_container::ModelConfigMetadata;
 
-fn require_model_config<'a>(
+pub(crate) fn require_model_config<'a>(
     model: &'a LazyRllmModel,
     architecture: &str,
 ) -> Result<&'a ModelConfigMetadata> {
@@ -20,7 +20,7 @@ fn require_model_config<'a>(
     })
 }
 
-fn require_config_usize(field_name: &str, value: Option<u64>) -> Result<usize> {
+pub(crate) fn require_config_usize(field_name: &str, value: Option<u64>) -> Result<usize> {
     let value = value.ok_or_else(|| {
         RuntimeError::InvalidTensorData(format!(
             "llama model_config is missing required field {field_name}"
@@ -33,7 +33,7 @@ fn require_config_usize(field_name: &str, value: Option<u64>) -> Result<usize> {
     })
 }
 
-fn validate_llama_shape(
+pub(crate) fn validate_llama_shape(
     hidden_size: usize,
     num_heads: usize,
     num_key_value_heads: usize,
@@ -61,7 +61,7 @@ fn validate_llama_shape(
     Ok(hidden_size / num_heads)
 }
 
-fn decode_vector_tensor(
+pub(crate) fn decode_vector_tensor(
     model: &mut LazyRllmModel,
     name: &str,
     expected_len: usize,
