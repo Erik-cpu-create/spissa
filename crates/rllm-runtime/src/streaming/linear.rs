@@ -622,6 +622,26 @@ pub fn streaming_tile_linear_argmax_from_model(
     config: StreamingTileLinearConfig,
     budget: &mut MemoryBudget,
 ) -> Result<usize> {
+    streaming_tile_linear_argmax_with_rolling_from_model(
+        model,
+        weight_name,
+        input,
+        bias,
+        config,
+        budget,
+        None,
+    )
+}
+
+pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    bias: Option<&[f32]>,
+    config: StreamingTileLinearConfig,
+    budget: &mut MemoryBudget,
+    mut rolling: Option<&mut crate::rolling::RollingExecutor>,
+) -> Result<usize> {
     validate_tile_linear_config(config)?;
     validate_linear_shapes(input, bias, config.linear)?;
     if config.linear.in_features == 0 || config.linear.out_features == 0 {
@@ -686,6 +706,7 @@ pub fn streaming_tile_linear_argmax_from_model(
                     tensor.dtype,
                     &mut state,
                     weight_name,
+                    rolling.as_deref_mut(),
                 )
             })?;
         } else {
@@ -782,4 +803,3 @@ pub fn streaming_tile_linear_argmax_from_model(
 
     state.finish(config.linear, weight_name)
 }
-

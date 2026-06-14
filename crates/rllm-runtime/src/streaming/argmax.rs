@@ -384,6 +384,7 @@ fn accumulate_raw_16bit_chunk_argmax(
     dtype: rllm_container::DType,
     state: &mut StreamingLinearArgmaxState<'_>,
     weight_name: &str,
+    rolling: Option<&mut RollingExecutor>,
 ) -> Result<()> {
     accumulate_raw_16bit_chunk_argmax_row_blocked(
         input,
@@ -393,6 +394,7 @@ fn accumulate_raw_16bit_chunk_argmax(
         dtype,
         state,
         weight_name,
+        rolling,
     )
 }
 
@@ -404,6 +406,7 @@ fn accumulate_raw_16bit_chunk_argmax_row_blocked(
     dtype: rllm_container::DType,
     state: &mut StreamingLinearArgmaxState<'_>,
     weight_name: &str,
+    mut rolling: Option<&mut RollingExecutor>,
 ) -> Result<()> {
     if !raw_bytes.len().is_multiple_of(2) {
         return Err(RuntimeError::InvalidTensorData(format!(
@@ -476,17 +479,31 @@ fn accumulate_raw_16bit_chunk_argmax_row_blocked(
             )));
         }
 
-        let candidate = parallel_raw_16bit_argmax_rows(
-            input,
-            raw_bytes,
-            local_idx,
-            out_feature,
-            full_rows,
-            config,
-            dtype,
-            state.bias,
-            worker_count,
-        );
+        let candidate = if let Some(executor) = rolling.as_deref_mut() {
+            rolling_raw_16bit_argmax_rows(
+                input,
+                raw_bytes,
+                local_idx,
+                out_feature,
+                full_rows,
+                config,
+                dtype,
+                state.bias,
+                executor,
+            )
+        } else {
+            parallel_raw_16bit_argmax_rows(
+                input,
+                raw_bytes,
+                local_idx,
+                out_feature,
+                full_rows,
+                config,
+                dtype,
+                state.bias,
+                worker_count,
+            )
+        };
         if candidate.seen && (!state.seen || candidate.best_value > state.best_value) {
             state.best_index = candidate.best_index;
             state.best_value = candidate.best_value;
