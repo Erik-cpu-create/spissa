@@ -121,6 +121,28 @@ cargo run --release -p rllm-cli --bin llama-test -- \
   --ctx 2048 \
   --max-new-tokens 64
 
+# Experimental R25 speed artifact for Llama 3.2 1B.
+# This reaches the 30-40 tok/s speed range in sparse research mode, but output
+# quality is still repetitive and should not be treated as chat-ready.
+cargo build --release -p rllm-cli --bin rllm --bin llama-test
+target/release/rllm pack \
+  models/downloads/llama-3.2-1b-instruct-unsloth/model.safetensors \
+  --out models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+  --codec raw \
+  --chunk-size 1mb \
+  --config models/downloads/llama-3.2-1b-instruct-unsloth/config.json \
+  --tokenizer models/downloads/llama-3.2-1b-instruct-unsloth/tokenizer.json \
+  --llama-mlp-input-tiles \
+  --llama-attention-input-tiles \
+  --llama-lm-head-input-tiles \
+  --input-tile-features 16
+printf 'good morning\nexit\n' | \
+  RLLM_AIP_INPUT_TILES=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=4 \
+  target/release/llama-test \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --ctx 2048 \
+    --max-new-tokens 64
+
 # Force the runtime worker count for CPU-only benchmarks.
 RLLM_THREADS=1 cargo run --release -p rllm-cli --bin llama-test -- \
   --model models/SmolLM2-135M-raw.rllm \

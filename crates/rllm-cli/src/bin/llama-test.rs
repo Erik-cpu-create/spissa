@@ -75,6 +75,14 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
         } else {
             String::new()
         };
+        let input_tile_note = if stats.input_tile_range_reads > 0 {
+            format!(
+                " input_tile_reads={} input_tile_bytes={}",
+                stats.input_tile_range_reads, stats.input_tile_range_bytes
+            )
+        } else {
+            String::new()
+        };
         format!(
             " | AIP: policy={} calls={} fallbacks={} max_topk={} skipped_madds={} scratch={} bytes",
             policy_str,
@@ -85,6 +93,7 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
             stats.peak_scratch_bytes
         ) + &lm_head_note
             + &column_cache_note
+            + &input_tile_note
     }
 }
 
@@ -296,6 +305,8 @@ mod tests {
             column_cache_misses: 4,
             column_cache_resident_columns: 12,
             column_cache_resident_bytes: 49_152,
+            input_tile_range_reads: 5,
+            input_tile_range_bytes: 256,
         });
 
         assert!(suffix.contains("AIP: policy=quality"));
@@ -308,6 +319,8 @@ mod tests {
         assert!(suffix.contains("column_cache_hits=8"));
         assert!(suffix.contains("column_cache_misses=4"));
         assert!(suffix.contains("column_cache_resident=12/49152 bytes"));
+        assert!(suffix.contains("input_tile_reads=5"));
+        assert!(suffix.contains("input_tile_bytes=256"));
     }
 
     #[test]

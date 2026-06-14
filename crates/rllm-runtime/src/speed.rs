@@ -3,6 +3,7 @@ pub const RLLM_AIP_POLICY_ENV: &str = "RLLM_AIP_POLICY";
 pub const RLLM_AIP_TOPK_ENV: &str = "RLLM_AIP_TOPK";
 pub const RLLM_AIP_LM_HEAD_ROWS_ENV: &str = "RLLM_AIP_LM_HEAD_ROWS";
 pub const RLLM_AIP_COLUMN_CACHE_ENV: &str = "RLLM_AIP_COLUMN_CACHE";
+pub const RLLM_AIP_INPUT_TILES_ENV: &str = "RLLM_AIP_INPUT_TILES";
 pub const RLLM_TURBO_TOPK_ENV: &str = "RLLM_TURBO_TOPK";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -56,6 +57,7 @@ pub struct RamaExperimentalSpeedConfig {
     pub aip_topk: Option<usize>,
     pub aip_lm_head_rows: Option<usize>,
     pub aip_column_cache: bool,
+    pub aip_input_tiles: bool,
 }
 
 impl RamaExperimentalSpeedConfig {
@@ -76,6 +78,9 @@ impl RamaExperimentalSpeedConfig {
             aip_column_cache: parse_aip_column_cache_enabled(
                 std::env::var(RLLM_AIP_COLUMN_CACHE_ENV).ok().as_deref(),
             ),
+            aip_input_tiles: parse_aip_input_tiles_enabled(
+                std::env::var(RLLM_AIP_INPUT_TILES_ENV).ok().as_deref(),
+            ),
         }
     }
 
@@ -86,6 +91,7 @@ impl RamaExperimentalSpeedConfig {
             aip_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
+            aip_input_tiles: false,
         }
     }
 
@@ -159,6 +165,8 @@ pub struct RamaExperimentalSpeedStats {
     pub column_cache_misses: usize,
     pub column_cache_resident_columns: usize,
     pub column_cache_resident_bytes: usize,
+    pub input_tile_range_reads: usize,
+    pub input_tile_range_bytes: usize,
 }
 
 impl RamaExperimentalSpeedStats {
@@ -194,6 +202,12 @@ impl RamaExperimentalSpeedStats {
         self.column_cache_resident_bytes = self
             .column_cache_resident_bytes
             .max(other.column_cache_resident_bytes);
+        self.input_tile_range_reads = self
+            .input_tile_range_reads
+            .saturating_add(other.input_tile_range_reads);
+        self.input_tile_range_bytes = self
+            .input_tile_range_bytes
+            .saturating_add(other.input_tile_range_bytes);
     }
 
     pub fn record_sparse_projection(
@@ -246,6 +260,11 @@ impl RamaExperimentalSpeedStats {
         self.column_cache_resident_bytes = self.column_cache_resident_bytes.max(resident_bytes);
     }
 
+    pub fn record_input_tile_ranges(&mut self, reads: usize, bytes: usize) {
+        self.input_tile_range_reads = self.input_tile_range_reads.saturating_add(reads);
+        self.input_tile_range_bytes = self.input_tile_range_bytes.saturating_add(bytes);
+    }
+
     pub fn is_empty(self) -> bool {
         self.aip_policy.is_none()
             && self.sparse_projection_calls == 0
@@ -260,6 +279,8 @@ impl RamaExperimentalSpeedStats {
             && self.column_cache_misses == 0
             && self.column_cache_resident_columns == 0
             && self.column_cache_resident_bytes == 0
+            && self.input_tile_range_reads == 0
+            && self.input_tile_range_bytes == 0
     }
 }
 
@@ -289,6 +310,13 @@ pub fn parse_aip_lm_head_rows(value: Option<&str>) -> Option<usize> {
 }
 
 pub fn parse_aip_column_cache_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+pub fn parse_aip_input_tiles_enabled(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "on")
@@ -363,6 +391,7 @@ mod tests {
             aip_topk: Some(512),
             aip_lm_head_rows: None,
             aip_column_cache: false,
+            aip_input_tiles: false,
         };
         assert_eq!(config.topk_for_input(2048, 256), 512);
         assert_eq!(config.topk_for_input(128, 256), 128);
@@ -373,6 +402,7 @@ mod tests {
             aip_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
+            aip_input_tiles: false,
         };
         assert_eq!(defaulted.topk_for_input(2048, 256), 256);
         assert_eq!(defaulted.topk_for_input(32, 256), 32);
@@ -449,6 +479,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_input_tiles_enabled_accepts_explicit_truthy_values() {
+        assert!(parse_aip_input_tiles_enabled(Some("1")));
+        assert!(parse_aip_input_tiles_enabled(Some("true")));
+        assert!(parse_aip_input_tiles_enabled(Some("yes")));
+        assert!(parse_aip_input_tiles_enabled(Some("on")));
+        assert!(!parse_aip_input_tiles_enabled(Some("0")));
+        assert!(!parse_aip_input_tiles_enabled(Some("false")));
+        assert!(!parse_aip_input_tiles_enabled(Some("")));
+        assert!(!parse_aip_input_tiles_enabled(None));
+    }
+
+    #[test]
     fn lm_head_prefix_rows_are_bounded_and_only_when_enabled() {
         let config = RamaExperimentalSpeedConfig {
             enabled: true,
@@ -456,6 +498,7 @@ mod tests {
             aip_topk: None,
             aip_lm_head_rows: Some(512),
             aip_column_cache: false,
+            aip_input_tiles: false,
         };
         assert_eq!(config.lm_head_prefix_rows(128_256), Some(512));
         assert_eq!(config.lm_head_prefix_rows(512), None);
@@ -467,6 +510,7 @@ mod tests {
             aip_topk: None,
             aip_lm_head_rows: Some(512),
             aip_column_cache: false,
+            aip_input_tiles: false,
         };
         assert_eq!(disabled.lm_head_prefix_rows(128_256), None);
     }
@@ -479,6 +523,7 @@ mod tests {
             aip_topk: Some(96),
             aip_lm_head_rows: None,
             aip_column_cache: false,
+            aip_input_tiles: false,
         };
 
         assert_eq!(
@@ -507,6 +552,7 @@ mod tests {
             aip_topk: Some(64),
             aip_lm_head_rows: None,
             aip_column_cache: false,
+            aip_input_tiles: false,
         };
 
         assert_eq!(
@@ -527,6 +573,7 @@ mod tests {
             aip_topk: Some(128),
             aip_lm_head_rows: None,
             aip_column_cache: false,
+            aip_input_tiles: false,
         };
 
         assert_eq!(
