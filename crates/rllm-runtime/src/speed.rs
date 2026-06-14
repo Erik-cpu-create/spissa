@@ -6,6 +6,7 @@ pub const RLLM_AIP_MLP_TOPK_ENV: &str = "RLLM_AIP_MLP_TOPK";
 pub const RLLM_AIP_DOWN_TOPK_ENV: &str = "RLLM_AIP_DOWN_TOPK";
 pub const RLLM_AIP_LM_HEAD_TOPK_ENV: &str = "RLLM_AIP_LM_HEAD_TOPK";
 pub const RLLM_AIP_LM_HEAD_RESCORE_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE";
+pub const RLLM_AIP_LM_HEAD_AGREEMENT_ENV: &str = "RLLM_AIP_LM_HEAD_AGREEMENT";
 pub const RLLM_AIP_LM_HEAD_ROWS_ENV: &str = "RLLM_AIP_LM_HEAD_ROWS";
 pub const RLLM_AIP_COLUMN_CACHE_ENV: &str = "RLLM_AIP_COLUMN_CACHE";
 pub const RLLM_AIP_INPUT_TILES_ENV: &str = "RLLM_AIP_INPUT_TILES";
@@ -67,6 +68,7 @@ pub struct RamaExperimentalSpeedConfig {
     pub aip_down_topk: Option<usize>,
     pub aip_lm_head_topk: Option<usize>,
     pub aip_lm_head_rescore: Option<usize>,
+    pub aip_lm_head_agreement: bool,
     pub aip_lm_head_rows: Option<usize>,
     pub aip_column_cache: bool,
     pub aip_input_tiles: bool,
@@ -96,6 +98,11 @@ impl RamaExperimentalSpeedConfig {
             aip_lm_head_rescore: parse_aip_lm_head_rescore(
                 std::env::var(RLLM_AIP_LM_HEAD_RESCORE_ENV).ok().as_deref(),
             ),
+            aip_lm_head_agreement: parse_aip_lm_head_agreement_enabled(
+                std::env::var(RLLM_AIP_LM_HEAD_AGREEMENT_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
             aip_lm_head_rows: parse_aip_lm_head_rows(
                 std::env::var(RLLM_AIP_LM_HEAD_ROWS_ENV).ok().as_deref(),
             ),
@@ -121,6 +128,7 @@ impl RamaExperimentalSpeedConfig {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -234,6 +242,11 @@ pub struct RamaExperimentalSpeedStats {
     pub column_cache_resident_bytes: usize,
     pub input_tile_range_reads: usize,
     pub input_tile_range_bytes: usize,
+    pub lm_head_agreement_samples: usize,
+    pub lm_head_agreement_sparse_argmax_matches: usize,
+    pub lm_head_agreement_selected_matches: usize,
+    pub lm_head_agreement_exact_in_sparse_topk: usize,
+    pub lm_head_agreement_max_topk: usize,
 }
 
 impl RamaExperimentalSpeedStats {
@@ -275,6 +288,21 @@ impl RamaExperimentalSpeedStats {
         self.input_tile_range_bytes = self
             .input_tile_range_bytes
             .saturating_add(other.input_tile_range_bytes);
+        self.lm_head_agreement_samples = self
+            .lm_head_agreement_samples
+            .saturating_add(other.lm_head_agreement_samples);
+        self.lm_head_agreement_sparse_argmax_matches = self
+            .lm_head_agreement_sparse_argmax_matches
+            .saturating_add(other.lm_head_agreement_sparse_argmax_matches);
+        self.lm_head_agreement_selected_matches = self
+            .lm_head_agreement_selected_matches
+            .saturating_add(other.lm_head_agreement_selected_matches);
+        self.lm_head_agreement_exact_in_sparse_topk = self
+            .lm_head_agreement_exact_in_sparse_topk
+            .saturating_add(other.lm_head_agreement_exact_in_sparse_topk);
+        self.lm_head_agreement_max_topk = self
+            .lm_head_agreement_max_topk
+            .max(other.lm_head_agreement_max_topk);
     }
 
     pub fn record_sparse_projection(
@@ -332,6 +360,31 @@ impl RamaExperimentalSpeedStats {
         self.input_tile_range_bytes = self.input_tile_range_bytes.saturating_add(bytes);
     }
 
+    pub fn record_lm_head_agreement(
+        &mut self,
+        sparse_argmax_matches_exact: bool,
+        selected_matches_exact: bool,
+        exact_in_sparse_topk: bool,
+        sparse_topk: usize,
+    ) {
+        self.lm_head_agreement_samples = self.lm_head_agreement_samples.saturating_add(1);
+        if sparse_argmax_matches_exact {
+            self.lm_head_agreement_sparse_argmax_matches = self
+                .lm_head_agreement_sparse_argmax_matches
+                .saturating_add(1);
+        }
+        if selected_matches_exact {
+            self.lm_head_agreement_selected_matches =
+                self.lm_head_agreement_selected_matches.saturating_add(1);
+        }
+        if exact_in_sparse_topk {
+            self.lm_head_agreement_exact_in_sparse_topk = self
+                .lm_head_agreement_exact_in_sparse_topk
+                .saturating_add(1);
+        }
+        self.lm_head_agreement_max_topk = self.lm_head_agreement_max_topk.max(sparse_topk);
+    }
+
     pub fn is_empty(self) -> bool {
         self.aip_policy.is_none()
             && self.sparse_projection_calls == 0
@@ -348,6 +401,11 @@ impl RamaExperimentalSpeedStats {
             && self.column_cache_resident_bytes == 0
             && self.input_tile_range_reads == 0
             && self.input_tile_range_bytes == 0
+            && self.lm_head_agreement_samples == 0
+            && self.lm_head_agreement_sparse_argmax_matches == 0
+            && self.lm_head_agreement_selected_matches == 0
+            && self.lm_head_agreement_exact_in_sparse_topk == 0
+            && self.lm_head_agreement_max_topk == 0
     }
 }
 
@@ -378,6 +436,13 @@ pub fn parse_aip_lm_head_rows(value: Option<&str>) -> Option<usize> {
 
 pub fn parse_aip_lm_head_rescore(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
+}
+
+pub fn parse_aip_lm_head_agreement_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 pub fn parse_aip_column_cache_enabled(value: Option<&str>) -> bool {
@@ -472,6 +537,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -489,6 +555,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -603,6 +670,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_lm_head_agreement_enabled_accepts_explicit_truthy_values() {
+        assert!(parse_aip_lm_head_agreement_enabled(Some("1")));
+        assert!(parse_aip_lm_head_agreement_enabled(Some("true")));
+        assert!(parse_aip_lm_head_agreement_enabled(Some("yes")));
+        assert!(parse_aip_lm_head_agreement_enabled(Some("on")));
+        assert!(!parse_aip_lm_head_agreement_enabled(Some("0")));
+        assert!(!parse_aip_lm_head_agreement_enabled(Some("false")));
+        assert!(!parse_aip_lm_head_agreement_enabled(Some("")));
+        assert!(!parse_aip_lm_head_agreement_enabled(None));
+    }
+
+    #[test]
+    fn stats_record_lm_head_agreement_and_merge() {
+        let mut stats = RamaExperimentalSpeedStats::default();
+        stats.record_lm_head_agreement(true, false, true, 4);
+        stats.record_lm_head_agreement(false, true, false, 2);
+
+        let mut other = RamaExperimentalSpeedStats::default();
+        other.record_lm_head_agreement(true, true, true, 8);
+        stats.add_assign(other);
+
+        assert_eq!(stats.lm_head_agreement_samples, 3);
+        assert_eq!(stats.lm_head_agreement_sparse_argmax_matches, 2);
+        assert_eq!(stats.lm_head_agreement_selected_matches, 2);
+        assert_eq!(stats.lm_head_agreement_exact_in_sparse_topk, 2);
+        assert_eq!(stats.lm_head_agreement_max_topk, 8);
+        assert!(!stats.is_empty());
+    }
+
+    #[test]
     fn lm_head_prefix_rows_are_bounded_and_only_when_enabled() {
         let config = RamaExperimentalSpeedConfig {
             enabled: true,
@@ -613,6 +710,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: Some(512),
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -631,6 +729,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: Some(512),
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -650,6 +749,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -685,6 +785,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -712,6 +813,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -739,6 +841,7 @@ mod tests {
             aip_down_topk: Some(2),
             aip_lm_head_topk: Some(16),
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
