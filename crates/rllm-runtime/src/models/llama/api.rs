@@ -126,6 +126,11 @@ pub fn prepare_llama_rama_layer_decode_transformer_from_metadata(
     {
         num_layers += 1;
     }
+    if num_layers == 0 {
+        return Err(RuntimeError::Shape(
+            "llama model requires at least one layer".to_string(),
+        ));
+    }
 
     let mut layers = Vec::new();
     for i in 0..num_layers {
@@ -328,12 +333,74 @@ pub fn rama_layer_decoded_llama_transformer_generate_from_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rllm_container::{GlobalMetadata, ModelConfigMetadata, RllmWriter};
+    use rllm_container::{DType, GlobalMetadata, ModelConfigMetadata, RllmWriter, TensorMeta};
+    use sha2::{Digest, Sha256};
+
+    fn sha256_array(bytes: &[u8]) -> [u8; 32] {
+        Sha256::digest(bytes).into()
+    }
+
+    fn f32_bytes(values: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn add_f32_tensor(
+        writer: &mut RllmWriter,
+        tensor_id: u64,
+        name: &str,
+        shape: Vec<u64>,
+        values: &[f32],
+    ) {
+        let bytes = f32_bytes(values);
+        writer.add_tensor(TensorMeta {
+            tensor_id,
+            name: name.to_string(),
+            shape,
+            dtype: DType::Fp32,
+            original_size_bytes: bytes.len() as u64,
+            compressed_size_bytes: bytes.len() as u64,
+            original_sha256: sha256_array(&bytes),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(tensor_id, "rtc-raw-v1", &bytes, &bytes, 0)
+            .unwrap();
+    }
 
     fn write_empty_model(metadata: GlobalMetadata, name: &str) -> std::path::PathBuf {
         let path =
             std::env::temp_dir().join(format!("rllm-llama-api-{name}-{}.rllm", std::process::id()));
         let writer = RllmWriter::new(&path, metadata).unwrap();
+        writer.finalize().unwrap();
+        path
+    }
+
+    fn llama_metadata() -> GlobalMetadata {
+        let mut metadata = GlobalMetadata::new_test();
+        metadata.model_config = Some(ModelConfigMetadata {
+            architecture_type: Some("llama".to_string()),
+            hidden_size: Some(2),
+            intermediate_size: Some(3),
+            num_attention_heads: Some(1),
+            num_key_value_heads: Some(1),
+            max_position_embeddings: Some(8),
+            rms_norm_eps: Some(1e-5),
+            rope_theta: Some(10_000.0),
+            ..Default::default()
+        });
+        metadata
+    }
+
+    fn write_model_with_final_norm_only(name: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("rllm-llama-api-{name}-{}.rllm", std::process::id()));
+        let mut writer = RllmWriter::new(&path, llama_metadata()).unwrap();
+        add_f32_tensor(&mut writer, 0, "model.norm.weight", vec![2], &[1.0, 1.0]);
         writer.finalize().unwrap();
         path
     }
@@ -377,6 +444,23 @@ mod tests {
         );
 
         assert!(result.is_err());
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_prepare_rejects_zero_layers() {
+        let path = write_model_with_final_norm_only("zero-layers");
+        let mut model = LazyRllmModel::open(&path).unwrap();
+
+        let result = prepare_llama_rama_layer_decode_transformer_from_metadata(
+            &mut model,
+            generation_config(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Shape(message)) if message.contains("at least one layer")
+        ));
         std::fs::remove_file(path).ok();
     }
 }

@@ -27,12 +27,76 @@ pub struct LlamaRamaSessionAdapter<'a> {
     caches: Vec<KvCache>,
 }
 
+fn tensor_shape_usize(model: &LazyRllmModel, name: &str) -> Result<Vec<usize>> {
+    model
+        .tensor(name)?
+        .shape
+        .iter()
+        .map(|&dim| {
+            usize::try_from(dim).map_err(|_| {
+                RuntimeError::Shape(format!("tensor {name} dimension {dim} overflows usize"))
+            })
+        })
+        .collect()
+}
+
+fn validate_matrix_with_columns(
+    model: &LazyRllmModel,
+    name: &str,
+    expected_cols: usize,
+) -> Result<usize> {
+    let shape = tensor_shape_usize(model, name)?;
+    if shape.len() != 2 {
+        return Err(RuntimeError::Shape(format!(
+            "tensor {name} must be rank-2 [rows, {expected_cols}], got {:?}",
+            shape
+        )));
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    if rows == 0 {
+        return Err(RuntimeError::Shape(format!(
+            "tensor {name} must have non-zero row count, got {:?}",
+            shape
+        )));
+    }
+    if cols != expected_cols {
+        return Err(RuntimeError::Shape(format!(
+            "tensor {name} shape {:?} does not match expected [rows, {expected_cols}]",
+            shape
+        )));
+    }
+    Ok(rows)
+}
+
+fn validate_matrix_shape(
+    model: &LazyRllmModel,
+    name: &str,
+    expected_rows: usize,
+    expected_cols: usize,
+) -> Result<()> {
+    let shape = tensor_shape_usize(model, name)?;
+    if shape != [expected_rows, expected_cols] {
+        return Err(RuntimeError::Shape(format!(
+            "tensor {name} shape {:?} does not match expected [{expected_rows}, {expected_cols}]",
+            shape
+        )));
+    }
+    Ok(())
+}
+
 impl<'a> LlamaRamaSessionAdapter<'a> {
     pub fn new(
         model: &'a mut LazyRllmModel,
         prepared: &LayerDecodedLlamaRamaTransformer,
         budget: &mut MemoryBudget,
     ) -> Result<Self> {
+        if prepared.layers.is_empty() {
+            return Err(RuntimeError::Shape(
+                "llama session requires at least one layer".to_string(),
+            ));
+        }
+
         let model_config = require_model_config(model, "llama")?;
         let hidden_size = require_config_usize("hidden_size", model_config.hidden_size)?;
         let intermediate_size =
@@ -46,10 +110,13 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             RuntimeError::InvalidTensorData("llama session config requires max_seq_len".to_string())
         })?;
 
+        let vocab_size =
+            validate_matrix_with_columns(model, &prepared.embedding_weight, hidden_size)?;
+        validate_matrix_shape(model, &prepared.lm_head_weight, vocab_size, hidden_size)?;
+
         let embedding_data = model
             .decode_tensor(&prepared.embedding_weight, budget)?
             .data;
-        let vocab_size = embedding_data.len() / hidden_size;
         let lm_head_weight_data = model.decode_tensor(&prepared.lm_head_weight, budget)?.data;
 
         let mut layer_norms = Vec::with_capacity(prepared.layers.len());
@@ -104,7 +171,9 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         }
         let seq_len = tokens.len();
         let position_offset = self.context_len();
-        let projected_len = position_offset + seq_len;
+        let projected_len = position_offset.checked_add(seq_len).ok_or_else(|| {
+            RuntimeError::Shape("llama session context length overflow".to_string())
+        })?;
         if projected_len > self.max_seq_len() {
             return Err(RuntimeError::Shape(format!(
                 "llama session context would reach {projected_len}, max_seq_len {}",
@@ -207,5 +276,283 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::llama::model::{LlamaRamaBuildConfig, OwnedLlamaStreamingBlockTensorNames};
+    use crate::{RamaSessionAdapter, StreamingSamplingConfig};
+    use rllm_container::{DType, GlobalMetadata, ModelConfigMetadata, RllmWriter, TensorMeta};
+    use sha2::{Digest, Sha256};
+
+    const VOCAB_SIZE: usize = 3;
+    const HIDDEN_SIZE: usize = 2;
+    const INTERMEDIATE_SIZE: usize = 3;
+
+    fn sha256_array(bytes: &[u8]) -> [u8; 32] {
+        Sha256::digest(bytes).into()
+    }
+
+    fn f32_bytes(values: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "rllm-llama-session-{name}-{}.rllm",
+            std::process::id()
+        ))
+    }
+
+    fn add_f32_tensor(
+        writer: &mut RllmWriter,
+        tensor_id: u64,
+        name: &str,
+        shape: Vec<u64>,
+        values: &[f32],
+    ) {
+        let bytes = f32_bytes(values);
+        writer.add_tensor(TensorMeta {
+            tensor_id,
+            name: name.to_string(),
+            shape,
+            dtype: DType::Fp32,
+            original_size_bytes: bytes.len() as u64,
+            compressed_size_bytes: bytes.len() as u64,
+            original_sha256: sha256_array(&bytes),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(tensor_id, "rtc-raw-v1", &bytes, &bytes, 0)
+            .unwrap();
+    }
+
+    fn llama_metadata() -> GlobalMetadata {
+        let mut metadata = GlobalMetadata::new_test();
+        metadata.model_config = Some(ModelConfigMetadata {
+            architecture_type: Some("llama".to_string()),
+            hidden_size: Some(HIDDEN_SIZE as u64),
+            intermediate_size: Some(INTERMEDIATE_SIZE as u64),
+            num_attention_heads: Some(1),
+            num_key_value_heads: Some(1),
+            max_position_embeddings: Some(8),
+            rms_norm_eps: Some(1e-5),
+            rope_theta: Some(10_000.0),
+            vocab_size: Some(VOCAB_SIZE as u64),
+            ..Default::default()
+        });
+        metadata
+    }
+
+    fn layer_names(layer_idx: usize) -> OwnedLlamaStreamingBlockTensorNames {
+        OwnedLlamaStreamingBlockTensorNames {
+            q_weight: format!("model.layers.{layer_idx}.self_attn.q_proj.weight"),
+            k_weight: format!("model.layers.{layer_idx}.self_attn.k_proj.weight"),
+            v_weight: format!("model.layers.{layer_idx}.self_attn.v_proj.weight"),
+            o_weight: format!("model.layers.{layer_idx}.self_attn.o_proj.weight"),
+            gate_weight: format!("model.layers.{layer_idx}.mlp.gate_proj.weight"),
+            up_weight: format!("model.layers.{layer_idx}.mlp.up_proj.weight"),
+            down_weight: format!("model.layers.{layer_idx}.mlp.down_proj.weight"),
+        }
+    }
+
+    fn prepared_with_layers(layer_count: usize) -> LayerDecodedLlamaRamaTransformer {
+        LayerDecodedLlamaRamaTransformer {
+            config: LlamaRamaBuildConfig {
+                max_new_tokens: 1,
+                max_seq_len: Some(8),
+                num_heads: 1,
+                num_key_value_heads: 1,
+                causal: true,
+                rms_norm_eps: 1e-5,
+                rope_theta: 10_000.0,
+                sampling: StreamingSamplingConfig::Argmax,
+            },
+            embedding_weight: "model.embed_tokens.weight".to_string(),
+            layers: (0..layer_count).map(layer_names).collect(),
+            lm_head_weight: "lm_head.weight".to_string(),
+            final_layernorm_weight: vec![1.0, 1.0],
+            pinned_lm_head_weight: None,
+            resident_parameter_bytes: 0,
+            max_layer_parameter_bytes: 0,
+        }
+    }
+
+    fn add_base_tensors(writer: &mut RllmWriter, tensor_id: &mut u64, lm_head_shape: Vec<u64>) {
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            "model.embed_tokens.weight",
+            vec![VOCAB_SIZE as u64, HIDDEN_SIZE as u64],
+            &[0.5, -1.0, 1.25, 0.75, -0.5, 0.25],
+        );
+        *tensor_id += 1;
+
+        let lm_head_values = vec![0.25; lm_head_shape.iter().product::<u64>() as usize];
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            "lm_head.weight",
+            lm_head_shape,
+            &lm_head_values,
+        );
+        *tensor_id += 1;
+    }
+
+    fn add_layer_norms(writer: &mut RllmWriter, tensor_id: &mut u64, layer_idx: usize) {
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            &format!("model.layers.{layer_idx}.input_layernorm.weight"),
+            vec![HIDDEN_SIZE as u64],
+            &[1.0, 1.0],
+        );
+        *tensor_id += 1;
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            &format!("model.layers.{layer_idx}.post_attention_layernorm.weight"),
+            vec![HIDDEN_SIZE as u64],
+            &[1.0, 1.0],
+        );
+        *tensor_id += 1;
+    }
+
+    fn add_complete_layer_zero(writer: &mut RllmWriter, tensor_id: &mut u64) {
+        add_layer_norms(writer, tensor_id, 0);
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            "model.layers.0.self_attn.q_proj.weight",
+            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+            &[0.0; HIDDEN_SIZE * HIDDEN_SIZE],
+        );
+        *tensor_id += 1;
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            "model.layers.0.self_attn.k_proj.weight",
+            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+            &[0.0; HIDDEN_SIZE * HIDDEN_SIZE],
+        );
+        *tensor_id += 1;
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            "model.layers.0.self_attn.v_proj.weight",
+            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+            &[0.0; HIDDEN_SIZE * HIDDEN_SIZE],
+        );
+        *tensor_id += 1;
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            "model.layers.0.self_attn.o_proj.weight",
+            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+            &[0.0; HIDDEN_SIZE * HIDDEN_SIZE],
+        );
+        *tensor_id += 1;
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            "model.layers.0.mlp.gate_proj.weight",
+            vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
+            &[0.0; INTERMEDIATE_SIZE * HIDDEN_SIZE],
+        );
+        *tensor_id += 1;
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            "model.layers.0.mlp.up_proj.weight",
+            vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
+            &[0.0; INTERMEDIATE_SIZE * HIDDEN_SIZE],
+        );
+        *tensor_id += 1;
+        add_f32_tensor(
+            writer,
+            *tensor_id,
+            "model.layers.0.mlp.down_proj.weight",
+            vec![HIDDEN_SIZE as u64, INTERMEDIATE_SIZE as u64],
+            &[0.0; HIDDEN_SIZE * INTERMEDIATE_SIZE],
+        );
+        *tensor_id += 1;
+    }
+
+    fn write_constructor_model(path: &std::path::Path, lm_head_shape: Vec<u64>) {
+        let mut writer = RllmWriter::new(path, llama_metadata()).unwrap();
+        let mut tensor_id = 0u64;
+        add_base_tensors(&mut writer, &mut tensor_id, lm_head_shape);
+        add_layer_norms(&mut writer, &mut tensor_id, 0);
+        writer.finalize().unwrap();
+    }
+
+    fn write_post_cache_failure_model(path: &std::path::Path) {
+        let mut writer = RllmWriter::new(path, llama_metadata()).unwrap();
+        let mut tensor_id = 0u64;
+        add_base_tensors(
+            &mut writer,
+            &mut tensor_id,
+            vec![VOCAB_SIZE as u64, HIDDEN_SIZE as u64],
+        );
+        add_complete_layer_zero(&mut writer, &mut tensor_id);
+        add_layer_norms(&mut writer, &mut tensor_id, 1);
+        writer.finalize().unwrap();
+    }
+
+    #[test]
+    fn llama_session_new_rejects_empty_prepared_layers() {
+        let path = temp_path("empty-prepared-layers");
+        write_constructor_model(&path, vec![VOCAB_SIZE as u64, HIDDEN_SIZE as u64]);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(0);
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget);
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Shape(message)) if message.contains("at least one layer")
+        ));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_new_rejects_malformed_lm_head_shape() {
+        let path = temp_path("malformed-lm-head");
+        write_constructor_model(&path, vec![(VOCAB_SIZE - 1) as u64, HIDDEN_SIZE as u64]);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(1);
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget);
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Shape(message)) if message.contains("lm_head.weight")
+        ));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_append_rolls_back_all_caches_after_post_cache_layer_failure() {
+        let path = temp_path("rollback-post-cache-failure");
+        write_post_cache_failure_model(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(2);
+        let mut budget = MemoryBudget::unbounded();
+        let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget).unwrap();
+
+        let result = adapter.append_tokens(&[0], &mut budget, false);
+
+        assert!(result.is_err());
+        assert_eq!(adapter.context_len(), 0);
+        std::fs::remove_file(path).ok();
     }
 }
