@@ -1,5 +1,23 @@
 use anyhow::{Context, Result};
 
+pub fn run(
+    _file: &str,
+    turns: &[String],
+    max_new_tokens: usize,
+    ctx: usize,
+    out: &str,
+) -> Result<()> {
+    validate_report_output_path(out)?;
+    if max_new_tokens == 0 {
+        anyhow::bail!("--max-new-tokens must be greater than zero");
+    }
+    if ctx == 0 {
+        anyhow::bail!("--ctx must be greater than zero");
+    }
+    parse_token_turns(turns)?;
+    anyhow::bail!("chat-session-token runner is not implemented yet")
+}
+
 fn parse_token_turns(turns: &[String]) -> Result<Vec<Vec<usize>>> {
     if turns.is_empty() {
         anyhow::bail!("chat-session-token requires at least one --turn-ids");
