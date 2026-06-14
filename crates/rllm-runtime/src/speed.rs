@@ -4,6 +4,8 @@ pub const RLLM_AIP_TOPK_ENV: &str = "RLLM_AIP_TOPK";
 pub const RLLM_AIP_ATTENTION_TOPK_ENV: &str = "RLLM_AIP_ATTENTION_TOPK";
 pub const RLLM_AIP_MLP_TOPK_ENV: &str = "RLLM_AIP_MLP_TOPK";
 pub const RLLM_AIP_DOWN_TOPK_ENV: &str = "RLLM_AIP_DOWN_TOPK";
+pub const RLLM_AIP_EDGE_LAYERS_ENV: &str = "RLLM_AIP_EDGE_LAYERS";
+pub const RLLM_AIP_EDGE_TOPK_ENV: &str = "RLLM_AIP_EDGE_TOPK";
 pub const RLLM_AIP_LM_HEAD_TOPK_ENV: &str = "RLLM_AIP_LM_HEAD_TOPK";
 pub const RLLM_AIP_LM_HEAD_RESCORE_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE";
 pub const RLLM_AIP_LM_HEAD_AGREEMENT_ENV: &str = "RLLM_AIP_LM_HEAD_AGREEMENT";
@@ -67,6 +69,8 @@ pub struct RamaExperimentalSpeedConfig {
     pub aip_attention_topk: Option<usize>,
     pub aip_mlp_topk: Option<usize>,
     pub aip_down_topk: Option<usize>,
+    pub aip_edge_layers: Option<usize>,
+    pub aip_edge_topk: Option<usize>,
     pub aip_lm_head_topk: Option<usize>,
     pub aip_lm_head_rescore: Option<usize>,
     pub aip_lm_head_agreement: bool,
@@ -94,6 +98,12 @@ impl RamaExperimentalSpeedConfig {
             ),
             aip_mlp_topk: parse_aip_topk(std::env::var(RLLM_AIP_MLP_TOPK_ENV).ok().as_deref()),
             aip_down_topk: parse_aip_topk(std::env::var(RLLM_AIP_DOWN_TOPK_ENV).ok().as_deref()),
+            aip_edge_layers: parse_aip_edge_layers(
+                std::env::var(RLLM_AIP_EDGE_LAYERS_ENV).ok().as_deref(),
+            ),
+            aip_edge_topk: parse_aip_edge_topk(
+                std::env::var(RLLM_AIP_EDGE_TOPK_ENV).ok().as_deref(),
+            ),
             aip_lm_head_topk: parse_aip_topk(
                 std::env::var(RLLM_AIP_LM_HEAD_TOPK_ENV).ok().as_deref(),
             ),
@@ -131,6 +141,8 @@ impl RamaExperimentalSpeedConfig {
             aip_attention_topk: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
@@ -176,6 +188,24 @@ impl RamaExperimentalSpeedConfig {
         self.topk_for_input_with_override(input_len, default_topk, topk_override)
     }
 
+    fn edge_topk_for_layer(
+        self,
+        layer_index: usize,
+        total_layers: usize,
+        input_len: usize,
+    ) -> Option<usize> {
+        if input_len == 0 || layer_index >= total_layers {
+            return None;
+        }
+        let edge_topk = self.aip_edge_topk?;
+        let edge_layers = self.aip_edge_layers.unwrap_or(1).min(total_layers);
+        if layer_index < edge_layers || layer_index >= total_layers.saturating_sub(edge_layers) {
+            Some(edge_topk.min(input_len).max(1))
+        } else {
+            None
+        }
+    }
+
     pub fn aip_decision_for_projection(
         self,
         layer_index: usize,
@@ -189,11 +219,14 @@ impl RamaExperimentalSpeedConfig {
         }
 
         match self.aip_policy {
-            RamaAipPolicyKind::Speed => RamaAipProjectionDecision::aip(self.topk_for_projection(
-                projection,
-                input_len,
-                default_topk,
-            )),
+            RamaAipPolicyKind::Speed => {
+                let topk = self
+                    .edge_topk_for_layer(layer_index, total_layers, input_len)
+                    .unwrap_or_else(|| {
+                        self.topk_for_projection(projection, input_len, default_topk)
+                    });
+                RamaAipProjectionDecision::aip(topk)
+            }
             RamaAipPolicyKind::Quality => {
                 if projection != RamaAipProjectionKind::MlpGateUp
                     || !quality_policy_allows_layer(layer_index, total_layers)
@@ -476,6 +509,14 @@ pub fn parse_aip_repeat_run_limit(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
 
+pub fn parse_aip_edge_layers(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
+pub fn parse_aip_edge_topk(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
 pub fn parse_turbo_topk(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
@@ -545,6 +586,8 @@ mod tests {
             aip_attention_topk: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
@@ -564,6 +607,8 @@ mod tests {
             aip_attention_topk: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
@@ -682,6 +727,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_edge_controls_keep_only_positive_values() {
+        assert_eq!(parse_aip_edge_layers(Some("2")), Some(2));
+        assert_eq!(parse_aip_edge_layers(Some("1")), Some(1));
+        assert_eq!(parse_aip_edge_layers(Some("0")), None);
+        assert_eq!(parse_aip_edge_layers(Some("-2")), None);
+        assert_eq!(parse_aip_edge_layers(Some("bad")), None);
+        assert_eq!(parse_aip_edge_layers(None), None);
+
+        assert_eq!(parse_aip_edge_topk(Some("8")), Some(8));
+        assert_eq!(parse_aip_edge_topk(Some("1")), Some(1));
+        assert_eq!(parse_aip_edge_topk(Some("0")), None);
+        assert_eq!(parse_aip_edge_topk(Some("-2")), None);
+        assert_eq!(parse_aip_edge_topk(Some("bad")), None);
+        assert_eq!(parse_aip_edge_topk(None), None);
+    }
+
+    #[test]
     fn parse_aip_lm_head_rescore_keeps_only_positive_values() {
         assert_eq!(parse_aip_lm_head_rescore(Some("8")), Some(8));
         assert_eq!(parse_aip_lm_head_rescore(Some("1")), Some(1));
@@ -730,6 +792,8 @@ mod tests {
             aip_attention_topk: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
@@ -750,6 +814,8 @@ mod tests {
             aip_attention_topk: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
@@ -771,6 +837,8 @@ mod tests {
             aip_attention_topk: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
@@ -808,6 +876,8 @@ mod tests {
             aip_attention_topk: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
@@ -837,6 +907,8 @@ mod tests {
             aip_attention_topk: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
@@ -866,6 +938,8 @@ mod tests {
             aip_attention_topk: Some(8),
             aip_mlp_topk: None,
             aip_down_topk: Some(2),
+            aip_edge_layers: None,
+            aip_edge_topk: None,
             aip_lm_head_topk: Some(16),
             aip_lm_head_rescore: None,
             aip_lm_head_agreement: false,
@@ -889,6 +963,45 @@ mod tests {
             RamaAipProjectionDecision::aip(2)
         );
         assert_eq!(config.lm_head_topk_for_input(2048, 128), 16);
+    }
+
+    #[test]
+    fn speed_policy_can_raise_topk_on_edge_layers() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: Some(6),
+            aip_edge_layers: Some(1),
+            aip_edge_topk: Some(8),
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_column_cache: false,
+            aip_input_tiles: false,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
+        };
+
+        assert_eq!(
+            config.aip_decision_for_projection(0, 4, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::aip(8)
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(1, 4, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::aip(4)
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(2, 4, RamaAipProjectionKind::MlpDown, 8192, 512),
+            RamaAipProjectionDecision::aip(6)
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(3, 4, RamaAipProjectionKind::MlpDown, 8192, 512),
+            RamaAipProjectionDecision::aip(8)
+        );
     }
 
     #[test]
