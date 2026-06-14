@@ -83,6 +83,20 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
         } else {
             String::new()
         };
+        let lm_head_agreement_note = if stats.lm_head_agreement_samples > 0 {
+            format!(
+                " lm_head_agreement=selected:{}/{} raw:{}/{} exact_in_topk:{}/{} topk={}",
+                stats.lm_head_agreement_selected_matches,
+                stats.lm_head_agreement_samples,
+                stats.lm_head_agreement_sparse_argmax_matches,
+                stats.lm_head_agreement_samples,
+                stats.lm_head_agreement_exact_in_sparse_topk,
+                stats.lm_head_agreement_samples,
+                stats.lm_head_agreement_max_topk
+            )
+        } else {
+            String::new()
+        };
         format!(
             " | AIP: policy={} calls={} fallbacks={} max_topk={} skipped_madds={} scratch={} bytes",
             policy_str,
@@ -94,6 +108,7 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
         ) + &lm_head_note
             + &column_cache_note
             + &input_tile_note
+            + &lm_head_agreement_note
     }
 }
 
@@ -307,6 +322,11 @@ mod tests {
             column_cache_resident_bytes: 49_152,
             input_tile_range_reads: 5,
             input_tile_range_bytes: 256,
+            lm_head_agreement_samples: 10,
+            lm_head_agreement_sparse_argmax_matches: 3,
+            lm_head_agreement_selected_matches: 4,
+            lm_head_agreement_exact_in_sparse_topk: 6,
+            lm_head_agreement_max_topk: 8,
         });
 
         assert!(suffix.contains("AIP: policy=quality"));
@@ -321,6 +341,9 @@ mod tests {
         assert!(suffix.contains("column_cache_resident=12/49152 bytes"));
         assert!(suffix.contains("input_tile_reads=5"));
         assert!(suffix.contains("input_tile_bytes=256"));
+        assert!(
+            suffix.contains("lm_head_agreement=selected:4/10 raw:3/10 exact_in_topk:6/10 topk=8")
+        );
     }
 
     #[test]

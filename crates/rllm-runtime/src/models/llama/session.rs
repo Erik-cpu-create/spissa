@@ -162,6 +162,24 @@ fn sparse_lm_head_rescore_candidates(
     }
 }
 
+fn record_sparse_lm_head_agreement_sample(
+    stats: &mut RamaExperimentalSpeedStats,
+    sparse_logits: &[f32],
+    selected_token_id: usize,
+    exact_token_id: usize,
+    sparse_topk: usize,
+) -> Result<()> {
+    let sparse_argmax = sample_argmax_excluding(sparse_logits, None)?;
+    let candidates = select_top_indices_by_value(sparse_logits, sparse_topk);
+    stats.record_lm_head_agreement(
+        sparse_argmax == exact_token_id,
+        selected_token_id == exact_token_id,
+        candidates.contains(&exact_token_id),
+        candidates.len(),
+    );
+    Ok(())
+}
+
 fn validate_layer_tensor_shapes(
     model: &LazyRllmModel,
     layer_names: &OwnedLlamaStreamingBlockTensorNames,
@@ -474,6 +492,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                         aip_down_topk: None,
                         aip_lm_head_topk: None,
                         aip_lm_head_rescore: None,
+                        aip_lm_head_agreement: false,
                         aip_lm_head_rows: None,
                         aip_column_cache: false,
                         aip_input_tiles: true,
@@ -490,11 +509,13 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                         budget,
                     )? {
                         Some(logits) => {
-                            if let Some(candidates) = sparse_lm_head_rescore_candidates(
-                                &logits,
-                                tokens,
-                                self.experimental_speed_config,
-                            )? {
+                            let sparse_lm_head_topk = sparse_config.aip_topk.unwrap_or(0);
+                            let token_id = if let Some(candidates) =
+                                sparse_lm_head_rescore_candidates(
+                                    &logits,
+                                    tokens,
+                                    self.experimental_speed_config,
+                                )? {
                                 match streaming_tile_linear_argmax_candidate_rows_from_model(
                                     self.model,
                                     &self.prepared.lm_head_weight,
@@ -517,7 +538,25 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                                     tokens,
                                     self.experimental_speed_config,
                                 )?
+                            };
+                            if self.experimental_speed_config.aip_lm_head_agreement {
+                                let exact_token_id = streaming_tile_linear_argmax_from_model(
+                                    self.model,
+                                    &self.prepared.lm_head_weight,
+                                    last_hidden,
+                                    None,
+                                    lm_head_config,
+                                    budget,
+                                )?;
+                                record_sparse_lm_head_agreement_sample(
+                                    &mut experimental_speed_stats,
+                                    &logits,
+                                    token_id,
+                                    exact_token_id,
+                                    sparse_lm_head_topk,
+                                )?;
                             }
+                            token_id
                         }
                         None => {
                             if let Some(executor) = self.rolling_executor.as_mut() {
@@ -1364,6 +1403,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -1390,6 +1430,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: true,
@@ -1417,6 +1458,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: Some(3),
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: true,
@@ -1435,6 +1477,20 @@ mod tests {
             sparse_lm_head_rescore_candidates(&[0.1, 3.0, 2.0], &[7, 1], config).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn sparse_lm_head_agreement_records_raw_selected_and_topk_hits() {
+        let mut stats = RamaExperimentalSpeedStats::default();
+
+        record_sparse_lm_head_agreement_sample(&mut stats, &[0.1, 4.0, 3.0, 2.0], 2, 1, 2).unwrap();
+        record_sparse_lm_head_agreement_sample(&mut stats, &[0.1, 4.0, 3.0, 2.0], 2, 2, 2).unwrap();
+
+        assert_eq!(stats.lm_head_agreement_samples, 2);
+        assert_eq!(stats.lm_head_agreement_sparse_argmax_matches, 1);
+        assert_eq!(stats.lm_head_agreement_selected_matches, 1);
+        assert_eq!(stats.lm_head_agreement_exact_in_sparse_topk, 2);
+        assert_eq!(stats.lm_head_agreement_max_topk, 2);
     }
 
     #[test]
@@ -1460,6 +1516,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
@@ -1487,6 +1544,7 @@ mod tests {
             aip_down_topk: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,

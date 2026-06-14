@@ -277,6 +277,20 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
         } else {
             String::new()
         };
+        let lm_head_agreement_note = if stats.lm_head_agreement_samples > 0 {
+            format!(
+                " aip_lm_head_agreement_selected={}/{} aip_lm_head_agreement_raw={}/{} aip_lm_head_agreement_exact_in_topk={}/{} aip_lm_head_agreement_topk={}",
+                stats.lm_head_agreement_selected_matches,
+                stats.lm_head_agreement_samples,
+                stats.lm_head_agreement_sparse_argmax_matches,
+                stats.lm_head_agreement_samples,
+                stats.lm_head_agreement_exact_in_sparse_topk,
+                stats.lm_head_agreement_samples,
+                stats.lm_head_agreement_max_topk
+            )
+        } else {
+            String::new()
+        };
         format!(
             " aip_policy={} aip_calls={} aip_fallbacks={} aip_max_topk={} aip_skipped_madds={} aip_scratch_bytes={}",
             policy_str,
@@ -289,6 +303,7 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
         + &lm_head_note
             + &column_cache_note
             + &input_tile_note
+            + &lm_head_agreement_note
     }
 }
 
@@ -636,6 +651,11 @@ mod tests {
             column_cache_resident_bytes: 49_152,
             input_tile_range_reads: 5,
             input_tile_range_bytes: 256,
+            lm_head_agreement_samples: 10,
+            lm_head_agreement_sparse_argmax_matches: 3,
+            lm_head_agreement_selected_matches: 4,
+            lm_head_agreement_exact_in_sparse_topk: 6,
+            lm_head_agreement_max_topk: 8,
         });
 
         assert!(note.contains("aip_policy=quality"));
@@ -648,6 +668,10 @@ mod tests {
         assert!(note.contains("aip_column_cache_resident=12/49152"));
         assert!(note.contains("aip_input_tile_reads=5"));
         assert!(note.contains("aip_input_tile_bytes=256"));
+        assert!(note.contains("aip_lm_head_agreement_selected=4/10"));
+        assert!(note.contains("aip_lm_head_agreement_raw=3/10"));
+        assert!(note.contains("aip_lm_head_agreement_exact_in_topk=6/10"));
+        assert!(note.contains("aip_lm_head_agreement_topk=8"));
     }
 
     #[test]

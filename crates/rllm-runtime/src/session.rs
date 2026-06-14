@@ -1040,6 +1040,11 @@ mod tests {
                 column_cache_resident_bytes: 0,
                 input_tile_range_reads: 0,
                 input_tile_range_bytes: 0,
+                lm_head_agreement_samples: 0,
+                lm_head_agreement_sparse_argmax_matches: 0,
+                lm_head_agreement_selected_matches: 0,
+                lm_head_agreement_exact_in_sparse_topk: 0,
+                lm_head_agreement_max_topk: 0,
             });
         adapter
             .experimental_speed_stats
@@ -1059,6 +1064,11 @@ mod tests {
                 column_cache_resident_bytes: 0,
                 input_tile_range_reads: 0,
                 input_tile_range_bytes: 0,
+                lm_head_agreement_samples: 0,
+                lm_head_agreement_sparse_argmax_matches: 0,
+                lm_head_agreement_selected_matches: 0,
+                lm_head_agreement_exact_in_sparse_topk: 0,
+                lm_head_agreement_max_topk: 0,
             });
         let mut session = RamaChatSession::new(adapter);
         let mut budget = MemoryBudget::unbounded();
