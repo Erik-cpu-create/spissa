@@ -13,7 +13,7 @@ use crate::rolling::RollingExecutor;
 use crate::rolling::RollingExecutorConfig;
 use crate::rotary::KvCache;
 use crate::streaming::{
-    streaming_tile_linear_argmax_candidate_rows_from_model,
+    streaming_tile_linear_argmax_candidate_rows_range_from_model,
     streaming_tile_linear_argmax_prefix_from_model,
     streaming_tile_linear_argmax_with_rolling_from_model,
 };
@@ -516,7 +516,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                                     tokens,
                                     self.experimental_speed_config,
                                 )? {
-                                match streaming_tile_linear_argmax_candidate_rows_from_model(
+                                match streaming_tile_linear_argmax_candidate_rows_range_from_model(
                                     self.model,
                                     &self.prepared.lm_head_weight,
                                     last_hidden,

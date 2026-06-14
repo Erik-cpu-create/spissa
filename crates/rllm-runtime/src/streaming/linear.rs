@@ -2048,6 +2048,183 @@ pub fn streaming_tile_linear_argmax_candidate_rows_from_model(
     Ok(Some(best.0))
 }
 
+pub fn streaming_tile_linear_argmax_candidate_rows_range_from_model(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    bias: Option<&[f32]>,
+    config: StreamingTileLinearConfig,
+    candidate_rows: &[usize],
+    budget: &mut MemoryBudget,
+) -> Result<Option<usize>> {
+    validate_tile_linear_config(config)?;
+    validate_linear_shapes(input, bias, config.linear)?;
+    if config.linear.batch != 1 || candidate_rows.is_empty() {
+        return Ok(None);
+    }
+
+    let tensor = model.tensor(weight_name)?.clone();
+    validate_weight_tensor(&tensor, config.linear)?;
+    if !matches!(
+        tensor.dtype,
+        rllm_container::DType::Fp16 | rllm_container::DType::Bf16
+    ) {
+        return Ok(None);
+    }
+
+    let chunks: Vec<ChunkMeta> = model.chunks_for_tensor(tensor.tensor_id).to_vec();
+    if chunks.is_empty() {
+        return Ok(None);
+    }
+
+    let mut rows = candidate_rows.to_vec();
+    rows.sort_unstable();
+    rows.dedup();
+    for &row in &rows {
+        if row >= config.linear.out_features {
+            return Err(RuntimeError::Shape(format!(
+                "candidate row {row} out of range for {} output features",
+                config.linear.out_features
+            )));
+        }
+    }
+
+    let mut scores: Vec<(usize, f32)> = rows
+        .iter()
+        .map(|&row| {
+            let initial = bias.and_then(|values| values.get(row)).copied().unwrap_or(0.0);
+            (row, initial)
+        })
+        .collect();
+    let dtype_size = tensor.dtype.size_bytes();
+    let expected_weight_bytes = config
+        .linear
+        .out_features
+        .checked_mul(config.linear.in_features)
+        .and_then(|elements| elements.checked_mul(dtype_size))
+        .ok_or_else(|| RuntimeError::Shape("candidate row weight byte size overflow".to_string()))?;
+
+    let mut byte_offset = 0usize;
+    for chunk in chunks {
+        if !byte_offset.is_multiple_of(dtype_size) {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} candidate row range stream reached unaligned byte offset {byte_offset}"
+            )));
+        }
+        let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} uncompressed size does not fit usize",
+                chunk.chunk_id
+            ))
+        })?;
+        if !expected_chunk_bytes.is_multiple_of(dtype_size) {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "chunk {} byte len {} is not aligned to dtype size {}",
+                chunk.chunk_id, expected_chunk_bytes, dtype_size
+            )));
+        }
+        let element_start = byte_offset / dtype_size;
+        let chunk_elements = expected_chunk_bytes / dtype_size;
+        let element_end = element_start.checked_add(chunk_elements).ok_or_else(|| {
+            RuntimeError::InvalidTensorData(
+                "candidate row range chunk element end overflow".to_string(),
+            )
+        })?;
+
+        for (row, score) in scores.iter_mut() {
+            let row_start = row
+                .checked_mul(config.linear.in_features)
+                .ok_or_else(|| RuntimeError::Shape("candidate row start overflow".to_string()))?;
+            let row_end = row_start
+                .checked_add(config.linear.in_features)
+                .ok_or_else(|| RuntimeError::Shape("candidate row end overflow".to_string()))?;
+            let overlap_start = row_start.max(element_start);
+            let overlap_end = row_end.min(element_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            let local_element_start = overlap_start - element_start;
+            let range_byte_offset = local_element_start
+                .checked_mul(dtype_size)
+                .ok_or_else(|| RuntimeError::Shape("candidate row range byte offset overflow".to_string()))?;
+            let range_elements = overlap_end - overlap_start;
+            let range_byte_len = range_elements
+                .checked_mul(dtype_size)
+                .ok_or_else(|| RuntimeError::Shape("candidate row range byte len overflow".to_string()))?;
+            let input_start = overlap_start - row_start;
+            model.with_decoded_chunk_range(
+                chunk.chunk_id,
+                range_byte_offset as u64,
+                range_byte_len as u64,
+                budget,
+                |bytes, _budget| {
+                    accumulate_candidate_row_range_16bit(
+                        input,
+                        input_start,
+                        bytes,
+                        tensor.dtype,
+                        score,
+                        weight_name,
+                    )
+                },
+            )?;
+        }
+
+        byte_offset = byte_offset.checked_add(expected_chunk_bytes).ok_or_else(|| {
+            RuntimeError::InvalidTensorData(
+                "candidate row range chunk byte offset overflow".to_string(),
+            )
+        })?;
+    }
+
+    if byte_offset != expected_weight_bytes {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} streamed {byte_offset} candidate row range bytes, expected {expected_weight_bytes}"
+        )));
+    }
+
+    let mut best = scores
+        .first()
+        .copied()
+        .ok_or_else(|| RuntimeError::InvalidTensorData("empty candidate row score set".to_string()))?;
+    for &(row, score) in scores.iter().skip(1) {
+        if score > best.1 {
+            best = (row, score);
+        }
+    }
+    Ok(Some(best.0))
+}
+
+fn accumulate_candidate_row_range_16bit(
+    input: &[f32],
+    input_start: usize,
+    raw_bytes: &[u8],
+    dtype: rllm_container::DType,
+    score: &mut f32,
+    weight_name: &str,
+) -> Result<()> {
+    let dtype_size = dtype.size_bytes();
+    if !raw_bytes.len().is_multiple_of(dtype_size) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "candidate row range for {weight_name} is not aligned to dtype size {dtype_size}"
+        )));
+    }
+    let elements = raw_bytes.len() / dtype_size;
+    if input_start + elements > input.len() {
+        return Err(RuntimeError::Shape(format!(
+            "candidate row range input span {}..{} exceeds input len {}",
+            input_start,
+            input_start + elements,
+            input.len()
+        )));
+    }
+    for local_idx in 0..elements {
+        *score += input[input_start + local_idx] * raw_16bit_weight_at(raw_bytes, local_idx, dtype);
+    }
+    Ok(())
+}
+
 fn accumulate_candidate_rows_raw_16bit_chunk(
     input: &[f32],
     raw_bytes: &[u8],
