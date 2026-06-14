@@ -1,21 +1,28 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::io::{self, Write};
-use std::time::Instant;
 
 use rllm_runtime::{
     models::llama::{
-        prepare_llama_rama_layer_decode_transformer_from_metadata,
-        rama_layer_decoded_llama_transformer_generate_from_model, LlamaRamaGenerationConfig,
-        LlamaRamaGenerationOptions,
+        prepare_llama_rama_layer_decode_transformer_from_metadata, LlamaRamaGenerationConfig,
+        LlamaRamaSessionAdapter,
     },
-    LazyRllmModel, MemoryBudget, RamaIntegrityMode, RllmTokenizer,
+    LazyRllmModel, MemoryBudget, RamaChatSession, RamaIntegrityMode, RllmTokenizer,
+    StreamingSamplingConfig,
 };
 
 #[derive(Parser)]
 struct Args {
     #[arg(short, long)]
     model: String,
+}
+
+fn interactive_turn_text(has_context: bool, text: &str) -> String {
+    if has_context {
+        format!("\n{text}")
+    } else {
+        text.to_string()
+    }
 }
 
 fn main() -> Result<()> {
@@ -35,7 +42,7 @@ fn main() -> Result<()> {
         max_new_tokens: 64,
         max_seq_len: Some(2048),
         causal: true,
-        sampling: rllm_runtime::StreamingSamplingConfig::Argmax,
+        sampling: StreamingSamplingConfig::Argmax,
     };
 
     // VerifyOnce: verify each chunk SHA-256 only on first access, then trust it.
@@ -43,13 +50,16 @@ fn main() -> Result<()> {
     model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
 
     let prepared = prepare_llama_rama_layer_decode_transformer_from_metadata(&mut model, config)?;
+    let mut budget = MemoryBudget::unbounded();
+    let adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget)?;
+    let mut session = RamaChatSession::new(adapter);
 
     println!("===================================================");
-    println!("RLLM Interactive Chat (Llama Architecture)");
+    println!("RLLM Interactive Chat (Llama Architecture, token-native session)");
     println!("Type 'quit' or 'exit' to end.");
     println!("===================================================");
 
-    let mut conversation_history = String::new();
+    let mut has_context = false;
 
     loop {
         print!("> ");
@@ -57,7 +67,7 @@ fn main() -> Result<()> {
         let mut input = String::new();
         let bytes_read = io::stdin().read_line(&mut input)?;
         if bytes_read == 0 {
-            // EOF — stdin pipe was closed
+            // EOF: stdin pipe was closed.
             break;
         }
         let text = input.trim();
@@ -67,27 +77,10 @@ fn main() -> Result<()> {
         if text == "exit" || text == "quit" {
             break;
         }
-        // Use raw text as prompt (base model completion, not chat-instruct)
-        conversation_history.push_str(text);
-
-        let prompt_tokens = tokenizer.encode(&conversation_history)?;
-
-        let mut generated_tokens = Vec::new();
-        let options = LlamaRamaGenerationOptions {
-            collect_logits: false,
-            ..Default::default()
-        };
-
-        let mut budget = MemoryBudget::unbounded();
-
-        let start_time = Instant::now();
-        let mut first_token_time = None;
+        let turn_text = interactive_turn_text(has_context, text);
+        let input_tokens = tokenizer.encode(&turn_text)?;
 
         let mut on_token = |token: usize| -> bool {
-            if first_token_time.is_none() {
-                first_token_time = Some(Instant::now());
-            }
-            generated_tokens.push(token);
             if let Ok(word) = tokenizer.decode(&[token]) {
                 print!("{}", word);
                 io::stdout().flush().unwrap();
@@ -96,38 +89,36 @@ fn main() -> Result<()> {
             Some(token as u64) != eos_token_id
         };
 
-        rama_layer_decoded_llama_transformer_generate_from_model(
-            &mut model,
-            &prepared,
-            &prompt_tokens,
+        let result = session.generate_turn(
+            &input_tokens,
+            config.max_new_tokens,
             &mut budget,
-            options,
             &mut on_token,
         )?;
 
-        let end_time = Instant::now();
         println!();
-
-        if let Some(first_time) = first_token_time {
-            let prefill_duration = first_time.duration_since(start_time);
-            let decode_duration = end_time.duration_since(first_time);
-            let decode_speed = if generated_tokens.len() > 1 {
-                (generated_tokens.len() - 1) as f64 / decode_duration.as_secs_f64()
-            } else {
-                0.0
-            };
-            println!(
-                "\n[Prefill: {:.2}s | Decode: {:.2} tok/s | Total: {} tokens]",
-                prefill_duration.as_secs_f64(),
-                decode_speed,
-                generated_tokens.len()
-            );
-        }
-
-        let reply = tokenizer.decode(&generated_tokens).unwrap_or_default();
-        conversation_history.push_str(&reply);
-        conversation_history.push('\n');
+        println!(
+            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes]",
+            result.metrics.ttft_ms / 1000.0,
+            result.metrics.decode_tok_s,
+            result.metrics.end_to_end_tok_s,
+            result.metrics.generated_tokens,
+            session.token_history().len(),
+            result.metrics.peak_transient_bytes
+        );
+        has_context = true;
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interactive_turn_text_uses_only_current_turn_with_separator() {
+        assert_eq!(interactive_turn_text(false, "good morning"), "good morning");
+        assert_eq!(interactive_turn_text(true, "halo"), "\nhalo");
+    }
 }
