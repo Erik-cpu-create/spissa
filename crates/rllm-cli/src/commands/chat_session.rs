@@ -20,6 +20,14 @@ pub fn run(
     if turns.is_empty() {
         anyhow::bail!("chat-session requires at least one --turn");
     }
+    for (idx, turn) in turns.iter().enumerate() {
+        if turn.trim().is_empty() {
+            anyhow::bail!(
+                "chat-session turn {} must not be empty or whitespace-only",
+                idx + 1
+            );
+        }
+    }
     if max_new_tokens == 0 {
         anyhow::bail!("--max-new-tokens must be greater than zero");
     }
