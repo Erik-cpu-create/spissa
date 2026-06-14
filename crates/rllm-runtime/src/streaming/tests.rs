@@ -645,6 +645,53 @@ mod tests {
     }
 
     #[test]
+    fn rolling_raw_bf16_argmax_rows_match_materialized_logits_and_record_stats() {
+        let weight_bf16 = vec![
+            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x0000, 0x0000, 0x4040, 0xbf80, 0x3f80,
+            0x0000, 0x3f00, 0x3f00, 0x3f00, 0xc000, 0x0000, 0x3f80, 0x0000, 0xc040, 0x3f80, 0x3f80,
+            0x3f80, 0x3f80,
+        ];
+        let raw = bf16_bytes(&weight_bf16);
+        let weight_f32: Vec<f32> = weight_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let input = vec![1.0, -2.0, 0.5];
+        let bias = vec![0.0, 0.25, -0.25, 0.5, 0.0, 1.0, -1.0, 0.75];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 3,
+            out_features: 8,
+        };
+        let expected_logits = linear(&input, &weight_f32, Some(&bias), 1, 3, 8).unwrap();
+        let expected = sample_argmax(&expected_logits).unwrap();
+        let mut executor =
+            crate::rolling::RollingExecutor::new(crate::rolling::RollingExecutorConfig {
+                enabled: true,
+                worker_count: 4,
+                min_rows_per_worker: 1,
+            });
+
+        let actual = rolling_raw_16bit_argmax_rows(
+            &input,
+            &raw,
+            0,
+            0,
+            8,
+            config,
+            DType::Bf16,
+            Some(&bias),
+            &mut executor,
+        );
+        let stats = executor.take_stats();
+
+        assert_eq!(actual.best_index, expected);
+        assert_eq!(stats.submitted_tasks, 4);
+        assert_eq!(stats.worker_wakeups, 4);
+        assert_eq!(stats.sequential_fallbacks, 0);
+    }
+
+    #[test]
     fn streaming_tile_linear_multiply_into_matches_materialized_linear() {
         let path = temp_path("tile-linear-multiply-into");
         let weight = vec![

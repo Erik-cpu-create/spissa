@@ -1,3 +1,5 @@
+use crate::rolling::RollingExecutor;
+
 struct StreamingLinearArgmaxState<'a> {
     bias: Option<&'a [f32]>,
     current_out_feature: usize,
@@ -146,6 +148,46 @@ fn parallel_raw_16bit_argmax_rows(
         }
         best
     })
+}
+
+fn rolling_raw_16bit_argmax_rows(
+    input: &[f32],
+    raw_bytes: &[u8],
+    local_row_start: usize,
+    out_feature_start: usize,
+    rows: usize,
+    config: StreamingLinearConfig,
+    dtype: rllm_container::DType,
+    bias: Option<&[f32]>,
+    executor: &mut RollingExecutor,
+) -> ArgmaxCandidate {
+    let workers = executor.effective_workers_for_rows(rows);
+    if workers == 1 {
+        executor.record_sequential_fallback();
+        return raw_16bit_argmax_rows_range(
+            input,
+            raw_bytes,
+            local_row_start,
+            out_feature_start,
+            rows,
+            config,
+            dtype,
+            bias,
+        );
+    }
+
+    executor.record_parallel_batch(workers, std::mem::size_of::<ArgmaxCandidate>() * workers);
+    parallel_raw_16bit_argmax_rows(
+        input,
+        raw_bytes,
+        local_row_start,
+        out_feature_start,
+        rows,
+        config,
+        dtype,
+        bias,
+        workers,
+    )
 }
 
 fn raw_16bit_argmax_rows_range(
@@ -553,4 +595,3 @@ fn accumulate_raw_16bit_chunk_argmax_row_blocked(
     }
     Ok(())
 }
-
