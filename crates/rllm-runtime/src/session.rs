@@ -188,6 +188,8 @@ pub struct RamaSessionTurnMetrics {
     pub rolling_stats: RamaRollingStats,
     pub experimental_speed_stats: RamaExperimentalSpeedStats,
     pub phase_timings: RamaSessionPhaseTimings,
+    pub prefill_phase_timings: RamaSessionPhaseTimings,
+    pub decode_phase_timings: RamaSessionPhaseTimings,
     pub repetition_stats: RamaRepetitionStats,
 }
 
@@ -315,6 +317,8 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
         let turn_start = Instant::now();
         let mut flushed_pending_tokens = 0usize;
         let mut phase_timings = RamaSessionPhaseTimings::default();
+        let mut prefill_phase_timings = RamaSessionPhaseTimings::default();
+        let mut decode_phase_timings = RamaSessionPhaseTimings::default();
         let mut rolling_stats = RamaRollingStats::default();
         let mut experimental_speed_stats = RamaExperimentalSpeedStats::default();
         if let Some(token) = self.pending_uncached_token {
@@ -347,6 +351,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                 )
             })?;
         if let Some(timings) = self.adapter.take_last_phase_timings() {
+            prefill_phase_timings.add_assign(timings);
             phase_timings.add_assign(timings);
         }
         if let Some(stats) = self.adapter.take_last_rolling_stats() {
@@ -384,6 +389,8 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     rolling_stats,
                     experimental_speed_stats,
                     phase_timings,
+                    prefill_phase_timings,
+                    decode_phase_timings,
                     repetition_stats: RamaRepetitionStats::from_tokens(&generated_token_ids),
                 },
             ));
@@ -403,6 +410,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     )
                 })?;
             if let Some(timings) = self.adapter.take_last_phase_timings() {
+                decode_phase_timings.add_assign(timings);
                 phase_timings.add_assign(timings);
             }
             if let Some(stats) = self.adapter.take_last_rolling_stats() {
@@ -447,6 +455,8 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                 rolling_stats,
                 experimental_speed_stats,
                 phase_timings,
+                prefill_phase_timings,
+                decode_phase_timings,
                 repetition_stats: RamaRepetitionStats::from_tokens(&generated_token_ids),
             },
         ))
@@ -920,6 +930,40 @@ mod tests {
         assert_eq!(result.metrics.phase_timings.transformer_ms, 22.0);
         assert_eq!(result.metrics.phase_timings.final_norm_ms, 33.0);
         assert_eq!(result.metrics.phase_timings.lm_head_ms, 44.0);
+    }
+
+    #[test]
+    fn turn_metrics_split_prefill_and_decode_phase_timings() {
+        let mut adapter = RecordingAdapter::new(16);
+        adapter.phase_timings.push(RamaSessionPhaseTimings {
+            embedding_ms: 1.0,
+            transformer_ms: 2.0,
+            final_norm_ms: 3.0,
+            lm_head_ms: 4.0,
+            ..Default::default()
+        });
+        adapter.phase_timings.push(RamaSessionPhaseTimings {
+            embedding_ms: 10.0,
+            transformer_ms: 20.0,
+            final_norm_ms: 30.0,
+            lm_head_ms: 40.0,
+            ..Default::default()
+        });
+        let mut session = RamaChatSession::new(adapter);
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session
+            .generate_turn(&[1, 2], 2, &mut budget, |_| true)
+            .unwrap();
+
+        assert_eq!(result.metrics.prefill_phase_timings.embedding_ms, 1.0);
+        assert_eq!(result.metrics.prefill_phase_timings.transformer_ms, 2.0);
+        assert_eq!(result.metrics.prefill_phase_timings.final_norm_ms, 3.0);
+        assert_eq!(result.metrics.prefill_phase_timings.lm_head_ms, 4.0);
+        assert_eq!(result.metrics.decode_phase_timings.embedding_ms, 10.0);
+        assert_eq!(result.metrics.decode_phase_timings.transformer_ms, 20.0);
+        assert_eq!(result.metrics.decode_phase_timings.final_norm_ms, 30.0);
+        assert_eq!(result.metrics.decode_phase_timings.lm_head_ms, 40.0);
     }
 
     #[test]
