@@ -285,6 +285,8 @@ fn write_report(
     body.push_str("| turn | baseline input tokens | session input tokens | baseline generated | session generated | baseline TTFT | session TTFT | baseline decode ms | session decode ms | baseline e2e ms | session e2e ms | baseline decode tok/s | session decode tok/s | baseline e2e tok/s | session e2e tok/s | token match | history match | session phase timing | notes |\n");
     body.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|\n");
     for row in rows {
+        let phase_note = format_phase_timing_note(row.session_result.metrics.phase_timings)
+            + &format_rolling_note(row.session_result.metrics.rolling_stats);
         body.push_str(&format!(
             "| {} | {} | {} | {} | {} | {:.2} ms | {:.2} ms | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {} | {} | session_replayed={} flushed={} baseline_peak={} session_peak={} |\n",
             row.turn_index,
@@ -304,11 +306,7 @@ fn write_report(
             row.session_result.metrics.end_to_end_tok_s,
             row.generated_match.note,
             row.history_match.note,
-            format!(
-                "{}{}",
-                format_phase_timing_note(row.session_result.metrics.phase_timings),
-                format_rolling_note(row.session_result.metrics.rolling_stats)
-            ),
+            phase_note,
             row.session_result.metrics.replayed_tokens,
             row.session_result.metrics.flushed_pending_tokens,
             row.baseline_peak_transient_bytes,

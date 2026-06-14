@@ -406,7 +406,7 @@ fn accumulate_raw_16bit_chunk_argmax_row_blocked(
     dtype: rllm_container::DType,
     state: &mut StreamingLinearArgmaxState<'_>,
     weight_name: &str,
-    mut rolling: Option<&mut RollingExecutor>,
+    rolling: Option<&mut RollingExecutor>,
 ) -> Result<()> {
     if !raw_bytes.len().is_multiple_of(2) {
         return Err(RuntimeError::InvalidTensorData(format!(
@@ -479,7 +479,7 @@ fn accumulate_raw_16bit_chunk_argmax_row_blocked(
             )));
         }
 
-        let candidate = if let Some(executor) = rolling.as_deref_mut() {
+        let candidate = if let Some(executor) = rolling {
             rolling_raw_16bit_argmax_rows(
                 input,
                 raw_bytes,
