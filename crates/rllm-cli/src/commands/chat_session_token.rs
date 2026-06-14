@@ -73,8 +73,9 @@ pub fn run(
         generation_config(max_new_tokens, ctx),
     )?;
     let mut session_budget = MemoryBudget::unbounded();
-    let adapter =
+    let mut adapter =
         LlamaRamaSessionAdapter::new(&mut session_model, &session_prepared, &mut session_budget)?;
+    adapter.set_transformer_detail_timing(true);
     let mut session = RamaChatSession::new(adapter);
 
     let mut baseline_visible_history = Vec::new();
