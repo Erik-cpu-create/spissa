@@ -22,6 +22,7 @@ use crate::{
     RamaTransformerPhaseTimings, StreamingLinearConfig, StreamingTileLinearConfig,
     DEFAULT_STREAMING_TILE_ELEMENTS,
 };
+use crate::{RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats};
 use std::time::Instant;
 
 pub struct LlamaRamaSessionAdapter<'a> {
@@ -37,6 +38,8 @@ pub struct LlamaRamaSessionAdapter<'a> {
     last_phase_timings: Option<RamaSessionPhaseTimings>,
     rolling_executor: Option<RollingExecutor>,
     last_rolling_stats: Option<RamaRollingStats>,
+    experimental_speed_config: RamaExperimentalSpeedConfig,
+    last_experimental_speed_stats: Option<RamaExperimentalSpeedStats>,
     collect_transformer_detail_timing: bool,
 }
 
@@ -238,6 +241,8 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 crate::streaming::streaming_available_threads(),
             ),
             last_rolling_stats: None,
+            experimental_speed_config: RamaExperimentalSpeedConfig::from_env(),
+            last_experimental_speed_stats: None,
             collect_transformer_detail_timing: false,
         })
     }
@@ -257,6 +262,14 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             worker_count,
             min_rows_per_worker,
         }));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_experimental_speed_for_test(
+        &mut self,
+        config: RamaExperimentalSpeedConfig,
+    ) {
+        self.experimental_speed_config = config;
     }
 
     fn append_tokens_inner(
@@ -283,6 +296,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         }
 
         let mut phase_timings = RamaSessionPhaseTimings::default();
+        let mut experimental_speed_stats = RamaExperimentalSpeedStats::default();
         let phase_start = Instant::now();
         let mut hidden = embedding_lookup(
             &self.embedding_data,
@@ -305,10 +319,16 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 rope_theta: self.prepared.config.rope_theta,
                 causal: self.prepared.config.causal,
                 position_offset,
+                experimental_speed: self.experimental_speed_config,
             };
             let mut transformer_detail = RamaTransformerPhaseTimings::default();
             let transformer_detail_timing = if self.collect_transformer_detail_timing {
                 Some(&mut transformer_detail)
+            } else {
+                None
+            };
+            let experimental_stats_ref = if self.experimental_speed_config.enabled {
+                Some(&mut experimental_speed_stats)
             } else {
                 None
             };
@@ -321,6 +341,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 budget,
                 Some(&mut self.caches[i]),
                 transformer_detail_timing,
+                experimental_stats_ref,
             )?;
             if self.collect_transformer_detail_timing {
                 phase_timings
@@ -332,6 +353,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
 
         if !emit_logits {
             self.last_phase_timings = Some(phase_timings);
+            self.last_experimental_speed_stats = Some(experimental_speed_stats);
             return Ok(None);
         }
 
@@ -400,6 +422,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         };
         phase_timings.lm_head_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
         self.last_phase_timings = Some(phase_timings);
+        self.last_experimental_speed_stats = Some(experimental_speed_stats);
         Ok(Some(RamaSessionStep {
             token_id,
             logits,
@@ -428,6 +451,7 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
         emit_logits: bool,
     ) -> Result<Option<RamaSessionStep>> {
         self.last_phase_timings = None;
+        self.last_experimental_speed_stats = None;
         let old_lens: Vec<usize> = self.caches.iter().map(KvCache::len).collect();
         match self.append_tokens_inner(tokens, budget, emit_logits) {
             Ok(step) => Ok(step),
@@ -436,6 +460,7 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
                     let _ = cache.truncate(len);
                 }
                 self.last_phase_timings = None;
+                self.last_experimental_speed_stats = None;
                 Err(error)
             }
         }
@@ -447,6 +472,10 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
 
     fn take_last_rolling_stats(&mut self) -> Option<RamaRollingStats> {
         self.last_rolling_stats.take()
+    }
+
+    fn take_last_experimental_speed_stats(&mut self) -> Option<RamaExperimentalSpeedStats> {
+        self.last_experimental_speed_stats.take()
     }
 }
 
@@ -844,6 +873,77 @@ mod tests {
         writer.finalize().unwrap();
     }
 
+    fn write_bf16_mlp_speed_model(path: &std::path::Path, vocab_size: usize) {
+        let mut writer = RllmWriter::new(path, llama_metadata_with_vocab(vocab_size)).unwrap();
+        let mut tensor_id = 0u64;
+        add_f32_tensor(
+            &mut writer,
+            tensor_id,
+            "model.embed_tokens.weight",
+            vec![vocab_size as u64, HIDDEN_SIZE as u64],
+            &vec![0.0; vocab_size * HIDDEN_SIZE],
+        );
+        tensor_id += 1;
+        add_bf16_tensor(
+            &mut writer,
+            tensor_id,
+            "lm_head.weight",
+            vec![vocab_size as u64, HIDDEN_SIZE as u64],
+            &vec![0x0000; vocab_size * HIDDEN_SIZE],
+        );
+        tensor_id += 1;
+        add_layer_norms(&mut writer, &mut tensor_id, 0);
+        let prefix = "model.layers.0";
+        add_zero_f32_tensor(
+            &mut writer,
+            &mut tensor_id,
+            &format!("{prefix}.self_attn.q_proj.weight"),
+            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+        );
+        add_zero_f32_tensor(
+            &mut writer,
+            &mut tensor_id,
+            &format!("{prefix}.self_attn.k_proj.weight"),
+            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+        );
+        add_zero_f32_tensor(
+            &mut writer,
+            &mut tensor_id,
+            &format!("{prefix}.self_attn.v_proj.weight"),
+            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+        );
+        add_zero_f32_tensor(
+            &mut writer,
+            &mut tensor_id,
+            &format!("{prefix}.self_attn.o_proj.weight"),
+            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+        );
+        add_bf16_tensor(
+            &mut writer,
+            tensor_id,
+            &format!("{prefix}.mlp.gate_proj.weight"),
+            vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
+            &vec![0x0000; INTERMEDIATE_SIZE * HIDDEN_SIZE],
+        );
+        tensor_id += 1;
+        add_bf16_tensor(
+            &mut writer,
+            tensor_id,
+            &format!("{prefix}.mlp.up_proj.weight"),
+            vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
+            &vec![0x0000; INTERMEDIATE_SIZE * HIDDEN_SIZE],
+        );
+        tensor_id += 1;
+        add_bf16_tensor(
+            &mut writer,
+            tensor_id,
+            &format!("{prefix}.mlp.down_proj.weight"),
+            vec![HIDDEN_SIZE as u64, INTERMEDIATE_SIZE as u64],
+            &vec![0x0000; HIDDEN_SIZE * INTERMEDIATE_SIZE],
+        );
+        writer.finalize().unwrap();
+    }
+
     fn write_post_cache_failure_model(path: &std::path::Path) {
         let mut writer = RllmWriter::new(path, llama_metadata()).unwrap();
         let mut tensor_id = 0u64;
@@ -1000,6 +1100,28 @@ mod tests {
 
         assert!(stats.submitted_tasks > 0);
         assert!(stats.worker_wakeups > 0);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_reports_experimental_speed_stats_when_enabled_for_test() {
+        let path = temp_path("experimental-speed-stats");
+        write_bf16_mlp_speed_model(&path, 8);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(1);
+        let mut budget = MemoryBudget::unbounded();
+        let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget).unwrap();
+        adapter.enable_experimental_speed_for_test(crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            turbo_topk: Some(1),
+        });
+
+        adapter.append_tokens(&[0], &mut budget, true).unwrap();
+        let stats = adapter.take_last_experimental_speed_stats().unwrap();
+
+        assert!(stats.sparse_projection_calls > 0);
+        assert!(stats.max_selected_topk <= 1);
 
         std::fs::remove_file(path).ok();
     }

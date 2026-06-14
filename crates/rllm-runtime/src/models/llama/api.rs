@@ -248,6 +248,7 @@ pub fn rama_layer_decoded_llama_transformer_generate_from_model(
                 rope_theta: prepared.config.rope_theta,
                 causal: prepared.config.causal,
                 position_offset,
+                experimental_speed: crate::RamaExperimentalSpeedConfig::disabled(),
             };
             hidden = streaming_llama_transformer_block(
                 model,
