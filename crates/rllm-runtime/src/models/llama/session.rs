@@ -23,8 +23,8 @@ use crate::{
 use crate::{RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats};
 use crate::{
     RamaRollingStats, RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep,
-    RamaTransformerPhaseTimings, StreamingLinearConfig, StreamingTileLinearConfig,
-    DEFAULT_STREAMING_TILE_ELEMENTS,
+    RamaTransformerPhaseTimings, SparseColumnCache, StreamingLinearConfig,
+    StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use std::time::Instant;
 
@@ -43,6 +43,7 @@ pub struct LlamaRamaSessionAdapter<'a> {
     last_rolling_stats: Option<RamaRollingStats>,
     experimental_speed_config: RamaExperimentalSpeedConfig,
     last_experimental_speed_stats: Option<RamaExperimentalSpeedStats>,
+    sparse_column_cache: SparseColumnCache,
     collect_transformer_detail_timing: bool,
 }
 
@@ -246,6 +247,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             last_rolling_stats: None,
             experimental_speed_config: RamaExperimentalSpeedConfig::from_env(),
             last_experimental_speed_stats: None,
+            sparse_column_cache: SparseColumnCache::from_env(),
             collect_transformer_detail_timing: false,
         })
     }
@@ -337,6 +339,11 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             } else {
                 None
             };
+            let sparse_column_cache = if self.experimental_speed_config.aip_column_cache {
+                Some(&mut self.sparse_column_cache)
+            } else {
+                None
+            };
             hidden = streaming_llama_transformer_block_with_timing(
                 self.model,
                 &hidden,
@@ -347,6 +354,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 Some(&mut self.caches[i]),
                 transformer_detail_timing,
                 experimental_stats_ref,
+                sparse_column_cache,
             )?;
             if self.collect_transformer_detail_timing {
                 phase_timings
@@ -1216,6 +1224,7 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(1),
             aip_lm_head_rows: None,
+            aip_column_cache: false,
         });
 
         adapter.append_tokens(&[0], &mut budget, true).unwrap();
@@ -1246,6 +1255,7 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Quality,
             aip_topk: Some(1),
             aip_lm_head_rows: None,
+            aip_column_cache: false,
         });
         quality_adapter
             .append_tokens(&[0], &mut quality_budget, true)
@@ -1265,6 +1275,7 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(1),
             aip_lm_head_rows: None,
+            aip_column_cache: false,
         });
         speed_adapter
             .append_tokens(&[0], &mut speed_budget, true)

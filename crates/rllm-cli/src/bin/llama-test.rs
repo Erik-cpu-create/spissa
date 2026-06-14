@@ -64,6 +64,17 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
         } else {
             String::new()
         };
+        let column_cache_note = if stats.column_cache_hits > 0 || stats.column_cache_misses > 0 {
+            format!(
+                " column_cache_hits={} column_cache_misses={} column_cache_resident={}/{} bytes",
+                stats.column_cache_hits,
+                stats.column_cache_misses,
+                stats.column_cache_resident_columns,
+                stats.column_cache_resident_bytes
+            )
+        } else {
+            String::new()
+        };
         format!(
             " | AIP: policy={} calls={} fallbacks={} max_topk={} skipped_madds={} scratch={} bytes",
             policy_str,
@@ -73,6 +84,7 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
             stats.estimated_skipped_madds,
             stats.peak_scratch_bytes
         ) + &lm_head_note
+            + &column_cache_note
     }
 }
 
@@ -280,6 +292,10 @@ mod tests {
             peak_scratch_bytes: 512,
             lm_head_prefix_rows: 512,
             lm_head_vocab_rows: 128_256,
+            column_cache_hits: 8,
+            column_cache_misses: 4,
+            column_cache_resident_columns: 12,
+            column_cache_resident_bytes: 49_152,
         });
 
         assert!(suffix.contains("AIP: policy=quality"));
@@ -289,6 +305,9 @@ mod tests {
         assert!(suffix.contains("max_topk=128"));
         assert!(suffix.contains("skipped_madds=2048"));
         assert!(suffix.contains("lm_head_rows=512/128256"));
+        assert!(suffix.contains("column_cache_hits=8"));
+        assert!(suffix.contains("column_cache_misses=4"));
+        assert!(suffix.contains("column_cache_resident=12/49152 bytes"));
     }
 
     #[test]

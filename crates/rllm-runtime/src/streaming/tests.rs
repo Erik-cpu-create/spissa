@@ -1320,6 +1320,7 @@ mod tests {
                 aip_policy: crate::RamaAipPolicyKind::Speed,
                 aip_topk: Some(2),
                 aip_lm_head_rows: None,
+                aip_column_cache: false,
             },
             &mut stats,
             &mut budget,
@@ -1389,6 +1390,7 @@ mod tests {
                 aip_policy: crate::RamaAipPolicyKind::Speed,
                 aip_topk: Some(2),
                 aip_lm_head_rows: None,
+                aip_column_cache: false,
             },
             &mut stats,
             &mut budget,
@@ -1419,6 +1421,180 @@ mod tests {
         assert_close_vec(&output, &expected, 1e-4);
         assert_eq!(stats.sparse_projection_calls, 1);
         assert_eq!(stats.estimated_skipped_madds, 8);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn column_cached_sparse_raw_bf16_linear_matches_manual_topk_and_reuses_columns() {
+        let path = temp_path("column-cache-sparse-linear-bf16");
+        let weight_bf16 = vec![
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
+            0x4000, 0x4040,
+        ];
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "linear.column-cache.bf16.weight",
+            vec![3, 4],
+            &weight_bf16,
+            14,
+        );
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::unbounded();
+        let mut cache = SparseColumnCache::with_max_columns(8);
+        let mut stats = crate::RamaExperimentalSpeedStats::default();
+        let speed_config = crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(2),
+            aip_lm_head_rows: None,
+            aip_column_cache: true,
+        };
+        let config = StreamingTileLinearConfig {
+            linear: StreamingLinearConfig {
+                batch: 1,
+                in_features: 4,
+                out_features: 3,
+            },
+            tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+        };
+
+        let output = streaming_column_cached_sparse_tile_linear_from_model(
+            &mut model,
+            "linear.column-cache.bf16.weight",
+            &input,
+            None,
+            config,
+            speed_config,
+            &mut stats,
+            &mut cache,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(output.len(), 3);
+        assert!((output[0] - 12.0).abs() < 1e-4);
+        assert!((output[1] + 12.0).abs() < 1e-4);
+        assert!((output[2] - 13.0).abs() < 1e-4);
+        assert_eq!(cache.stats().resident_columns, 2);
+        assert_eq!(cache.stats().misses, 2);
+        assert_eq!(cache.stats().hits, 0);
+        assert_eq!(budget.current_bytes(), 0);
+
+        let second = streaming_column_cached_sparse_tile_linear_from_model(
+            &mut model,
+            "linear.column-cache.bf16.weight",
+            &input,
+            None,
+            config,
+            speed_config,
+            &mut stats,
+            &mut cache,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_close_vec(&second, &output, 1e-6);
+        assert_eq!(cache.stats().resident_columns, 2);
+        assert_eq!(cache.stats().hits, 2);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn column_cached_sparse_silu_gate_up_matches_manual_topk_projection() {
+        let path = temp_path("column-cache-sparse-gate-up-bf16");
+        let gate_bf16 = vec![
+            0x3f80, 0x4000, 0x4040, 0x4080, 0x4000, 0x4040, 0x4080, 0x40a0,
+        ];
+        let up_bf16 = vec![
+            0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x4000, 0x4000, 0x4000, 0x4000,
+        ];
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "mlp.gate.column-cache.bf16.weight",
+            vec![2, 4],
+            &gate_bf16,
+            10,
+        );
+        add_bf16_tensor(
+            &mut writer,
+            1,
+            "mlp.up.column-cache.bf16.weight",
+            vec![2, 4],
+            &up_bf16,
+            10,
+        );
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::unbounded();
+        let mut cache = SparseColumnCache::with_max_columns(8);
+        let mut stats = crate::RamaExperimentalSpeedStats::default();
+        let speed_config = crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(2),
+            aip_lm_head_rows: None,
+            aip_column_cache: true,
+        };
+        let output = streaming_column_cached_sparse_silu_gate_up_from_model(
+            &mut model,
+            "mlp.gate.column-cache.bf16.weight",
+            "mlp.up.column-cache.bf16.weight",
+            &input,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 4,
+                    out_features: 2,
+                },
+                tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+            },
+            speed_config,
+            &mut stats,
+            &mut cache,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+
+        let selected = crate::select_top_abs_indices(&input, 2);
+        let gate_f32: Vec<f32> = gate_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let up_f32: Vec<f32> = up_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let mut expected = Vec::new();
+        for row in 0..2 {
+            let mut gate_acc = 0.0;
+            let mut up_acc = 0.0;
+            for &idx in &selected {
+                gate_acc += input[idx] * gate_f32[row * 4 + idx];
+                up_acc += input[idx] * up_f32[row * 4 + idx];
+            }
+            expected.push(crate::silu(gate_acc) * up_acc);
+        }
+
+        assert_close_vec(&output, &expected, 1e-4);
+        assert_eq!(cache.stats().resident_columns, 4);
+        assert_eq!(cache.stats().misses, 4);
         assert_eq!(budget.current_bytes(), 0);
 
         std::fs::remove_file(&path).ok();
