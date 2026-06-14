@@ -227,16 +227,41 @@ fn validate_turns(turns: &[String]) -> Result<()> {
 }
 
 fn validate_report_output_path(out: &str) -> Result<()> {
-    let normalized = out.replace('\\', "/");
-    for folder in ["success", "failed", "inconclusive"] {
-        let marker = format!("docs/benchmarks/trials/{folder}/");
-        if normalized.contains(&marker) {
+    let components = normalized_path_components(out);
+    for window in components.windows(4) {
+        if window[0] == "docs"
+            && window[1] == "benchmarks"
+            && window[2] == "trials"
+            && matches!(window[3].as_str(), "success" | "failed" | "inconclusive")
+        {
             anyhow::bail!(
                 "chat-session writes active reports; use docs/benchmarks/trials/active/ and move the report after review"
             );
         }
     }
     Ok(())
+}
+
+fn normalized_path_components(path: &str) -> Vec<String> {
+    let mut components = Vec::new();
+    let normalized = path.replace('\\', "/");
+    for part in normalized.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if components
+                    .last()
+                    .is_some_and(|component: &String| component != "..")
+                {
+                    components.pop();
+                } else {
+                    components.push(part.to_string());
+                }
+            }
+            _ => components.push(part.to_string()),
+        }
+    }
+    components
 }
 
 fn format_turn_args<I, S>(turns: I) -> String
@@ -341,6 +366,13 @@ mod tests {
                 .to_string()
                 .contains("writes active reports"));
         }
+
+        let traversal =
+            validate_report_output_path("docs/benchmarks/trials/active/../success/replay.md");
+        assert!(traversal
+            .unwrap_err()
+            .to_string()
+            .contains("writes active reports"));
     }
 
     #[test]
