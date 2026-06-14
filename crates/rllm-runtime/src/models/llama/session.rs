@@ -8,14 +8,17 @@ use crate::models::llama::model::{
     LayerDecodedLlamaRamaTransformer, OwnedLlamaStreamingBlockParameters,
     OwnedLlamaStreamingBlockTensorNames,
 };
+use crate::rolling::{RollingExecutor, RollingExecutorConfig};
 use crate::rotary::KvCache;
+use crate::streaming::streaming_tile_linear_argmax_with_rolling_from_model;
 use crate::{
     embedding_lookup, rms_norm, sample_top_p, streaming_tile_linear_argmax_from_model,
     streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
 };
 use crate::{
-    RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep, RamaTransformerPhaseTimings,
-    StreamingLinearConfig, StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
+    RamaRollingStats, RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep,
+    RamaTransformerPhaseTimings, StreamingLinearConfig, StreamingTileLinearConfig,
+    DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use std::time::Instant;
 
@@ -30,6 +33,8 @@ pub struct LlamaRamaSessionAdapter<'a> {
     layer_norms: Vec<OwnedLlamaStreamingBlockParameters>,
     caches: Vec<KvCache>,
     last_phase_timings: Option<RamaSessionPhaseTimings>,
+    rolling_executor: Option<RollingExecutor>,
+    last_rolling_stats: Option<RamaRollingStats>,
     collect_transformer_detail_timing: bool,
 }
 
@@ -227,12 +232,29 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             layer_norms,
             caches,
             last_phase_timings: None,
+            rolling_executor: RollingExecutor::from_env(
+                crate::streaming::streaming_available_threads(),
+            ),
+            last_rolling_stats: None,
             collect_transformer_detail_timing: false,
         })
     }
 
     pub fn set_transformer_detail_timing(&mut self, enabled: bool) {
         self.collect_transformer_detail_timing = enabled;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_rolling_executor_for_test(
+        &mut self,
+        worker_count: usize,
+        min_rows_per_worker: usize,
+    ) {
+        self.rolling_executor = Some(RollingExecutor::new(RollingExecutorConfig {
+            enabled: true,
+            worker_count,
+            min_rows_per_worker,
+        }));
     }
 
     fn append_tokens_inner(
@@ -332,17 +354,31 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
         };
         let (token_id, logits) = match self.prepared.config.sampling {
-            crate::StreamingSamplingConfig::Argmax => (
-                streaming_tile_linear_argmax_from_model(
-                    self.model,
-                    &self.prepared.lm_head_weight,
-                    last_hidden,
-                    None,
-                    lm_head_config,
-                    budget,
-                )?,
-                None,
-            ),
+            crate::StreamingSamplingConfig::Argmax => {
+                let token_id = if let Some(executor) = self.rolling_executor.as_mut() {
+                    let token = streaming_tile_linear_argmax_with_rolling_from_model(
+                        self.model,
+                        &self.prepared.lm_head_weight,
+                        last_hidden,
+                        None,
+                        lm_head_config,
+                        budget,
+                        Some(executor),
+                    )?;
+                    self.last_rolling_stats = Some(executor.take_stats());
+                    token
+                } else {
+                    streaming_tile_linear_argmax_from_model(
+                        self.model,
+                        &self.prepared.lm_head_weight,
+                        last_hidden,
+                        None,
+                        lm_head_config,
+                        budget,
+                    )?
+                };
+                (token_id, None)
+            }
             crate::StreamingSamplingConfig::TopP {
                 temperature,
                 top_p,
@@ -406,6 +442,10 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
     fn take_last_phase_timings(&mut self) -> Option<RamaSessionPhaseTimings> {
         self.last_phase_timings.take()
     }
+
+    fn take_last_rolling_stats(&mut self) -> Option<RamaRollingStats> {
+        self.last_rolling_stats.take()
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +466,14 @@ mod tests {
 
     fn f32_bytes(values: &[f32]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(values.len() * 4);
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn bf16_bytes(values: &[u16]) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(values.len() * 2);
         for value in values {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
@@ -463,6 +511,30 @@ mod tests {
             .unwrap();
     }
 
+    fn add_bf16_tensor(
+        writer: &mut RllmWriter,
+        tensor_id: u64,
+        name: &str,
+        shape: Vec<u64>,
+        values: &[u16],
+    ) {
+        let bytes = bf16_bytes(values);
+        writer.add_tensor(TensorMeta {
+            tensor_id,
+            name: name.to_string(),
+            shape,
+            dtype: DType::Bf16,
+            original_size_bytes: bytes.len() as u64,
+            compressed_size_bytes: bytes.len() as u64,
+            original_sha256: sha256_array(&bytes),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(tensor_id, "rtc-raw-v1", &bytes, &bytes, 0)
+            .unwrap();
+    }
+
     fn llama_metadata() -> GlobalMetadata {
         let mut metadata = GlobalMetadata::new_test();
         metadata.model_config = Some(ModelConfigMetadata {
@@ -477,6 +549,12 @@ mod tests {
             vocab_size: Some(VOCAB_SIZE as u64),
             ..Default::default()
         });
+        metadata
+    }
+
+    fn llama_metadata_with_vocab(vocab_size: usize) -> GlobalMetadata {
+        let mut metadata = llama_metadata();
+        metadata.model_config.as_mut().unwrap().vocab_size = Some(vocab_size as u64);
         metadata
     }
 
@@ -741,6 +819,29 @@ mod tests {
         writer.finalize().unwrap();
     }
 
+    fn write_bf16_lm_head_model(path: &std::path::Path, vocab_size: usize) {
+        let mut writer = RllmWriter::new(path, llama_metadata_with_vocab(vocab_size)).unwrap();
+        let mut tensor_id = 0u64;
+        add_f32_tensor(
+            &mut writer,
+            tensor_id,
+            "model.embed_tokens.weight",
+            vec![vocab_size as u64, HIDDEN_SIZE as u64],
+            &vec![0.0; vocab_size * HIDDEN_SIZE],
+        );
+        tensor_id += 1;
+        add_bf16_tensor(
+            &mut writer,
+            tensor_id,
+            "lm_head.weight",
+            vec![vocab_size as u64, HIDDEN_SIZE as u64],
+            &vec![0x0000; vocab_size * HIDDEN_SIZE],
+        );
+        tensor_id += 1;
+        add_complete_layer_zero(&mut writer, &mut tensor_id);
+        writer.finalize().unwrap();
+    }
+
     fn write_post_cache_failure_model(path: &std::path::Path) {
         let mut writer = RllmWriter::new(path, llama_metadata()).unwrap();
         let mut tensor_id = 0u64;
@@ -879,6 +980,25 @@ mod tests {
         assert!(timings.final_norm_ms >= 0.0);
         assert!(timings.lm_head_ms >= 0.0);
         assert!(timings.total_ms() >= 0.0);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_reports_rolling_stats_when_executor_is_enabled() {
+        let path = temp_path("llama-session-rolling");
+        write_bf16_lm_head_model(&path, 8);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(1);
+        let mut budget = MemoryBudget::unbounded();
+        let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget).unwrap();
+        adapter.enable_rolling_executor_for_test(4, 1);
+
+        let _ = adapter.append_tokens(&[1], &mut budget, true).unwrap();
+        let stats = adapter.take_last_rolling_stats().unwrap();
+
+        assert!(stats.submitted_tasks > 0);
+        assert!(stats.worker_wakeups > 0);
+
         std::fs::remove_file(path).ok();
     }
 
