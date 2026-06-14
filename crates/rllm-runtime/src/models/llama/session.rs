@@ -101,6 +101,17 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         let hidden_size = require_config_usize("hidden_size", model_config.hidden_size)?;
         let intermediate_size =
             require_config_usize("intermediate_size", model_config.intermediate_size)?;
+        if intermediate_size == 0 {
+            return Err(RuntimeError::Shape(
+                "llama session intermediate_size must be non-zero".to_string(),
+            ));
+        }
+        if prepared.final_layernorm_weight.len() != hidden_size {
+            return Err(RuntimeError::Shape(format!(
+                "llama session final_layernorm_weight len {} does not match hidden_size {hidden_size}",
+                prepared.final_layernorm_weight.len()
+            )));
+        }
         let head_dim = validate_llama_shape(
             hidden_size,
             prepared.config.num_heads,
@@ -224,12 +235,14 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         )?;
         let last_hidden = &hidden[(seq_len - 1) * self.hidden_size..];
         let mut logits = vec![0.0f32; self.vocab_size];
-        for v in 0..self.vocab_size {
+        for (v, logit) in logits.iter_mut().enumerate() {
+            let row_start = v * self.hidden_size;
+            let row = &self.lm_head_weight_data[row_start..row_start + self.hidden_size];
             let mut sum = 0.0f32;
-            for h in 0..self.hidden_size {
-                sum += last_hidden[h] * self.lm_head_weight_data[v * self.hidden_size + h];
+            for (&hidden, &weight) in last_hidden.iter().zip(row.iter()) {
+                sum += hidden * weight;
             }
-            logits[v] = sum;
+            *logit = sum;
         }
         let token_id = match self.prepared.config.sampling {
             crate::StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
@@ -541,6 +554,24 @@ mod tests {
     }
 
     #[test]
+    fn llama_session_new_rejects_malformed_final_layernorm_shape() {
+        let path = temp_path("malformed-final-layernorm");
+        write_constructor_model(&path, vec![VOCAB_SIZE as u64, HIDDEN_SIZE as u64]);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut prepared = prepared_with_layers(1);
+        prepared.final_layernorm_weight = vec![1.0];
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget);
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Shape(message)) if message.contains("final_layernorm_weight")
+        ));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn llama_session_append_rolls_back_all_caches_after_post_cache_layer_failure() {
         let path = temp_path("rollback-post-cache-failure");
         write_post_cache_failure_model(&path);
@@ -553,6 +584,7 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(adapter.context_len(), 0);
+        assert_eq!(adapter.context_memory_bytes(), 0);
         std::fs::remove_file(path).ok();
     }
 }
