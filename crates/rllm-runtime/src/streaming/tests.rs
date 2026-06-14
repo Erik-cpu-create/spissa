@@ -705,6 +705,18 @@ mod tests {
     }
 
     #[test]
+    fn sparse_parallel_env_parser_requires_explicit_truthy_value() {
+        assert!(parse_sparse_parallel_enabled(Some("1")));
+        assert!(parse_sparse_parallel_enabled(Some("true")));
+        assert!(parse_sparse_parallel_enabled(Some("yes")));
+        assert!(parse_sparse_parallel_enabled(Some("on")));
+        assert!(!parse_sparse_parallel_enabled(Some("0")));
+        assert!(!parse_sparse_parallel_enabled(Some("false")));
+        assert!(!parse_sparse_parallel_enabled(Some("")));
+        assert!(!parse_sparse_parallel_enabled(None));
+    }
+
+    #[test]
     fn auto_argmax_threads_caps_large_vocab_without_overriding_manual_setting() {
         assert_eq!(effective_argmax_runtime_threads(None, 6, 49_152), 6);
         assert_eq!(effective_argmax_runtime_threads(None, 6, 128_256), 2);
@@ -1410,6 +1422,177 @@ mod tests {
         assert_eq!(budget.current_bytes(), 0);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn parallel_sparse_raw_bf16_linear_matches_sequential_kernel() {
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+        let selected = vec![1, 3];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 4,
+            out_features: 8,
+        };
+        let weight_bf16: Vec<u16> = (0..config.out_features)
+            .flat_map(|row| {
+                [
+                    0x3f80,
+                    0x4000 + row as u16,
+                    0x4040,
+                    0x4080 + row as u16,
+                ]
+            })
+            .collect();
+        let raw_bytes = bf16_bytes(&weight_bf16);
+        let mut sequential = vec![0.0; config.out_features];
+        let mut parallel = vec![0.0; config.out_features];
+
+        accumulate_sparse_raw_16bit_linear_chunk_batch1(
+            &input,
+            &selected,
+            &mut sequential,
+            &raw_bytes,
+            0,
+            config,
+            DType::Bf16,
+            "linear.parallel.sparse.bf16.weight",
+        )
+        .unwrap();
+        parallel_sparse_raw_16bit_linear_chunk_batch1(
+            &input,
+            &selected,
+            &mut parallel,
+            &raw_bytes,
+            0,
+            config,
+            DType::Bf16,
+            "linear.parallel.sparse.bf16.weight",
+            4,
+        )
+        .unwrap();
+
+        assert_close_vec(&parallel, &sequential, 1e-6);
+    }
+
+    #[test]
+    fn parallel_sparse_silu_gate_up_bf16_matches_sequential_kernel() {
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+        let selected = vec![1, 3];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 4,
+            out_features: 8,
+        };
+        let gate_bf16: Vec<u16> = (0..config.out_features)
+            .flat_map(|row| {
+                [
+                    0x3f80,
+                    0x4000 + row as u16,
+                    0x4040,
+                    0x4080 + row as u16,
+                ]
+            })
+            .collect();
+        let up_bf16: Vec<u16> = (0..config.out_features)
+            .flat_map(|row| {
+                [
+                    0x3f80,
+                    0x3f80,
+                    0x4000 + row as u16,
+                    0x4000 + row as u16,
+                ]
+            })
+            .collect();
+        let gate_bytes = bf16_bytes(&gate_bf16);
+        let up_bytes = bf16_bytes(&up_bf16);
+        let mut sequential = vec![0.0; config.out_features];
+        let mut parallel = vec![0.0; config.out_features];
+
+        {
+            let mut state = SiluGateUpState::new(&mut sequential);
+            accumulate_sparse_silu_gate_up_raw_16bit_chunk_batch1(
+                &input,
+                &selected,
+                &gate_bytes,
+                &up_bytes,
+                0,
+                config,
+                DType::Bf16,
+                &mut state,
+                "gate.parallel.sparse.bf16.weight",
+            )
+            .unwrap();
+            state
+                .finish(config, "gate.parallel.sparse.bf16.weight")
+                .unwrap();
+        }
+
+        parallel_sparse_silu_gate_up_raw_16bit_chunk_batch1(
+            &input,
+            &selected,
+            &gate_bytes,
+            &up_bytes,
+            0,
+            config,
+            DType::Bf16,
+            &mut parallel,
+            "gate.parallel.sparse.bf16.weight",
+            4,
+        )
+        .unwrap();
+
+        assert_close_vec(&parallel, &sequential, 1e-6);
+    }
+
+    #[test]
+    fn parallel_sparse_silu_gate_up_single_worker_preserves_prior_output_rows() {
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+        let selected = vec![1, 3];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 4,
+            out_features: 8,
+        };
+        let gate_bf16: Vec<u16> = (4..8)
+            .flat_map(|row| {
+                [
+                    0x3f80,
+                    0x4000 + row as u16,
+                    0x4040,
+                    0x4080 + row as u16,
+                ]
+            })
+            .collect();
+        let up_bf16: Vec<u16> = (4..8)
+            .flat_map(|row| {
+                [
+                    0x3f80,
+                    0x3f80,
+                    0x4000 + row as u16,
+                    0x4000 + row as u16,
+                ]
+            })
+            .collect();
+        let gate_bytes = bf16_bytes(&gate_bf16);
+        let up_bytes = bf16_bytes(&up_bf16);
+        let mut output = vec![99.0; config.out_features];
+
+        parallel_sparse_silu_gate_up_raw_16bit_chunk_batch1(
+            &input,
+            &selected,
+            &gate_bytes,
+            &up_bytes,
+            4 * config.in_features,
+            config,
+            DType::Bf16,
+            &mut output,
+            "gate.parallel.offset.sparse.bf16.weight",
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(&output[..4], &[99.0, 99.0, 99.0, 99.0]);
+        assert!(output[4..].iter().all(|value| *value != 99.0));
     }
 
     fn write_chunked_mlp(path: &std::path::Path) {

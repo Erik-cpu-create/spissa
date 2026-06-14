@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_STREAMING_TILE_ELEMENTS: usize = 4096;
 const RLLM_THREADS_ENV: &str = "RLLM_THREADS";
+const RLLM_SPARSE_PARALLEL_ENV: &str = "RLLM_SPARSE_PARALLEL";
 const MIN_ROWS_PER_PARALLEL_ARGMAX: usize = 4;
 const LARGE_VOCAB_ARGMAX_THRESHOLD: usize = 65_536;
 const LARGE_VOCAB_AUTO_THREAD_CAP: usize = 2;
@@ -58,6 +59,23 @@ fn effective_row_block_threads(rows: usize, available_threads: usize) -> usize {
     } else {
         available_threads.max(1).min(rows)
     }
+}
+
+fn sparse_runtime_thread_count() -> usize {
+    if !parse_sparse_parallel_enabled(std::env::var(RLLM_SPARSE_PARALLEL_ENV).ok().as_deref()) {
+        return 1;
+    }
+    effective_runtime_threads(
+        std::env::var(RLLM_THREADS_ENV).ok().as_deref(),
+        available_runtime_threads(),
+    )
+}
+
+fn parse_sparse_parallel_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
