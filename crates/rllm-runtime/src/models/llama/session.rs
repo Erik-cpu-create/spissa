@@ -47,6 +47,8 @@ pub struct LlamaRamaSessionAdapter<'a> {
     last_experimental_speed_stats: Option<RamaExperimentalSpeedStats>,
     sparse_column_cache: SparseColumnCache,
     collect_transformer_detail_timing: bool,
+    last_generated_token: Option<usize>,
+    last_generated_token_run: usize,
 }
 
 fn tensor_shape_usize(model: &LazyRllmModel, name: &str) -> Result<Vec<usize>> {
@@ -118,10 +120,19 @@ fn checked_projection_rows(label: &str, heads: usize, head_dim: usize) -> Result
 fn sample_sparse_lm_head_argmax(
     logits: &[f32],
     appended_tokens: &[usize],
+    previous_token_run: usize,
     config: RamaExperimentalSpeedConfig,
 ) -> Result<usize> {
-    let excluded_token = if config.aip_no_repeat_last && appended_tokens.len() == 1 {
-        appended_tokens.first().copied()
+    let excluded_token = if appended_tokens.len() == 1 {
+        let previous = appended_tokens.first().copied();
+        let repeat_limit_reached = config
+            .aip_repeat_run_limit
+            .is_some_and(|limit| previous_token_run >= limit);
+        if config.aip_no_repeat_last || repeat_limit_reached {
+            previous
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -316,11 +327,22 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             last_experimental_speed_stats: None,
             sparse_column_cache: SparseColumnCache::from_env(),
             collect_transformer_detail_timing: false,
+            last_generated_token: None,
+            last_generated_token_run: 0,
         })
     }
 
     pub fn set_transformer_detail_timing(&mut self, enabled: bool) {
         self.collect_transformer_detail_timing = enabled;
+    }
+
+    fn record_generated_token(&mut self, token_id: usize, reset_run: bool) {
+        if !reset_run && self.last_generated_token == Some(token_id) {
+            self.last_generated_token_run = self.last_generated_token_run.saturating_add(1);
+        } else {
+            self.last_generated_token = Some(token_id);
+            self.last_generated_token_run = 1;
+        }
     }
 
     #[cfg(test)]
@@ -449,6 +471,13 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
 
         let phase_start = Instant::now();
         let last_hidden = &hidden[(seq_len - 1) * self.hidden_size..];
+        let is_decode_step =
+            tokens.len() == 1 && self.last_generated_token == tokens.first().copied();
+        let previous_token_run = if is_decode_step {
+            self.last_generated_token_run
+        } else {
+            0
+        };
         let lm_head_config = StreamingTileLinearConfig {
             linear: StreamingLinearConfig {
                 batch: 1,
@@ -497,6 +526,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                         aip_column_cache: false,
                         aip_input_tiles: true,
                         aip_no_repeat_last: false,
+                        aip_repeat_run_limit: None,
                     };
                     match streaming_input_tiled_sparse_tile_linear_from_model(
                         self.model,
@@ -529,6 +559,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                                     None => sample_sparse_lm_head_argmax(
                                         &logits,
                                         tokens,
+                                        previous_token_run,
                                         self.experimental_speed_config,
                                     )?,
                                 }
@@ -536,6 +567,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                                 sample_sparse_lm_head_argmax(
                                     &logits,
                                     tokens,
+                                    previous_token_run,
                                     self.experimental_speed_config,
                                 )?
                             };
@@ -627,6 +659,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         phase_timings.lm_head_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
         self.last_phase_timings = Some(phase_timings);
         self.last_experimental_speed_stats = Some(experimental_speed_stats);
+        self.record_generated_token(token_id, !is_decode_step);
         Ok(Some(RamaSessionStep {
             token_id,
             logits,
@@ -657,6 +690,8 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
         self.last_phase_timings = None;
         self.last_experimental_speed_stats = None;
         let old_lens: Vec<usize> = self.caches.iter().map(KvCache::len).collect();
+        let old_last_generated_token = self.last_generated_token;
+        let old_last_generated_token_run = self.last_generated_token_run;
         match self.append_tokens_inner(tokens, budget, emit_logits) {
             Ok(step) => Ok(step),
             Err(error) => {
@@ -665,6 +700,8 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
                 }
                 self.last_phase_timings = None;
                 self.last_experimental_speed_stats = None;
+                self.last_generated_token = old_last_generated_token;
+                self.last_generated_token_run = old_last_generated_token_run;
                 Err(error)
             }
         }
@@ -1408,6 +1445,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         });
 
         adapter.append_tokens(&[0], &mut budget, true).unwrap();
@@ -1435,15 +1473,45 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: true,
             aip_no_repeat_last: true,
+            aip_repeat_run_limit: None,
         };
 
         assert_eq!(
-            sample_sparse_lm_head_argmax(&[0.1, 3.0, 2.0], &[1], config).unwrap(),
+            sample_sparse_lm_head_argmax(&[0.1, 3.0, 2.0], &[1], 1, config).unwrap(),
             2
         );
         assert_eq!(
-            sample_sparse_lm_head_argmax(&[0.1, 3.0, 2.0], &[7, 1], config).unwrap(),
+            sample_sparse_lm_head_argmax(&[0.1, 3.0, 2.0], &[7, 1], 1, config).unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn sparse_lm_head_argmax_repeat_run_limit_skips_after_allowed_run() {
+        let config = crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_column_cache: false,
+            aip_input_tiles: true,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: Some(2),
+        };
+
+        assert_eq!(
+            sample_sparse_lm_head_argmax(&[0.1, 3.0, 2.0], &[1], 1, config).unwrap(),
+            1
+        );
+        assert_eq!(
+            sample_sparse_lm_head_argmax(&[0.1, 3.0, 2.0], &[1], 2, config).unwrap(),
+            2
         );
     }
 
@@ -1463,6 +1531,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: true,
             aip_no_repeat_last: true,
+            aip_repeat_run_limit: None,
         };
 
         assert_eq!(
@@ -1521,6 +1590,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         });
         quality_adapter
             .append_tokens(&[0], &mut quality_budget, true)
@@ -1549,6 +1619,7 @@ mod tests {
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
         });
         speed_adapter
             .append_tokens(&[0], &mut speed_budget, true)
