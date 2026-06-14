@@ -6,12 +6,14 @@ use crate::rotary::{
 };
 use crate::{
     ops::{add_inplace, rms_norm, silu_inplace},
-    scaled_dot_product_attention_with_cache, streaming_silu_gate_up_from_model,
+    scaled_dot_product_attention_with_cache,
+    streaming_column_cached_sparse_silu_gate_up_from_model,
+    streaming_column_cached_sparse_tile_linear_from_model, streaming_silu_gate_up_from_model,
     streaming_sparse_silu_gate_up_from_model, streaming_sparse_tile_linear_from_model,
     streaming_tile_linear_from_model, streaming_tile_linear_multiply_into_from_model,
     LazyRllmModel, MemoryBudget, RamaAipProjectionKind, RamaExperimentalSpeedConfig,
-    RamaExperimentalSpeedStats, RamaTransformerPhaseTimings, Result, StreamingLinearConfig,
-    StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
+    RamaExperimentalSpeedStats, RamaTransformerPhaseTimings, Result, SparseColumnCache,
+    StreamingLinearConfig, StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use std::time::Instant;
 
@@ -41,7 +43,7 @@ pub fn streaming_llama_transformer_block(
     cache: Option<&mut KvCache>,
 ) -> Result<Vec<f32>> {
     streaming_llama_transformer_block_with_timing(
-        model, input, names, params, config, budget, cache, None, None,
+        model, input, names, params, config, budget, cache, None, None, None,
     )
 }
 
@@ -55,6 +57,7 @@ pub fn streaming_llama_transformer_block_with_timing(
     cache: Option<&mut KvCache>,
     mut timing: Option<&mut RamaTransformerPhaseTimings>,
     mut experimental_speed_stats: Option<&mut RamaExperimentalSpeedStats>,
+    mut sparse_column_cache: Option<&mut SparseColumnCache>,
 ) -> Result<Vec<f32>> {
     if let Some(timing) = timing.as_deref_mut() {
         timing.profiled_layers = timing.profiled_layers.saturating_add(1);
@@ -229,17 +232,44 @@ pub fn streaming_llama_transformer_block_with_timing(
                 aip_policy: config.experimental_speed.aip_policy,
                 aip_topk: Some(gate_up_aip_decision.topk),
                 aip_lm_head_rows: None,
+                aip_column_cache: config.experimental_speed.aip_column_cache,
             };
-            streaming_sparse_silu_gate_up_from_model(
-                model,
-                &names.gate_weight,
-                &names.up_weight,
-                &mlp_input,
-                mlp_config,
-                sparse_config,
-                stats,
-                budget,
-            )?
+            if let Some(cache) = sparse_column_cache.as_mut() {
+                match streaming_column_cached_sparse_silu_gate_up_from_model(
+                    model,
+                    &names.gate_weight,
+                    &names.up_weight,
+                    &mlp_input,
+                    mlp_config,
+                    sparse_config,
+                    stats,
+                    cache,
+                    budget,
+                )? {
+                    Some(output) => Some(output),
+                    None => streaming_sparse_silu_gate_up_from_model(
+                        model,
+                        &names.gate_weight,
+                        &names.up_weight,
+                        &mlp_input,
+                        mlp_config,
+                        sparse_config,
+                        stats,
+                        budget,
+                    )?,
+                }
+            } else {
+                streaming_sparse_silu_gate_up_from_model(
+                    model,
+                    &names.gate_weight,
+                    &names.up_weight,
+                    &mlp_input,
+                    mlp_config,
+                    sparse_config,
+                    stats,
+                    budget,
+                )?
+            }
         } else {
             None
         }
@@ -322,17 +352,44 @@ pub fn streaming_llama_transformer_block_with_timing(
                 aip_policy: config.experimental_speed.aip_policy,
                 aip_topk: Some(down_aip_decision.topk),
                 aip_lm_head_rows: None,
+                aip_column_cache: config.experimental_speed.aip_column_cache,
             };
-            streaming_sparse_tile_linear_from_model(
-                model,
-                &names.down_weight,
-                &gate,
-                None,
-                down_config,
-                sparse_config,
-                stats,
-                budget,
-            )?
+            if let Some(cache) = sparse_column_cache.as_mut() {
+                match streaming_column_cached_sparse_tile_linear_from_model(
+                    model,
+                    &names.down_weight,
+                    &gate,
+                    None,
+                    down_config,
+                    sparse_config,
+                    stats,
+                    cache,
+                    budget,
+                )? {
+                    Some(output) => Some(output),
+                    None => streaming_sparse_tile_linear_from_model(
+                        model,
+                        &names.down_weight,
+                        &gate,
+                        None,
+                        down_config,
+                        sparse_config,
+                        stats,
+                        budget,
+                    )?,
+                }
+            } else {
+                streaming_sparse_tile_linear_from_model(
+                    model,
+                    &names.down_weight,
+                    &gate,
+                    None,
+                    down_config,
+                    sparse_config,
+                    stats,
+                    budget,
+                )?
+            }
         } else {
             None
         }
