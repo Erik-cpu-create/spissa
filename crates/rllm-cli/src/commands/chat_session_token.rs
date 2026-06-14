@@ -231,6 +231,20 @@ fn format_phase_timing_note(timings: RamaSessionPhaseTimings) -> String {
     )
 }
 
+fn format_rolling_note(stats: rllm_runtime::RamaRollingStats) -> String {
+    if stats.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " rolling_tasks={} rolling_wakeups={} rolling_fallbacks={} rolling_scratch_bytes={}",
+            stats.submitted_tasks,
+            stats.worker_wakeups,
+            stats.sequential_fallbacks,
+            stats.peak_scratch_bytes
+        )
+    }
+}
+
 fn write_report(
     out: &str,
     file: &str,
@@ -290,7 +304,11 @@ fn write_report(
             row.session_result.metrics.end_to_end_tok_s,
             row.generated_match.note,
             row.history_match.note,
-            format_phase_timing_note(row.session_result.metrics.phase_timings),
+            format!(
+                "{}{}",
+                format_phase_timing_note(row.session_result.metrics.phase_timings),
+                format_rolling_note(row.session_result.metrics.rolling_stats)
+            ),
             row.session_result.metrics.replayed_tokens,
             row.session_result.metrics.flushed_pending_tokens,
             row.baseline_peak_transient_bytes,
@@ -425,7 +443,7 @@ fn normalized_path_components(path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_phase_timing_note, parse_token_turns, token_match_summary,
+        format_phase_timing_note, format_rolling_note, parse_token_turns, token_match_summary,
         validate_report_output_path,
     };
     use rllm_runtime::{RamaSessionPhaseTimings, RamaTransformerPhaseTimings};
@@ -524,6 +542,19 @@ mod tests {
         assert!(note.contains("gate=5.00ms"));
         assert!(note.contains("up=6.00ms"));
         assert!(note.contains("down=7.00ms"));
+    }
+
+    #[test]
+    fn format_rolling_note_reports_nonzero_stats() {
+        let note = format_rolling_note(rllm_runtime::RamaRollingStats {
+            submitted_tasks: 4,
+            worker_wakeups: 4,
+            sequential_fallbacks: 2,
+            peak_scratch_bytes: 32,
+        });
+
+        assert!(note.contains("rolling_tasks=4"));
+        assert!(note.contains("rolling_fallbacks=2"));
     }
 
     #[test]
