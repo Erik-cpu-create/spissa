@@ -213,7 +213,7 @@ pub fn streaming_llama_transformer_block_with_timing(
     };
     let started = Instant::now();
     let sparse_gate_up = if config.experimental_speed.enabled {
-        if let Some(stats) = experimental_speed_stats.as_deref_mut() {
+        if let Some(stats) = &mut experimental_speed_stats {
             streaming_sparse_silu_gate_up_from_model(
                 model,
                 &names.gate_weight,
@@ -292,7 +292,7 @@ pub fn streaming_llama_transformer_block_with_timing(
     };
     let started = Instant::now();
     let sparse_down = if config.experimental_speed.enabled {
-        if let Some(stats) = experimental_speed_stats.as_deref_mut() {
+        if let Some(stats) = &mut experimental_speed_stats {
             streaming_sparse_tile_linear_from_model(
                 model,
                 &names.down_weight,

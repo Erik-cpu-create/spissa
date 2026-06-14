@@ -47,6 +47,21 @@ fn format_rolling_suffix(stats: rllm_runtime::RamaRollingStats) -> String {
     }
 }
 
+fn format_experimental_speed_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
+    if stats.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " | ExperimentalSpeed: sparse_calls={} fallbacks={} max_topk={} skipped_madds={} scratch={} bytes",
+            stats.sparse_projection_calls,
+            stats.exact_fallbacks,
+            stats.max_selected_topk,
+            stats.estimated_skipped_madds,
+            stats.peak_scratch_bytes
+        )
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.ctx == 0 {
@@ -126,15 +141,18 @@ fn main() -> Result<()> {
 
         println!();
         let rolling_suffix = format_rolling_suffix(result.metrics.rolling_stats);
+        let experimental_speed_suffix =
+            format_experimental_speed_suffix(result.metrics.experimental_speed_stats);
         println!(
-            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes{}]",
+            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes{}{}]",
             result.metrics.ttft_ms / 1000.0,
             result.metrics.decode_tok_s,
             result.metrics.end_to_end_tok_s,
             result.metrics.generated_tokens,
             session.token_history().len(),
             result.metrics.peak_transient_bytes,
-            rolling_suffix
+            rolling_suffix,
+            experimental_speed_suffix
         );
         has_context = true;
     }
@@ -171,6 +189,31 @@ mod tests {
 
         assert!(suffix.contains("tasks=8"));
         assert!(suffix.contains("fallbacks=1"));
+    }
+
+    #[test]
+    fn experimental_speed_suffix_is_empty_without_activity() {
+        assert_eq!(
+            format_experimental_speed_suffix(rllm_runtime::RamaExperimentalSpeedStats::default()),
+            ""
+        );
+    }
+
+    #[test]
+    fn experimental_speed_suffix_reports_nonzero_activity() {
+        let suffix = format_experimental_speed_suffix(rllm_runtime::RamaExperimentalSpeedStats {
+            sparse_projection_calls: 4,
+            exact_fallbacks: 1,
+            selected_topk_sum: 256,
+            max_selected_topk: 128,
+            estimated_skipped_madds: 2048,
+            peak_scratch_bytes: 512,
+        });
+
+        assert!(suffix.contains("sparse_calls=4"));
+        assert!(suffix.contains("fallbacks=1"));
+        assert!(suffix.contains("max_topk=128"));
+        assert!(suffix.contains("skipped_madds=2048"));
     }
 
     #[test]

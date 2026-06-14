@@ -17,12 +17,12 @@ use crate::{
     embedding_lookup, rms_norm, sample_top_p, streaming_tile_linear_argmax_from_model,
     streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
 };
+use crate::{RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats};
 use crate::{
     RamaRollingStats, RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep,
     RamaTransformerPhaseTimings, StreamingLinearConfig, StreamingTileLinearConfig,
     DEFAULT_STREAMING_TILE_ELEMENTS,
 };
-use crate::{RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats};
 use std::time::Instant;
 
 pub struct LlamaRamaSessionAdapter<'a> {
@@ -923,7 +923,7 @@ mod tests {
             tensor_id,
             &format!("{prefix}.mlp.gate_proj.weight"),
             vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
-            &vec![0x0000; INTERMEDIATE_SIZE * HIDDEN_SIZE],
+            &[0x0000; INTERMEDIATE_SIZE * HIDDEN_SIZE],
         );
         tensor_id += 1;
         add_bf16_tensor(
@@ -931,7 +931,7 @@ mod tests {
             tensor_id,
             &format!("{prefix}.mlp.up_proj.weight"),
             vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
-            &vec![0x0000; INTERMEDIATE_SIZE * HIDDEN_SIZE],
+            &[0x0000; INTERMEDIATE_SIZE * HIDDEN_SIZE],
         );
         tensor_id += 1;
         add_bf16_tensor(
@@ -939,7 +939,7 @@ mod tests {
             tensor_id,
             &format!("{prefix}.mlp.down_proj.weight"),
             vec![HIDDEN_SIZE as u64, INTERMEDIATE_SIZE as u64],
-            &vec![0x0000; HIDDEN_SIZE * INTERMEDIATE_SIZE],
+            &[0x0000; HIDDEN_SIZE * INTERMEDIATE_SIZE],
         );
         writer.finalize().unwrap();
     }

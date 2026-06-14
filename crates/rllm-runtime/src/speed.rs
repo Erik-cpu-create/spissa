@@ -11,9 +11,7 @@ impl RamaExperimentalSpeedConfig {
     pub fn from_env() -> Self {
         Self {
             enabled: parse_experimental_speed_enabled(
-                std::env::var(RLLM_EXPERIMENTAL_SPEED_ENV)
-                    .ok()
-                    .as_deref(),
+                std::env::var(RLLM_EXPERIMENTAL_SPEED_ENV).ok().as_deref(),
             ),
             turbo_topk: parse_turbo_topk(std::env::var(RLLM_TURBO_TOPK_ENV).ok().as_deref()),
         }
@@ -126,11 +124,7 @@ pub fn select_top_abs_indices(input: &[f32], topk: usize) -> Vec<usize> {
             .total_cmp(&left.1)
             .then_with(|| left.0.cmp(&right.0))
     });
-    let mut indices: Vec<usize> = scored
-        .into_iter()
-        .take(limit)
-        .map(|(idx, _)| idx)
-        .collect();
+    let mut indices: Vec<usize> = scored.into_iter().take(limit).map(|(idx, _)| idx).collect();
     indices.sort_unstable();
     indices
 }

@@ -968,7 +968,10 @@ mod tests {
             result.metrics.experimental_speed_stats.selected_topk_sum,
             384
         );
-        assert_eq!(result.metrics.experimental_speed_stats.max_selected_topk, 128);
+        assert_eq!(
+            result.metrics.experimental_speed_stats.max_selected_topk,
+            128
+        );
         assert_eq!(
             result
                 .metrics
