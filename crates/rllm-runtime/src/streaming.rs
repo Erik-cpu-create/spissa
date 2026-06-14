@@ -924,73 +924,103 @@ pub fn streaming_tile_linear_argmax_from_model(
             ))
         })?;
 
-        model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
-            if bytes.len() != expected_chunk_bytes {
-                return Err(RuntimeError::InvalidTensorData(format!(
-                    "chunk {} decoded byte len {} does not match metadata {}",
-                    chunk.chunk_id,
-                    bytes.len(),
-                    expected_chunk_bytes
-                )));
-            }
-            if bytes.len() % dtype_size != 0 {
-                return Err(RuntimeError::InvalidTensorData(format!(
-                    "chunk {} byte len {} is not aligned to dtype size {}",
-                    chunk.chunk_id,
-                    bytes.len(),
-                    dtype_size
-                )));
-            }
-
-            let elements_in_chunk = bytes.len() / dtype_size;
-            let mut local_element_start = 0usize;
-            while local_element_start < elements_in_chunk {
-                let tile_len = config
-                    .tile_elements
-                    .min(elements_in_chunk - local_element_start);
-                let tile_byte_start = local_element_start
-                    .checked_mul(dtype_size)
-                    .ok_or_else(|| RuntimeError::Shape("tile byte start overflow".to_string()))?;
-                let tile_byte_len = tile_len
-                    .checked_mul(dtype_size)
-                    .ok_or_else(|| RuntimeError::Shape("tile byte len overflow".to_string()))?;
-                let tile_byte_end = tile_byte_start
-                    .checked_add(tile_byte_len)
-                    .ok_or_else(|| RuntimeError::Shape("tile byte end overflow".to_string()))?;
-                let scratch_bytes = tile_len
-                    .checked_mul(std::mem::size_of::<f32>())
-                    .ok_or_else(|| RuntimeError::Shape("tile f32 scratch overflow".to_string()))?;
-                let scratch_label = format!(
-                    "streaming argmax tile f32 scratch chunk {} elements {}..{}",
-                    chunk.chunk_id,
-                    local_element_start,
-                    local_element_start + tile_len
-                );
-
-                budget.reserve(scratch_bytes, scratch_label.clone())?;
-                let weights =
-                    match decode_to_f32(tensor.dtype, &bytes[tile_byte_start..tile_byte_end]) {
-                        Ok(values) => values,
-                        Err(err) => {
-                            budget.release(scratch_bytes, scratch_label)?;
-                            return Err(err);
-                        }
-                    };
-                let result = accumulate_weight_chunk_argmax(
+        if chunk.codec_id == "rtc-raw-v1"
+            && matches!(
+                tensor.dtype,
+                rllm_container::DType::Fp16 | rllm_container::DType::Bf16
+            )
+        {
+            model.with_raw_chunk(chunk.chunk_id, budget, |compressed_bytes, _budget| {
+                if compressed_bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} raw byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        compressed_bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_raw_16bit_chunk_argmax(
                     input,
-                    &weights,
-                    element_start + local_element_start,
+                    compressed_bytes,
+                    element_start,
                     config.linear,
+                    tensor.dtype,
                     &mut state,
                     weight_name,
-                );
-                drop(weights);
-                budget.release(scratch_bytes, scratch_label)?;
-                result?;
-                local_element_start += tile_len;
-            }
-            Ok(())
-        })?;
+                )
+            })?;
+        } else {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                if bytes.len() % dtype_size != 0 {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} byte len {} is not aligned to dtype size {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        dtype_size
+                    )));
+                }
+
+                let elements_in_chunk = bytes.len() / dtype_size;
+                let mut local_element_start = 0usize;
+                while local_element_start < elements_in_chunk {
+                    let tile_len = config
+                        .tile_elements
+                        .min(elements_in_chunk - local_element_start);
+                    let tile_byte_start =
+                        local_element_start.checked_mul(dtype_size).ok_or_else(|| {
+                            RuntimeError::Shape("tile byte start overflow".to_string())
+                        })?;
+                    let tile_byte_len = tile_len
+                        .checked_mul(dtype_size)
+                        .ok_or_else(|| RuntimeError::Shape("tile byte len overflow".to_string()))?;
+                    let tile_byte_end = tile_byte_start
+                        .checked_add(tile_byte_len)
+                        .ok_or_else(|| RuntimeError::Shape("tile byte end overflow".to_string()))?;
+                    let scratch_bytes = tile_len
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or_else(|| {
+                            RuntimeError::Shape("tile f32 scratch overflow".to_string())
+                        })?;
+                    let scratch_label = format!(
+                        "streaming argmax tile f32 scratch chunk {} elements {}..{}",
+                        chunk.chunk_id,
+                        local_element_start,
+                        local_element_start + tile_len
+                    );
+
+                    budget.reserve(scratch_bytes, scratch_label.clone())?;
+                    let weights =
+                        match decode_to_f32(tensor.dtype, &bytes[tile_byte_start..tile_byte_end]) {
+                            Ok(values) => values,
+                            Err(err) => {
+                                budget.release(scratch_bytes, scratch_label)?;
+                                return Err(err);
+                            }
+                        };
+                    let result = accumulate_weight_chunk_argmax(
+                        input,
+                        &weights,
+                        element_start + local_element_start,
+                        config.linear,
+                        &mut state,
+                        weight_name,
+                    );
+                    drop(weights);
+                    budget.release(scratch_bytes, scratch_label)?;
+                    result?;
+                    local_element_start += tile_len;
+                }
+                Ok(())
+            })?;
+        }
 
         byte_offset = byte_offset
             .checked_add(expected_chunk_bytes)
@@ -2037,6 +2067,71 @@ fn accumulate_weight_chunk_argmax(
             state.current_acc += input_row[idx] * weight_row[idx];
             idx += 1;
         }
+
+        local_idx += row_len;
+        global_idx += row_len;
+        if global_idx.is_multiple_of(config.in_features) {
+            state.finish_current(config, weight_name)?;
+        }
+    }
+    Ok(())
+}
+
+fn accumulate_raw_16bit_chunk_argmax(
+    input: &[f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    dtype: rllm_container::DType,
+    state: &mut StreamingLinearArgmaxState<'_>,
+    weight_name: &str,
+) -> Result<()> {
+    if !raw_bytes.len().is_multiple_of(2) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "Raw 16-bit argmax stream for {weight_name} has odd length"
+        )));
+    }
+    if !matches!(
+        dtype,
+        rllm_container::DType::Fp16 | rllm_container::DType::Bf16
+    ) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "Raw 16-bit argmax stream for {weight_name} has unsupported dtype {dtype:?}"
+        )));
+    }
+
+    let weight_elements = raw_bytes.len() / 2;
+    let expected_weight_elements = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
+    let element_end = element_start
+        .checked_add(weight_elements)
+        .ok_or_else(|| RuntimeError::Shape("weight chunk element range overflow".to_string()))?;
+    if element_end > expected_weight_elements {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} chunk elements {element_start}..{element_end} exceed expected {expected_weight_elements}"
+        )));
+    }
+
+    let mut local_idx = 0usize;
+    let mut global_idx = element_start;
+    while local_idx < weight_elements {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        while state.current_out_feature < out_feature {
+            state.finish_current(config, weight_name)?;
+        }
+        if state.current_out_feature != out_feature {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+                out_feature, state.current_out_feature
+            )));
+        }
+
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+        state.current_acc +=
+            raw_16bit_dot_segment(input, raw_bytes, local_idx, in_feature, row_len, dtype)?;
 
         local_idx += row_len;
         global_idx += row_len;
@@ -3732,6 +3827,62 @@ mod tests {
         assert_eq!(actual, expected);
         assert_eq!(logits_budget.current_bytes(), 0);
         assert_eq!(argmax_budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_argmax_uses_raw_bf16_batch1_path() {
+        let path = temp_path("tile-linear-argmax-bf16");
+        let weight_bf16 = vec![
+            0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000, 0xbf00,
+            0x3f40,
+        ];
+        let weight_f32: Vec<f32> = weight_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "linear.argmax.bf16.weight",
+            vec![4, 3],
+            &weight_bf16,
+            14,
+        );
+        writer.finalize().unwrap();
+
+        let input = vec![1.5, -2.0, 0.25];
+        let bias = vec![0.0, 0.5, -1.0, 4.0];
+        let logits = linear(&input, &weight_f32, Some(&bias), 1, 3, 4).unwrap();
+        let expected = sample_argmax(&logits).unwrap();
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(16);
+        let actual = streaming_tile_linear_argmax_from_model(
+            &mut model,
+            "linear.argmax.bf16.weight",
+            &input,
+            Some(&bias),
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 3,
+                    out_features: 4,
+                },
+                tile_elements: 2,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(
+            budget.peak_bytes() <= 16,
+            "peak was {}",
+            budget.peak_bytes()
+        );
 
         std::fs::remove_file(&path).ok();
     }

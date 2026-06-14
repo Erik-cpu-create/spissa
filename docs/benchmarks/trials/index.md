@@ -14,6 +14,8 @@ row per trial and update the row when a report moves between status folders.
 | 2026-06-14 | 2026-06-14-r7-llama32-1b-model-comparison.md | failed | Llama-3.2-1B-Instruct-raw.rllm | exact-lowram | model shape | R7 SmolLM2 repeat 10.98/10.85 tok/s | Llama 1B turn 1 1.23 tok/s, turn 2 1.21 tok/s, token match=true | failed | useful negative result |
 | 2026-06-14 | 2026-06-14-r8-bf16-direct-projection-smollm2.md | success | SmolLM2-135M-raw.rllm | exact-lowram | raw BF16 projection | R7 repeat 10.98/10.85 tok/s | R8 primary 17.81/17.64 tok/s, repeat 17.34/17.76 tok/s, token match=true | success | useful positive evidence |
 | 2026-06-14 | 2026-06-14-r8-llama32-1b-bf16-direct-projection.md | success | Llama-3.2-1B-Instruct-raw.rllm | exact-lowram | raw BF16 projection | R7 Llama 1B 1.23/1.21 tok/s | R8 Llama 1B 1.68/1.46 tok/s, token match=true | success | useful positive evidence with limitation |
+| 2026-06-14 | 2026-06-14-r9-lm-head-argmax-smollm2.md | success | SmolLM2-135M-raw.rllm | exact-lowram | LM-head argmax memory | R8 17.81/17.64 tok/s, session peak 226492416 bytes | R9 17.15/16.86 tok/s, repeat 16.74/17.07 tok/s, session peak 113246208 bytes, token match=true | success | useful positive memory evidence with speed limitation |
+| 2026-06-14 | 2026-06-14-r9-lm-head-argmax-llama32-1b.md | success | Llama-3.2-1B-Instruct-raw.rllm | exact-lowram | LM-head argmax memory | R8 1.68/1.46 tok/s, session peak 2101346304 bytes | R9 1.65/1.71 tok/s, session peak 1050673152 bytes, token match=true | success | useful positive memory evidence with speed limitation |
 
 ## Folder Mapping
 

@@ -10,11 +10,12 @@ use crate::models::llama::model::{
 };
 use crate::rotary::KvCache;
 use crate::{
-    embedding_lookup, rms_norm, sample_argmax, sample_top_p, LazyRllmModel, MemoryBudget, Result,
-    RuntimeError,
+    embedding_lookup, rms_norm, sample_top_p, streaming_tile_linear_argmax_from_model,
+    streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
 };
 use crate::{
     RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep, RamaTransformerPhaseTimings,
+    StreamingLinearConfig, StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use std::time::Instant;
 
@@ -27,7 +28,6 @@ pub struct LlamaRamaSessionAdapter<'a> {
     vocab_size: usize,
     embedding_data: Vec<f32>,
     layer_norms: Vec<OwnedLlamaStreamingBlockParameters>,
-    lm_head_weight_data: Vec<f32>,
     caches: Vec<KvCache>,
     last_phase_timings: Option<RamaSessionPhaseTimings>,
     collect_transformer_detail_timing: bool,
@@ -190,7 +190,6 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         let embedding_data = model
             .decode_tensor(&prepared.embedding_weight, budget)?
             .data;
-        let lm_head_weight_data = model.decode_tensor(&prepared.lm_head_weight, budget)?.data;
 
         let mut layer_norms = Vec::with_capacity(prepared.layers.len());
         for i in 0..prepared.layers.len() {
@@ -226,7 +225,6 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             vocab_size,
             embedding_data,
             layer_norms,
-            lm_head_weight_data,
             caches,
             last_phase_timings: None,
             collect_transformer_detail_timing: false,
@@ -325,29 +323,48 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
 
         let phase_start = Instant::now();
         let last_hidden = &hidden[(seq_len - 1) * self.hidden_size..];
-        let mut logits = vec![0.0f32; self.vocab_size];
-        for (v, logit) in logits.iter_mut().enumerate() {
-            let row_start = v * self.hidden_size;
-            let row = &self.lm_head_weight_data[row_start..row_start + self.hidden_size];
-            let mut sum = 0.0f32;
-            for (&hidden, &weight) in last_hidden.iter().zip(row.iter()) {
-                sum += hidden * weight;
-            }
-            *logit = sum;
-        }
-        let token_id = match self.prepared.config.sampling {
-            crate::StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
+        let lm_head_config = StreamingTileLinearConfig {
+            linear: StreamingLinearConfig {
+                batch: 1,
+                in_features: self.hidden_size,
+                out_features: self.vocab_size,
+            },
+            tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+        };
+        let (token_id, logits) = match self.prepared.config.sampling {
+            crate::StreamingSamplingConfig::Argmax => (
+                streaming_tile_linear_argmax_from_model(
+                    self.model,
+                    &self.prepared.lm_head_weight,
+                    last_hidden,
+                    None,
+                    lm_head_config,
+                    budget,
+                )?,
+                None,
+            ),
             crate::StreamingSamplingConfig::TopP {
                 temperature,
                 top_p,
                 seed,
-            } => sample_top_p(&logits, temperature, top_p, seed)?,
+            } => {
+                let logits = streaming_tile_linear_from_model(
+                    self.model,
+                    &self.prepared.lm_head_weight,
+                    last_hidden,
+                    None,
+                    lm_head_config,
+                    budget,
+                )?;
+                let token_id = sample_top_p(&logits, temperature, top_p, seed)?;
+                (token_id, Some(logits))
+            }
         };
         phase_timings.lm_head_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
         self.last_phase_timings = Some(phase_timings);
         Ok(Some(RamaSessionStep {
             token_id,
-            logits: Some(logits),
+            logits,
             cached_context_len_after: self.context_len(),
         }))
     }
