@@ -17,7 +17,7 @@ use crate::streaming::{
     streaming_tile_linear_argmax_with_rolling_from_model,
 };
 use crate::{
-    embedding_lookup, rms_norm, sample_argmax, sample_top_p,
+    embedding_lookup, rms_norm, sample_argmax_excluding, sample_top_p,
     streaming_input_tiled_sparse_tile_linear_from_model, streaming_tile_linear_argmax_from_model,
     streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
 };
@@ -112,6 +112,19 @@ fn checked_projection_rows(label: &str, heads: usize, head_dim: usize) -> Result
             "llama session {label} projection row count overflow"
         ))
     })
+}
+
+fn sample_sparse_lm_head_argmax(
+    logits: &[f32],
+    appended_tokens: &[usize],
+    config: RamaExperimentalSpeedConfig,
+) -> Result<usize> {
+    let excluded_token = if config.aip_no_repeat_last && appended_tokens.len() == 1 {
+        appended_tokens.first().copied()
+    } else {
+        None
+    };
+    sample_argmax_excluding(logits, excluded_token)
 }
 
 fn validate_layer_tensor_shapes(
@@ -419,11 +432,16 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                         aip_policy: self.experimental_speed_config.aip_policy,
                         aip_topk: Some(
                             self.experimental_speed_config
-                                .topk_for_input(self.hidden_size, 128),
+                                .lm_head_topk_for_input(self.hidden_size, 128),
                         ),
+                        aip_attention_topk: None,
+                        aip_mlp_topk: None,
+                        aip_down_topk: None,
+                        aip_lm_head_topk: None,
                         aip_lm_head_rows: None,
                         aip_column_cache: false,
                         aip_input_tiles: true,
+                        aip_no_repeat_last: false,
                     };
                     match streaming_input_tiled_sparse_tile_linear_from_model(
                         self.model,
@@ -435,7 +453,11 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                         &mut experimental_speed_stats,
                         budget,
                     )? {
-                        Some(logits) => sample_argmax(&logits)?,
+                        Some(logits) => sample_sparse_lm_head_argmax(
+                            &logits,
+                            tokens,
+                            self.experimental_speed_config,
+                        )?,
                         None => {
                             if let Some(executor) = self.rolling_executor.as_mut() {
                                 let token = streaming_tile_linear_argmax_with_rolling_from_model(
@@ -1276,9 +1298,14 @@ mod tests {
             enabled: true,
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(1),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         });
 
         adapter.append_tokens(&[0], &mut budget, true).unwrap();
@@ -1288,6 +1315,32 @@ mod tests {
         assert!(stats.max_selected_topk <= 1);
 
         std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn sparse_lm_head_argmax_no_repeat_last_only_skips_decode_token() {
+        let config = crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
+            aip_lm_head_rows: None,
+            aip_column_cache: false,
+            aip_input_tiles: true,
+            aip_no_repeat_last: true,
+        };
+
+        assert_eq!(
+            sample_sparse_lm_head_argmax(&[0.1, 3.0, 2.0], &[1], config).unwrap(),
+            2
+        );
+        assert_eq!(
+            sample_sparse_lm_head_argmax(&[0.1, 3.0, 2.0], &[7, 1], config).unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1308,9 +1361,14 @@ mod tests {
             enabled: true,
             aip_policy: crate::RamaAipPolicyKind::Quality,
             aip_topk: Some(1),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         });
         quality_adapter
             .append_tokens(&[0], &mut quality_budget, true)
@@ -1329,9 +1387,14 @@ mod tests {
             enabled: true,
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(1),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         });
         speed_adapter
             .append_tokens(&[0], &mut speed_budget, true)

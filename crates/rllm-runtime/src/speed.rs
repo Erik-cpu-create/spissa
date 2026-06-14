@@ -1,9 +1,14 @@
 pub const RLLM_EXPERIMENTAL_SPEED_ENV: &str = "RLLM_EXPERIMENTAL_SPEED";
 pub const RLLM_AIP_POLICY_ENV: &str = "RLLM_AIP_POLICY";
 pub const RLLM_AIP_TOPK_ENV: &str = "RLLM_AIP_TOPK";
+pub const RLLM_AIP_ATTENTION_TOPK_ENV: &str = "RLLM_AIP_ATTENTION_TOPK";
+pub const RLLM_AIP_MLP_TOPK_ENV: &str = "RLLM_AIP_MLP_TOPK";
+pub const RLLM_AIP_DOWN_TOPK_ENV: &str = "RLLM_AIP_DOWN_TOPK";
+pub const RLLM_AIP_LM_HEAD_TOPK_ENV: &str = "RLLM_AIP_LM_HEAD_TOPK";
 pub const RLLM_AIP_LM_HEAD_ROWS_ENV: &str = "RLLM_AIP_LM_HEAD_ROWS";
 pub const RLLM_AIP_COLUMN_CACHE_ENV: &str = "RLLM_AIP_COLUMN_CACHE";
 pub const RLLM_AIP_INPUT_TILES_ENV: &str = "RLLM_AIP_INPUT_TILES";
+pub const RLLM_AIP_NO_REPEAT_LAST_ENV: &str = "RLLM_AIP_NO_REPEAT_LAST";
 pub const RLLM_TURBO_TOPK_ENV: &str = "RLLM_TURBO_TOPK";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -24,6 +29,7 @@ impl RamaAipPolicyKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RamaAipProjectionKind {
+    Attention,
     MlpGateUp,
     MlpDown,
 }
@@ -55,9 +61,14 @@ pub struct RamaExperimentalSpeedConfig {
     pub enabled: bool,
     pub aip_policy: RamaAipPolicyKind,
     pub aip_topk: Option<usize>,
+    pub aip_attention_topk: Option<usize>,
+    pub aip_mlp_topk: Option<usize>,
+    pub aip_down_topk: Option<usize>,
+    pub aip_lm_head_topk: Option<usize>,
     pub aip_lm_head_rows: Option<usize>,
     pub aip_column_cache: bool,
     pub aip_input_tiles: bool,
+    pub aip_no_repeat_last: bool,
 }
 
 impl RamaExperimentalSpeedConfig {
@@ -72,6 +83,14 @@ impl RamaExperimentalSpeedConfig {
             aip_policy: parse_aip_policy(std::env::var(RLLM_AIP_POLICY_ENV).ok().as_deref())
                 .unwrap_or_default(),
             aip_topk,
+            aip_attention_topk: parse_aip_topk(
+                std::env::var(RLLM_AIP_ATTENTION_TOPK_ENV).ok().as_deref(),
+            ),
+            aip_mlp_topk: parse_aip_topk(std::env::var(RLLM_AIP_MLP_TOPK_ENV).ok().as_deref()),
+            aip_down_topk: parse_aip_topk(std::env::var(RLLM_AIP_DOWN_TOPK_ENV).ok().as_deref()),
+            aip_lm_head_topk: parse_aip_topk(
+                std::env::var(RLLM_AIP_LM_HEAD_TOPK_ENV).ok().as_deref(),
+            ),
             aip_lm_head_rows: parse_aip_lm_head_rows(
                 std::env::var(RLLM_AIP_LM_HEAD_ROWS_ENV).ok().as_deref(),
             ),
@@ -81,6 +100,9 @@ impl RamaExperimentalSpeedConfig {
             aip_input_tiles: parse_aip_input_tiles_enabled(
                 std::env::var(RLLM_AIP_INPUT_TILES_ENV).ok().as_deref(),
             ),
+            aip_no_repeat_last: parse_aip_no_repeat_last_enabled(
+                std::env::var(RLLM_AIP_NO_REPEAT_LAST_ENV).ok().as_deref(),
+            ),
         }
     }
 
@@ -89,20 +111,49 @@ impl RamaExperimentalSpeedConfig {
             enabled: false,
             aip_policy: RamaAipPolicyKind::Quality,
             aip_topk: None,
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         }
     }
 
     pub fn topk_for_input(self, input_len: usize, default_topk: usize) -> usize {
+        self.topk_for_input_with_override(input_len, default_topk, None)
+    }
+
+    fn topk_for_input_with_override(
+        self,
+        input_len: usize,
+        default_topk: usize,
+        topk_override: Option<usize>,
+    ) -> usize {
         if input_len == 0 {
             return 0;
         }
-        self.aip_topk
+        topk_override
+            .or(self.aip_topk)
             .unwrap_or(default_topk.max(1))
             .min(input_len)
             .max(1)
+    }
+
+    pub fn topk_for_projection(
+        self,
+        projection: RamaAipProjectionKind,
+        input_len: usize,
+        default_topk: usize,
+    ) -> usize {
+        let topk_override = match projection {
+            RamaAipProjectionKind::Attention => self.aip_attention_topk,
+            RamaAipProjectionKind::MlpGateUp => self.aip_mlp_topk,
+            RamaAipProjectionKind::MlpDown => self.aip_down_topk,
+        };
+        self.topk_for_input_with_override(input_len, default_topk, topk_override)
     }
 
     pub fn aip_decision_for_projection(
@@ -118,18 +169,28 @@ impl RamaExperimentalSpeedConfig {
         }
 
         match self.aip_policy {
-            RamaAipPolicyKind::Speed => {
-                RamaAipProjectionDecision::aip(self.topk_for_input(input_len, default_topk))
-            }
+            RamaAipPolicyKind::Speed => RamaAipProjectionDecision::aip(self.topk_for_projection(
+                projection,
+                input_len,
+                default_topk,
+            )),
             RamaAipPolicyKind::Quality => {
                 if projection != RamaAipProjectionKind::MlpGateUp
                     || !quality_policy_allows_layer(layer_index, total_layers)
                 {
                     return RamaAipProjectionDecision::exact();
                 }
-                RamaAipProjectionDecision::aip(self.topk_for_input(input_len, default_topk))
+                RamaAipProjectionDecision::aip(self.topk_for_projection(
+                    projection,
+                    input_len,
+                    default_topk,
+                ))
             }
         }
+    }
+
+    pub fn lm_head_topk_for_input(self, input_len: usize, default_topk: usize) -> usize {
+        self.topk_for_input_with_override(input_len, default_topk, self.aip_lm_head_topk)
     }
 
     pub fn lm_head_prefix_rows(self, vocab_size: usize) -> Option<usize> {
@@ -323,6 +384,13 @@ pub fn parse_aip_input_tiles_enabled(value: Option<&str>) -> bool {
     )
 }
 
+pub fn parse_aip_no_repeat_last_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 pub fn parse_turbo_topk(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
@@ -389,9 +457,14 @@ mod tests {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: Some(512),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         };
         assert_eq!(config.topk_for_input(2048, 256), 512);
         assert_eq!(config.topk_for_input(128, 256), 128);
@@ -400,9 +473,14 @@ mod tests {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: None,
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         };
         assert_eq!(defaulted.topk_for_input(2048, 256), 256);
         assert_eq!(defaulted.topk_for_input(32, 256), 32);
@@ -491,14 +569,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_no_repeat_last_enabled_accepts_explicit_truthy_values() {
+        assert!(parse_aip_no_repeat_last_enabled(Some("1")));
+        assert!(parse_aip_no_repeat_last_enabled(Some("true")));
+        assert!(parse_aip_no_repeat_last_enabled(Some("yes")));
+        assert!(parse_aip_no_repeat_last_enabled(Some("on")));
+        assert!(!parse_aip_no_repeat_last_enabled(Some("0")));
+        assert!(!parse_aip_no_repeat_last_enabled(Some("false")));
+        assert!(!parse_aip_no_repeat_last_enabled(Some("")));
+        assert!(!parse_aip_no_repeat_last_enabled(None));
+    }
+
+    #[test]
     fn lm_head_prefix_rows_are_bounded_and_only_when_enabled() {
         let config = RamaExperimentalSpeedConfig {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: None,
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: Some(512),
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         };
         assert_eq!(config.lm_head_prefix_rows(128_256), Some(512));
         assert_eq!(config.lm_head_prefix_rows(512), None);
@@ -508,9 +603,14 @@ mod tests {
             enabled: false,
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: None,
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: Some(512),
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         };
         assert_eq!(disabled.lm_head_prefix_rows(128_256), None);
     }
@@ -521,9 +621,14 @@ mod tests {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Quality,
             aip_topk: Some(96),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         };
 
         assert_eq!(
@@ -550,9 +655,14 @@ mod tests {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Quality,
             aip_topk: Some(64),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         };
 
         assert_eq!(
@@ -571,9 +681,14 @@ mod tests {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: Some(128),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_lm_head_topk: None,
             aip_lm_head_rows: None,
             aip_column_cache: false,
             aip_input_tiles: false,
+            aip_no_repeat_last: false,
         };
 
         assert_eq!(
@@ -584,6 +699,37 @@ mod tests {
             config.aip_decision_for_projection(0, 1, RamaAipProjectionKind::MlpDown, 8192, 512),
             RamaAipProjectionDecision::aip(128)
         );
+    }
+
+    #[test]
+    fn projection_specific_topk_overrides_global_topk() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: Some(8),
+            aip_mlp_topk: None,
+            aip_down_topk: Some(2),
+            aip_lm_head_topk: Some(16),
+            aip_lm_head_rows: None,
+            aip_column_cache: false,
+            aip_input_tiles: false,
+            aip_no_repeat_last: false,
+        };
+
+        assert_eq!(
+            config.aip_decision_for_projection(0, 1, RamaAipProjectionKind::Attention, 2048, 128),
+            RamaAipProjectionDecision::aip(8)
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(0, 1, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::aip(4)
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(0, 1, RamaAipProjectionKind::MlpDown, 8192, 512),
+            RamaAipProjectionDecision::aip(2)
+        );
+        assert_eq!(config.lm_head_topk_for_input(2048, 128), 16);
     }
 
     #[test]
