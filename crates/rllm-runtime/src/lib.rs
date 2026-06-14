@@ -14,6 +14,7 @@ pub mod models;
 mod ops;
 mod planner;
 mod rotary;
+mod session;
 mod streaming;
 mod tensor;
 mod tiny;
@@ -45,6 +46,10 @@ pub use planner::{
 pub use rotary::{
     apply_gpt_neox_rotary_inplace, gpt_neox_rotary_dim, scaled_dot_product_attention_with_cache,
     KvAttentionConfig, KvCache, RotaryEmbeddingConfig,
+};
+pub use session::{
+    RamaChatSession, RamaSessionAdapter, RamaSessionStep, RamaSessionTurnMetrics,
+    RamaSessionTurnResult,
 };
 pub use streaming::{
     streaming_attention_from_model, streaming_attention_with_runtime_from_model,
