@@ -166,6 +166,28 @@ enum Commands {
         file: String,
     },
 
+    /// Run a scripted persistent chat-session benchmark
+    ChatSession {
+        /// Path to .rllm file
+        file: String,
+
+        /// Conversation turn text; pass this flag more than once
+        #[arg(long = "turn", required = true)]
+        turns: Vec<String>,
+
+        /// Maximum assistant tokens per turn
+        #[arg(long, default_value_t = 64)]
+        max_new_tokens: usize,
+
+        /// Maximum context length
+        #[arg(long, default_value_t = 2048)]
+        ctx: usize,
+
+        /// Markdown report output path
+        #[arg(long)]
+        out: String,
+    },
+
     /// Check system dependencies and configuration
     Doctor,
 }
@@ -243,6 +265,13 @@ fn main() -> Result<()> {
         ),
         Commands::Import { input } => commands::import::run(&input),
         Commands::Benchmark { file } => commands::benchmark::run(&file),
+        Commands::ChatSession {
+            file,
+            turns,
+            max_new_tokens,
+            ctx,
+            out,
+        } => commands::chat_session::run(&file, &turns, max_new_tokens, ctx, &out),
         Commands::Doctor => commands::doctor::run(),
     }
 }
