@@ -719,6 +719,134 @@ pub fn streaming_tile_linear_multiply_into_from_model(
     state.finish(config.linear, weight_name)
 }
 
+/// Fused LLaMA-style gated MLP input projection for raw-FP16 batch-1 decode.
+///
+/// Computes `silu(gate_proj(input)) * up_proj(input)` without materializing
+/// either projection separately. Returns `Ok(None)` when the model layout is
+/// unsupported so callers can fall back to the generic streaming linear path.
+pub fn streaming_silu_gate_up_from_model(
+    model: &mut LazyRllmModel,
+    gate_weight_name: &str,
+    up_weight_name: &str,
+    input: &[f32],
+    config: StreamingTileLinearConfig,
+    budget: &mut MemoryBudget,
+) -> Result<Option<Vec<f32>>> {
+    validate_tile_linear_config(config)?;
+    validate_linear_shapes(input, None, config.linear)?;
+    if config.linear.batch != 1 {
+        return Ok(None);
+    }
+
+    let gate_tensor = model.tensor(gate_weight_name)?.clone();
+    let up_tensor = model.tensor(up_weight_name)?.clone();
+    validate_weight_tensor(&gate_tensor, config.linear)?;
+    validate_weight_tensor(&up_tensor, config.linear)?;
+    let raw_dtype = gate_tensor.dtype;
+    if gate_tensor.dtype != up_tensor.dtype
+        || !matches!(
+            raw_dtype,
+            rllm_container::DType::Fp16 | rllm_container::DType::Bf16
+        )
+    {
+        return Ok(None);
+    }
+
+    let gate_chunks: Vec<ChunkMeta> = model.chunks_for_tensor(gate_tensor.tensor_id).to_vec();
+    let up_chunks: Vec<ChunkMeta> = model.chunks_for_tensor(up_tensor.tensor_id).to_vec();
+    if gate_chunks.is_empty() || gate_chunks.len() != up_chunks.len() {
+        return Ok(None);
+    }
+    for (gate_chunk, up_chunk) in gate_chunks.iter().zip(up_chunks.iter()) {
+        if gate_chunk.codec_id != "rtc-raw-v1"
+            || up_chunk.codec_id != "rtc-raw-v1"
+            || gate_chunk.chunk_offset_in_tensor != up_chunk.chunk_offset_in_tensor
+            || gate_chunk.uncompressed_size != up_chunk.uncompressed_size
+            || gate_chunk.compressed_size != gate_chunk.uncompressed_size
+            || up_chunk.compressed_size != up_chunk.uncompressed_size
+        {
+            return Ok(None);
+        }
+    }
+
+    let mut output = vec![0.0f32; config.linear.out_features];
+    {
+        let mut state = SiluGateUpState::new(&mut output);
+        let dtype_size = raw_dtype.size_bytes();
+        let mut byte_offset = 0usize;
+        for (gate_chunk, up_chunk) in gate_chunks.iter().zip(up_chunks.iter()) {
+            if !byte_offset.is_multiple_of(dtype_size) {
+                return Err(RuntimeError::InvalidTensorData(format!(
+                    "weight tensors {gate_weight_name}/{up_weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
+                )));
+            }
+            let element_start = byte_offset / dtype_size;
+            let expected_chunk_bytes =
+                usize::try_from(gate_chunk.uncompressed_size).map_err(|_| {
+                    RuntimeError::InvalidTensorData(format!(
+                        "chunk {} uncompressed size does not fit usize",
+                        gate_chunk.chunk_id
+                    ))
+                })?;
+
+            model.with_two_raw_chunks(
+                gate_chunk.chunk_id,
+                up_chunk.chunk_id,
+                budget,
+                |gate_bytes, up_bytes, _budget| {
+                    if gate_bytes.len() != expected_chunk_bytes {
+                        return Err(RuntimeError::InvalidTensorData(format!(
+                            "chunk {} raw byte len {} does not match metadata {}",
+                            gate_chunk.chunk_id,
+                            gate_bytes.len(),
+                            expected_chunk_bytes
+                        )));
+                    }
+                    if up_bytes.len() != expected_chunk_bytes {
+                        return Err(RuntimeError::InvalidTensorData(format!(
+                            "chunk {} raw byte len {} does not match metadata {}",
+                            up_chunk.chunk_id,
+                            up_bytes.len(),
+                            expected_chunk_bytes
+                        )));
+                    }
+                    accumulate_silu_gate_up_raw_16bit_chunk_batch1(
+                        input,
+                        gate_bytes,
+                        up_bytes,
+                        element_start,
+                        config.linear,
+                        raw_dtype,
+                        &mut state,
+                        gate_weight_name,
+                    )
+                },
+            )?;
+
+            byte_offset = byte_offset
+                .checked_add(expected_chunk_bytes)
+                .ok_or_else(|| {
+                    RuntimeError::InvalidTensorData("chunk byte offset overflow".to_string())
+                })?;
+        }
+
+        let expected_weight_bytes = config
+            .linear
+            .out_features
+            .checked_mul(config.linear.in_features)
+            .and_then(|elements| elements.checked_mul(dtype_size))
+            .ok_or_else(|| RuntimeError::Shape("weight byte size overflow".to_string()))?;
+        if byte_offset != expected_weight_bytes {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensors {gate_weight_name}/{up_weight_name} streamed {byte_offset} bytes, expected {expected_weight_bytes}"
+            )));
+        }
+        state.finish(config.linear, gate_weight_name)?;
+    }
+
+    Ok(Some(output))
+}
+
 /// Streaming single-row linear argmax without materializing full output logits.
 ///
 /// This is intended for CLI/generation argmax sampling paths where callers only
@@ -1794,6 +1922,48 @@ impl<'a> StreamingLinearMultiplyIntoState<'a> {
     }
 }
 
+struct SiluGateUpState<'a> {
+    output: &'a mut [f32],
+    current_out_feature: usize,
+    gate_acc: f32,
+    up_acc: f32,
+}
+
+impl<'a> SiluGateUpState<'a> {
+    fn new(output: &'a mut [f32]) -> Self {
+        Self {
+            output,
+            current_out_feature: 0,
+            gate_acc: 0.0,
+            up_acc: 0.0,
+        }
+    }
+
+    fn finish_current(&mut self, config: StreamingLinearConfig, weight_name: &str) -> Result<()> {
+        if self.current_out_feature >= config.out_features {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed more rows than expected {}",
+                config.out_features
+            )));
+        }
+        self.output[self.current_out_feature] = crate::ops::silu(self.gate_acc) * self.up_acc;
+        self.current_out_feature += 1;
+        self.gate_acc = 0.0;
+        self.up_acc = 0.0;
+        Ok(())
+    }
+
+    fn finish(self, config: StreamingLinearConfig, weight_name: &str) -> Result<()> {
+        if self.current_out_feature != config.out_features {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed {} complete rows, expected {}",
+                self.current_out_feature, config.out_features
+            )));
+        }
+        Ok(())
+    }
+}
+
 fn accumulate_weight_chunk_argmax(
     input: &[f32],
     weights: &[f32],
@@ -2496,6 +2666,146 @@ fn raw_fp16_dot_segment(
     Ok(acc)
 }
 
+fn accumulate_silu_gate_up_raw_16bit_chunk_batch1(
+    input: &[f32],
+    gate_raw_bytes: &[u8],
+    up_raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    dtype: rllm_container::DType,
+    state: &mut SiluGateUpState<'_>,
+    weight_name: &str,
+) -> Result<()> {
+    if !gate_raw_bytes.len().is_multiple_of(2) || !up_raw_bytes.len().is_multiple_of(2) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "Raw FP16 stream for {weight_name} has odd length"
+        )));
+    }
+    if gate_raw_bytes.len() != up_raw_bytes.len() {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "gate/up raw chunk len mismatch for {weight_name}: gate={}, up={}",
+            gate_raw_bytes.len(),
+            up_raw_bytes.len()
+        )));
+    }
+    if config.batch != 1 {
+        return Err(RuntimeError::Shape(format!(
+            "raw FP16 fused gate/up kernel requires batch=1, got {}",
+            config.batch
+        )));
+    }
+
+    let expected_weight_elements = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
+    let weight_elements = gate_raw_bytes.len() / 2;
+    let element_end = element_start
+        .checked_add(weight_elements)
+        .ok_or_else(|| RuntimeError::Shape("weight chunk element range overflow".to_string()))?;
+    if element_end > expected_weight_elements {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} chunk elements {element_start}..{element_end} exceed expected {expected_weight_elements}"
+        )));
+    }
+
+    let mut local_idx = 0usize;
+    let mut global_idx = element_start;
+    while local_idx < weight_elements {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        while state.current_out_feature < out_feature {
+            state.finish_current(config, weight_name)?;
+        }
+        if state.current_out_feature != out_feature {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+                out_feature, state.current_out_feature
+            )));
+        }
+
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+        let (gate_delta, up_delta) = raw_16bit_dot_pair_segment(
+            input,
+            gate_raw_bytes,
+            up_raw_bytes,
+            local_idx,
+            in_feature,
+            row_len,
+            dtype,
+        )?;
+        state.gate_acc += gate_delta;
+        state.up_acc += up_delta;
+
+        local_idx += row_len;
+        global_idx += row_len;
+        if global_idx.is_multiple_of(config.in_features) {
+            state.finish_current(config, weight_name)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn raw_16bit_dot_pair_segment(
+    input: &[f32],
+    first_raw_bytes: &[u8],
+    second_raw_bytes: &[u8],
+    local_idx: usize,
+    in_feature: usize,
+    row_len: usize,
+    dtype: rllm_container::DType,
+) -> Result<(f32, f32)> {
+    let mut first_acc = 0.0f32;
+    let mut second_acc = 0.0f32;
+    let mut idx = 0usize;
+    while idx + 4 <= row_len {
+        let byte_idx = (local_idx + idx) * 2;
+        let first = &first_raw_bytes[byte_idx..byte_idx + 8];
+        let second = &second_raw_bytes[byte_idx..byte_idx + 8];
+        let input_start = in_feature + idx;
+        let x0 = input[input_start];
+        let x1 = input[input_start + 1];
+        let x2 = input[input_start + 2];
+        let x3 = input[input_start + 3];
+
+        first_acc += x0 * raw_16bit_to_f32(u16::from_le_bytes([first[0], first[1]]), dtype)
+            + x1 * raw_16bit_to_f32(u16::from_le_bytes([first[2], first[3]]), dtype)
+            + x2 * raw_16bit_to_f32(u16::from_le_bytes([first[4], first[5]]), dtype)
+            + x3 * raw_16bit_to_f32(u16::from_le_bytes([first[6], first[7]]), dtype);
+        second_acc += x0 * raw_16bit_to_f32(u16::from_le_bytes([second[0], second[1]]), dtype)
+            + x1 * raw_16bit_to_f32(u16::from_le_bytes([second[2], second[3]]), dtype)
+            + x2 * raw_16bit_to_f32(u16::from_le_bytes([second[4], second[5]]), dtype)
+            + x3 * raw_16bit_to_f32(u16::from_le_bytes([second[6], second[7]]), dtype);
+        idx += 4;
+    }
+    while idx < row_len {
+        let input_value = input[in_feature + idx];
+        first_acc += input_value * raw_16bit_weight_at(first_raw_bytes, local_idx + idx, dtype);
+        second_acc += input_value * raw_16bit_weight_at(second_raw_bytes, local_idx + idx, dtype);
+        idx += 1;
+    }
+    Ok((first_acc, second_acc))
+}
+
+#[inline(always)]
+fn raw_16bit_weight_at(raw_bytes: &[u8], element_idx: usize, dtype: rllm_container::DType) -> f32 {
+    let byte_idx = element_idx * 2;
+    raw_16bit_to_f32(
+        u16::from_le_bytes([raw_bytes[byte_idx], raw_bytes[byte_idx + 1]]),
+        dtype,
+    )
+}
+
+#[inline(always)]
+fn raw_16bit_to_f32(bits: u16, dtype: rllm_container::DType) -> f32 {
+    match dtype {
+        rllm_container::DType::Fp16 => crate::tensor::fp16_to_f32(bits),
+        rllm_container::DType::Bf16 => crate::tensor::bf16_to_f32(bits),
+        _ => unreachable!("raw 16-bit kernel only supports FP16/BF16"),
+    }
+}
+
 #[inline(always)]
 fn fp16_weight_at(raw_bytes: &[u8], element_idx: usize) -> f32 {
     let byte_idx = element_idx * 2;
@@ -2784,6 +3094,10 @@ mod tests {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         bytes
+    }
+
+    fn bf16_bytes(values: &[u16]) -> Vec<u8> {
+        fp16_bytes(values)
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
@@ -3142,6 +3456,46 @@ mod tests {
             .unwrap();
     }
 
+    fn add_bf16_tensor(
+        writer: &mut RllmWriter,
+        tensor_id: u64,
+        name: &str,
+        shape: Vec<u64>,
+        values: &[u16],
+        split_at: usize,
+    ) {
+        let bytes = bf16_bytes(values);
+        writer.add_tensor(TensorMeta {
+            tensor_id,
+            name: name.to_string(),
+            shape,
+            dtype: DType::Bf16,
+            original_size_bytes: bytes.len() as u64,
+            compressed_size_bytes: bytes.len() as u64,
+            original_sha256: sha256_array(&bytes),
+            chunk_count: 2,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(
+                tensor_id,
+                "rtc-raw-v1",
+                &bytes[..split_at],
+                &bytes[..split_at],
+                0,
+            )
+            .unwrap();
+        writer
+            .write_chunk(
+                tensor_id,
+                "rtc-raw-v1",
+                &bytes[split_at..],
+                &bytes[split_at..],
+                1,
+            )
+            .unwrap();
+    }
+
     #[test]
     fn streaming_tile_linear_argmax_matches_full_logits_across_split_rows() {
         let path = temp_path("tile-linear-argmax");
@@ -3461,6 +3815,147 @@ mod tests {
 
         assert_close_vec(&target, &expected, 1e-6);
         assert_eq!(fused_budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_silu_gate_up_matches_materialized_raw_fp16_batch1() {
+        let path = temp_path("silu-gate-up-fp16-batch1");
+        let gate_fp16 = vec![
+            0x3800, 0xbc00, 0x4000, 0xc000, 0x3400, 0x3800, 0x3c00, 0x3c00, 0xbc00, 0x0000, 0xb800,
+            0x3a00,
+        ];
+        let up_fp16 = vec![
+            0x3c00, 0x3800, 0xb800, 0x3400, 0x4000, 0xbc00, 0xc000, 0x3a00, 0x3c00, 0x3800, 0x0000,
+            0xb800,
+        ];
+        let gate_f32: Vec<f32> = gate_fp16
+            .iter()
+            .map(|bits| crate::tensor::fp16_to_f32(*bits))
+            .collect();
+        let up_f32: Vec<f32> = up_fp16
+            .iter()
+            .map(|bits| crate::tensor::fp16_to_f32(*bits))
+            .collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_fp16_tensor(
+            &mut writer,
+            0,
+            "mlp.gate.weight",
+            vec![4, 3],
+            &gate_fp16,
+            14,
+        );
+        add_fp16_tensor(&mut writer, 1, "mlp.up.weight", vec![4, 3], &up_fp16, 14);
+        writer.finalize().unwrap();
+
+        let input = vec![1.5, -2.0, 0.25];
+        let mut expected = linear(&input, &gate_f32, None, 1, 3, 4).unwrap();
+        for value in &mut expected {
+            *value = crate::silu(*value);
+        }
+        let up = linear(&input, &up_f32, None, 1, 3, 4).unwrap();
+        for (gate, up) in expected.iter_mut().zip(up.iter()) {
+            *gate *= *up;
+        }
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(512);
+        let actual = streaming_silu_gate_up_from_model(
+            &mut model,
+            "mlp.gate.weight",
+            "mlp.up.weight",
+            &input,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 3,
+                    out_features: 4,
+                },
+                tile_elements: 2,
+            },
+            &mut budget,
+        )
+        .unwrap()
+        .expect("raw FP16 aligned gate/up should use fused path");
+
+        assert_close_vec(&actual, &expected, 1e-6);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_silu_gate_up_matches_materialized_raw_bf16_batch1() {
+        let path = temp_path("silu-gate-up-bf16-batch1");
+        let gate_bf16 = vec![
+            0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000, 0xbf00,
+            0x3f40,
+        ];
+        let up_bf16 = vec![
+            0x3f80, 0x3f00, 0xbf00, 0x3e80, 0x4000, 0xbf80, 0xc000, 0x3f40, 0x3f80, 0x3f00, 0x0000,
+            0xbf00,
+        ];
+        let gate_f32: Vec<f32> = gate_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let up_f32: Vec<f32> = up_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "mlp.gate.bf16.weight",
+            vec![4, 3],
+            &gate_bf16,
+            14,
+        );
+        add_bf16_tensor(
+            &mut writer,
+            1,
+            "mlp.up.bf16.weight",
+            vec![4, 3],
+            &up_bf16,
+            14,
+        );
+        writer.finalize().unwrap();
+
+        let input = vec![1.5, -2.0, 0.25];
+        let mut expected = linear(&input, &gate_f32, None, 1, 3, 4).unwrap();
+        for value in &mut expected {
+            *value = crate::silu(*value);
+        }
+        let up = linear(&input, &up_f32, None, 1, 3, 4).unwrap();
+        for (gate, up) in expected.iter_mut().zip(up.iter()) {
+            *gate *= *up;
+        }
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(512);
+        let actual = streaming_silu_gate_up_from_model(
+            &mut model,
+            "mlp.gate.bf16.weight",
+            "mlp.up.bf16.weight",
+            &input,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 3,
+                    out_features: 4,
+                },
+                tile_elements: 2,
+            },
+            &mut budget,
+        )
+        .unwrap()
+        .expect("raw BF16 aligned gate/up should use fused path");
+
+        assert_close_vec(&actual, &expected, 1e-6);
+        assert_eq!(budget.current_bytes(), 0);
 
         std::fs::remove_file(&path).ok();
     }

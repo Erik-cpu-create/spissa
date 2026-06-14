@@ -6,10 +6,10 @@ use crate::rotary::{
 };
 use crate::{
     ops::{add_inplace, rms_norm, silu_inplace},
-    scaled_dot_product_attention_with_cache, streaming_tile_linear_from_model,
-    streaming_tile_linear_multiply_into_from_model, LazyRllmModel, MemoryBudget,
-    RamaTransformerPhaseTimings, Result, StreamingLinearConfig, StreamingTileLinearConfig,
-    DEFAULT_STREAMING_TILE_ELEMENTS,
+    scaled_dot_product_attention_with_cache, streaming_silu_gate_up_from_model,
+    streaming_tile_linear_from_model, streaming_tile_linear_multiply_into_from_model,
+    LazyRllmModel, MemoryBudget, RamaTransformerPhaseTimings, Result, StreamingLinearConfig,
+    StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use std::time::Instant;
 
@@ -208,37 +208,53 @@ pub fn streaming_llama_transformer_block_with_timing(
         tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
     };
     let started = Instant::now();
-    let mut gate = streaming_tile_linear_from_model(
+    let fused_gate_up = streaming_silu_gate_up_from_model(
         model,
         &names.gate_weight,
-        &mlp_input,
-        None,
-        mlp_config,
-        budget,
-    )?;
-    if let Some(timing) = timing.as_deref_mut() {
-        timing.gate_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
-    }
-
-    let started = Instant::now();
-    silu_inplace(&mut gate);
-    if let Some(timing) = timing.as_deref_mut() {
-        timing.activation_multiply_ms += started.elapsed().as_secs_f64() * 1000.0;
-    }
-
-    let started = Instant::now();
-    streaming_tile_linear_multiply_into_from_model(
-        model,
         &names.up_weight,
         &mlp_input,
-        None,
-        &mut gate,
         mlp_config,
         budget,
     )?;
-    if let Some(timing) = timing.as_deref_mut() {
-        timing.up_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
-    }
+    let gate = if let Some(fused_gate_up) = fused_gate_up {
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.gate_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
+        fused_gate_up
+    } else {
+        let mut gate = streaming_tile_linear_from_model(
+            model,
+            &names.gate_weight,
+            &mlp_input,
+            None,
+            mlp_config,
+            budget,
+        )?;
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.gate_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
+
+        let started = Instant::now();
+        silu_inplace(&mut gate);
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.activation_multiply_ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
+
+        let started = Instant::now();
+        streaming_tile_linear_multiply_into_from_model(
+            model,
+            &names.up_weight,
+            &mlp_input,
+            None,
+            &mut gate,
+            mlp_config,
+            budget,
+        )?;
+        if let Some(timing) = timing.as_deref_mut() {
+            timing.up_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
+        }
+        gate
+    };
 
     let down_config = StreamingTileLinearConfig {
         linear: StreamingLinearConfig {
