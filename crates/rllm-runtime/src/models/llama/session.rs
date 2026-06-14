@@ -30,6 +30,7 @@ pub struct LlamaRamaSessionAdapter<'a> {
     lm_head_weight_data: Vec<f32>,
     caches: Vec<KvCache>,
     last_phase_timings: Option<RamaSessionPhaseTimings>,
+    collect_transformer_detail_timing: bool,
 }
 
 fn tensor_shape_usize(model: &LazyRllmModel, name: &str) -> Result<Vec<usize>> {
@@ -228,7 +229,12 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             lm_head_weight_data,
             caches,
             last_phase_timings: None,
+            collect_transformer_detail_timing: false,
         })
+    }
+
+    pub fn set_transformer_detail_timing(&mut self, enabled: bool) {
+        self.collect_transformer_detail_timing = enabled;
     }
 
     fn append_tokens_inner(
@@ -279,6 +285,11 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 position_offset,
             };
             let mut transformer_detail = RamaTransformerPhaseTimings::default();
+            let transformer_detail_timing = if self.collect_transformer_detail_timing {
+                Some(&mut transformer_detail)
+            } else {
+                None
+            };
             hidden = streaming_llama_transformer_block_with_timing(
                 self.model,
                 &hidden,
@@ -287,11 +298,13 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 config,
                 budget,
                 Some(&mut self.caches[i]),
-                Some(&mut transformer_detail),
+                transformer_detail_timing,
             )?;
-            phase_timings
-                .transformer_detail
-                .add_assign(transformer_detail);
+            if self.collect_transformer_detail_timing {
+                phase_timings
+                    .transformer_detail
+                    .add_assign(transformer_detail);
+            }
         }
         phase_timings.transformer_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -835,6 +848,7 @@ mod tests {
         let prepared = prepared_with_layers(1);
         let mut budget = MemoryBudget::unbounded();
         let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget).unwrap();
+        adapter.set_transformer_detail_timing(true);
 
         let step = adapter.append_tokens(&[0], &mut budget, true).unwrap();
         let timings = adapter.take_last_phase_timings().unwrap();
