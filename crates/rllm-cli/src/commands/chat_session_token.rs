@@ -120,7 +120,7 @@ pub fn run(
         });
     }
 
-    write_report(out, file, max_new_tokens, ctx, valid, &rows)?;
+    write_report(out, file, &token_turns, max_new_tokens, ctx, valid, &rows)?;
     println!("Benchmark report: {out}");
     if !valid {
         anyhow::bail!(
@@ -203,6 +203,7 @@ fn token_match_summary(baseline: &[usize], session: &[usize]) -> TokenMatchSumma
 fn write_report(
     out: &str,
     file: &str,
+    token_turns: &[Vec<usize>],
     max_new_tokens: usize,
     ctx: usize,
     valid: bool,
@@ -232,9 +233,8 @@ fn write_report(
     body.push_str("## Setup\n\n");
     body.push_str("Commands:\n\n");
     body.push_str("```bash\n");
-    body.push_str(&format!(
-        "cargo run --release -p rllm-cli -- chat-session-token `{file}` --max-new-tokens {max_new_tokens} --ctx {ctx} --out `{out}`\n"
-    ));
+    body.push_str(&replay_command(file, token_turns, max_new_tokens, ctx, out));
+    body.push('\n');
     body.push_str("```\n\n");
     body.push_str("## Results\n\n");
     body.push_str("| turn | baseline input tokens | session input tokens | baseline generated | session generated | baseline TTFT | session TTFT | baseline decode ms | session decode ms | baseline e2e ms | session e2e ms | baseline decode tok/s | session decode tok/s | baseline e2e tok/s | session e2e tok/s | token match | history match | notes |\n");
@@ -279,6 +279,39 @@ fn write_report(
     body.push_str("Use the validated token-native rows to decide whether R3 should attack replay, matmul/projection, or memory bandwidth first.\n");
     fs::write(out, body)?;
     Ok(())
+}
+
+fn format_turn_id_args(turns: &[Vec<usize>]) -> String {
+    turns
+        .iter()
+        .map(|turn| {
+            let ids = turn
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(" --turn-ids {ids}")
+        })
+        .collect::<String>()
+}
+
+fn replay_command(
+    file: &str,
+    token_turns: &[Vec<usize>],
+    max_new_tokens: usize,
+    ctx: usize,
+    out: &str,
+) -> String {
+    format!(
+        "cargo run --release -p rllm-cli -- chat-session-token {}{} --max-new-tokens {max_new_tokens} --ctx {ctx} --out {}",
+        shell_quote(file),
+        format_turn_id_args(token_turns),
+        shell_quote(out)
+    )
+}
+
+fn shell_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "'\\''"))
 }
 
 fn parse_token_turns(turns: &[String]) -> Result<Vec<Vec<usize>>> {
@@ -412,5 +445,30 @@ mod tests {
         let mismatched = token_match_summary(&[1, 2], &[1, 3]);
         assert!(!mismatched.matched);
         assert!(mismatched.note.contains("baseline=[1, 2] session=[1, 3]"));
+    }
+
+    #[test]
+    fn format_turn_id_args_replays_all_token_turns() {
+        let turns = vec![vec![1, 2], vec![3]];
+
+        assert_eq!(
+            super::format_turn_id_args(&turns),
+            " --turn-ids 1,2 --turn-ids 3"
+        );
+    }
+
+    #[test]
+    fn replay_command_uses_shell_quotes_not_markdown_backticks() {
+        let command = super::replay_command(
+            "models/space model.rllm",
+            &[vec![1]],
+            16,
+            2048,
+            "docs/benchmarks/trials/active/space out.md",
+        );
+
+        assert!(command.contains("'models/space model.rllm'"));
+        assert!(command.contains("'docs/benchmarks/trials/active/space out.md'"));
+        assert!(!command.contains('`'));
     }
 }
