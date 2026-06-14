@@ -56,16 +56,17 @@ pub use rotary::{
     KvAttentionConfig, KvCache, RotaryEmbeddingConfig,
 };
 pub use speed::{
-    parse_aip_policy, parse_aip_topk, parse_experimental_speed_enabled, parse_turbo_topk,
-    select_top_abs_indices, RamaAipPolicyKind, RamaAipProjectionDecision, RamaAipProjectionKind,
-    RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats,
+    parse_aip_lm_head_rows, parse_aip_policy, parse_aip_topk, parse_experimental_speed_enabled,
+    parse_turbo_topk, select_top_abs_indices, RamaAipPolicyKind, RamaAipProjectionDecision,
+    RamaAipProjectionKind, RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats,
 };
 pub use streaming::{
     streaming_attention_from_model, streaming_attention_with_runtime_from_model,
     streaming_linear_from_model, streaming_mlp_from_model, streaming_silu_gate_up_from_model,
     streaming_sparse_silu_gate_up_from_model, streaming_sparse_tile_linear_from_model,
-    streaming_tile_linear_argmax_from_model, streaming_tile_linear_from_model,
-    streaming_tile_linear_multiply_into_from_model, streaming_transformer_block_from_model,
+    streaming_tile_linear_argmax_from_model, streaming_tile_linear_argmax_prefix_from_model,
+    streaming_tile_linear_from_model, streaming_tile_linear_multiply_into_from_model,
+    streaming_transformer_block_from_model,
     streaming_transformer_block_with_runtime_and_timing_from_model,
     streaming_transformer_block_with_runtime_from_model, StreamingAttentionConfig,
     StreamingAttentionRuntime, StreamingBlockConfig, StreamingBlockParameters,

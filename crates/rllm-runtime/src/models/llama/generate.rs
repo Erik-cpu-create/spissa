@@ -228,6 +228,7 @@ pub fn streaming_llama_transformer_block_with_timing(
                 enabled: true,
                 aip_policy: config.experimental_speed.aip_policy,
                 aip_topk: Some(gate_up_aip_decision.topk),
+                aip_lm_head_rows: None,
             };
             streaming_sparse_silu_gate_up_from_model(
                 model,
@@ -320,6 +321,7 @@ pub fn streaming_llama_transformer_block_with_timing(
                 enabled: true,
                 aip_policy: config.experimental_speed.aip_policy,
                 aip_topk: Some(down_aip_decision.topk),
+                aip_lm_head_rows: None,
             };
             streaming_sparse_tile_linear_from_model(
                 model,
