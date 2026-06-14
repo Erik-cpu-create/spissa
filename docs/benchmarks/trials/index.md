@@ -18,6 +18,7 @@ row per trial and update the row when a report moves between status folders.
 | 2026-06-14 | 2026-06-14-r9-lm-head-argmax-llama32-1b.md | success | Llama-3.2-1B-Instruct-raw.rllm | exact-lowram | LM-head argmax memory | R8 1.68/1.46 tok/s, session peak 2101346304 bytes | R9 1.65/1.71 tok/s, session peak 1050673152 bytes, token match=true | success | useful positive memory evidence with speed limitation |
 | 2026-06-14 | 2026-06-14-r10-rowblock-lm-head-argmax-smollm2.md | success | SmolLM2-135M-raw.rllm | exact-lowram | row-blocked LM-head argmax | R9 17.15/16.86 tok/s, repeat 16.74/17.07 tok/s, peak 113246208 bytes | R10 19.01/19.17 tok/s, repeat turn 2 19.03 tok/s, peak 113246208 bytes, token match=true | success | useful positive speed and memory evidence |
 | 2026-06-14 | 2026-06-14-r10-rowblock-lm-head-argmax-llama32-1b.md | success | Llama-3.2-1B-Instruct-raw.rllm | exact-lowram | row-blocked LM-head argmax | R9 1.65/1.71 tok/s, peak 1050673152 bytes | R10 1.51/1.93 tok/s, peak 1050673152 bytes, token match=true | success | useful positive speed and memory evidence with limitation |
+| 2026-06-14 | 2026-06-14-r11-llama-test-persistent-session-smollm2.md | success | SmolLM2-135M-raw.rllm | exact-lowram | full-history replay | llama-test user run reached turn 10 prefill 13.80s, decode 17.89 tok/s | R11 scripted smoke TTFT 1.47s, 0.17s, 0.20s; decode 18.70, 20.06, 19.58 tok/s | success | useful CLI correctness and bottleneck attribution evidence |
 
 ## Folder Mapping
 

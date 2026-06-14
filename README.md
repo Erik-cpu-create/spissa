@@ -110,6 +110,13 @@ cargo test
 # Check CLI/system info
 cargo run -- doctor
 
+# Interactive LLaMA-family token-native session
+cargo run --release -p rllm-cli --bin llama-test -- \
+  --model models/SmolLM2-135M-raw.rllm
+
+cargo run --release -p rllm-cli --bin llama-test -- \
+  --model models/Llama-3.2-1B-Instruct-raw.rllm
+
 # Pack a safetensors model into .rllm
 cargo run -- pack ./models/pythia-70m/model.safetensors \
   --out ./models/pythia-70m.rllm \
