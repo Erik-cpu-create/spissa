@@ -7,9 +7,11 @@ use crate::rotary::{
 use crate::{
     ops::{add_inplace, rms_norm, silu_inplace},
     scaled_dot_product_attention_with_cache, streaming_silu_gate_up_from_model,
+    streaming_sparse_silu_gate_up_from_model, streaming_sparse_tile_linear_from_model,
     streaming_tile_linear_from_model, streaming_tile_linear_multiply_into_from_model,
-    LazyRllmModel, MemoryBudget, RamaTransformerPhaseTimings, Result, StreamingLinearConfig,
-    StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
+    LazyRllmModel, MemoryBudget, RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats,
+    RamaTransformerPhaseTimings, Result, StreamingLinearConfig, StreamingTileLinearConfig,
+    DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use std::time::Instant;
 
@@ -24,6 +26,7 @@ pub struct LlamaStreamingBlockConfig {
     pub rope_theta: f32,
     pub causal: bool,
     pub position_offset: usize,
+    pub experimental_speed: RamaExperimentalSpeedConfig,
 }
 
 pub fn streaming_llama_transformer_block(
@@ -36,7 +39,7 @@ pub fn streaming_llama_transformer_block(
     cache: Option<&mut KvCache>,
 ) -> Result<Vec<f32>> {
     streaming_llama_transformer_block_with_timing(
-        model, input, names, params, config, budget, cache, None,
+        model, input, names, params, config, budget, cache, None, None,
     )
 }
 
@@ -49,6 +52,7 @@ pub fn streaming_llama_transformer_block_with_timing(
     budget: &mut MemoryBudget,
     cache: Option<&mut KvCache>,
     mut timing: Option<&mut RamaTransformerPhaseTimings>,
+    mut experimental_speed_stats: Option<&mut RamaExperimentalSpeedStats>,
 ) -> Result<Vec<f32>> {
     if let Some(timing) = timing.as_deref_mut() {
         timing.profiled_layers = timing.profiled_layers.saturating_add(1);
@@ -208,14 +212,36 @@ pub fn streaming_llama_transformer_block_with_timing(
         tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
     };
     let started = Instant::now();
-    let fused_gate_up = streaming_silu_gate_up_from_model(
-        model,
-        &names.gate_weight,
-        &names.up_weight,
-        &mlp_input,
-        mlp_config,
-        budget,
-    )?;
+    let sparse_gate_up = if config.experimental_speed.enabled {
+        if let Some(stats) = experimental_speed_stats.as_deref_mut() {
+            streaming_sparse_silu_gate_up_from_model(
+                model,
+                &names.gate_weight,
+                &names.up_weight,
+                &mlp_input,
+                mlp_config,
+                config.experimental_speed,
+                stats,
+                budget,
+            )?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let fused_gate_up = if sparse_gate_up.is_some() {
+        sparse_gate_up
+    } else {
+        streaming_silu_gate_up_from_model(
+            model,
+            &names.gate_weight,
+            &names.up_weight,
+            &mlp_input,
+            mlp_config,
+            budget,
+        )?
+    };
     let gate = if let Some(fused_gate_up) = fused_gate_up {
         if let Some(timing) = timing.as_deref_mut() {
             timing.gate_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
@@ -265,14 +291,36 @@ pub fn streaming_llama_transformer_block_with_timing(
         tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
     };
     let started = Instant::now();
-    let down = streaming_tile_linear_from_model(
-        model,
-        &names.down_weight,
-        &gate,
-        None,
-        down_config,
-        budget,
-    )?;
+    let sparse_down = if config.experimental_speed.enabled {
+        if let Some(stats) = experimental_speed_stats.as_deref_mut() {
+            streaming_sparse_tile_linear_from_model(
+                model,
+                &names.down_weight,
+                &gate,
+                None,
+                down_config,
+                config.experimental_speed,
+                stats,
+                budget,
+            )?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let down = if let Some(sparse_down) = sparse_down {
+        sparse_down
+    } else {
+        streaming_tile_linear_from_model(
+            model,
+            &names.down_weight,
+            &gate,
+            None,
+            down_config,
+            budget,
+        )?
+    };
     if let Some(timing) = timing.as_deref_mut() {
         timing.down_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
