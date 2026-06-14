@@ -121,6 +121,12 @@ cargo run --release -p rllm-cli --bin llama-test -- \
   --ctx 2048 \
   --max-new-tokens 64
 
+# Force the runtime worker count for CPU-only benchmarks.
+RLLM_THREADS=1 cargo run --release -p rllm-cli --bin llama-test -- \
+  --model models/SmolLM2-135M-raw.rllm \
+  --ctx 2048 \
+  --max-new-tokens 16
+
 # Pack a safetensors model into .rllm
 cargo run -- pack ./models/pythia-70m/model.safetensors \
   --out ./models/pythia-70m.rllm \
