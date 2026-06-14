@@ -988,6 +988,8 @@ mod tests {
                 max_selected_topk: 64,
                 estimated_skipped_madds: 1024,
                 peak_scratch_bytes: 512,
+                lm_head_prefix_rows: 0,
+                lm_head_vocab_rows: 0,
             });
         adapter
             .experimental_speed_stats
@@ -999,6 +1001,8 @@ mod tests {
                 max_selected_topk: 128,
                 estimated_skipped_madds: 2048,
                 peak_scratch_bytes: 256,
+                lm_head_prefix_rows: 0,
+                lm_head_vocab_rows: 0,
             });
         let mut session = RamaChatSession::new(adapter);
         let mut budget = MemoryBudget::unbounded();

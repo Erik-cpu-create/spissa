@@ -863,6 +863,182 @@ pub fn streaming_tile_linear_argmax_from_model(
     )
 }
 
+/// Experimental argmax over only the first `prefix_out_features` rows.
+///
+/// This is an approximate research path for LM-head shortlist experiments. It
+/// keeps the stored weight tensor unchanged but streams only a row prefix.
+pub fn streaming_tile_linear_argmax_prefix_from_model(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    bias: Option<&[f32]>,
+    config: StreamingTileLinearConfig,
+    prefix_out_features: usize,
+    budget: &mut MemoryBudget,
+) -> Result<usize> {
+    validate_tile_linear_config(config)?;
+    if prefix_out_features == 0 || prefix_out_features > config.linear.out_features {
+        return Err(RuntimeError::Shape(format!(
+            "streaming linear prefix argmax rows {prefix_out_features} must be in 1..={}",
+            config.linear.out_features
+        )));
+    }
+    if config.linear.batch != 1 {
+        return Err(RuntimeError::Shape(format!(
+            "streaming linear prefix argmax requires batch=1, got {}",
+            config.linear.batch
+        )));
+    }
+
+    let prefix_linear = StreamingLinearConfig {
+        batch: config.linear.batch,
+        in_features: config.linear.in_features,
+        out_features: prefix_out_features,
+    };
+    validate_linear_shapes(input, bias, prefix_linear)?;
+
+    let tensor = model.tensor(weight_name)?.clone();
+    if tensor.shape.len() != 2 {
+        return Err(RuntimeError::Shape(format!(
+            "weight tensor {} must be rank-2 [out,in], got {:?}",
+            tensor.name, tensor.shape
+        )));
+    }
+    let tensor_out = usize::try_from(tensor.shape[0])
+        .map_err(|_| RuntimeError::Shape("weight out_features overflows usize".to_string()))?;
+    let tensor_in = usize::try_from(tensor.shape[1])
+        .map_err(|_| RuntimeError::Shape("weight in_features overflows usize".to_string()))?;
+    if tensor_out != config.linear.out_features || tensor_in != config.linear.in_features {
+        return Err(RuntimeError::Shape(format!(
+            "weight tensor {} shape {:?} does not match requested [{}, {}]",
+            tensor.name, tensor.shape, config.linear.out_features, config.linear.in_features
+        )));
+    }
+
+    let chunks: Vec<ChunkMeta> = model.chunks_for_tensor(tensor.tensor_id).to_vec();
+    if chunks.is_empty() {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} has no chunks"
+        )));
+    }
+
+    let dtype_size = tensor.dtype.size_bytes();
+    let prefix_weight_bytes = prefix_out_features
+        .checked_mul(config.linear.in_features)
+        .and_then(|elements| elements.checked_mul(dtype_size))
+        .ok_or_else(|| RuntimeError::Shape("prefix weight byte size overflow".to_string()))?;
+    let mut byte_offset = 0usize;
+    let mut streamed_prefix_bytes = 0usize;
+    let mut state = StreamingLinearArgmaxState::new(bias);
+
+    for chunk in chunks {
+        if streamed_prefix_bytes >= prefix_weight_bytes {
+            break;
+        }
+        if !byte_offset.is_multiple_of(dtype_size) {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} prefix stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
+            )));
+        }
+        let element_start = byte_offset / dtype_size;
+        let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} uncompressed size does not fit usize",
+                chunk.chunk_id
+            ))
+        })?;
+        let remaining_prefix_bytes = prefix_weight_bytes - streamed_prefix_bytes;
+        let bytes_to_stream = expected_chunk_bytes.min(remaining_prefix_bytes);
+
+        if chunk.codec_id == "rtc-raw-v1"
+            && matches!(
+                tensor.dtype,
+                rllm_container::DType::Fp16 | rllm_container::DType::Bf16
+            )
+        {
+            model.with_raw_chunk(chunk.chunk_id, budget, |compressed_bytes, _budget| {
+                if compressed_bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} raw byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        compressed_bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_raw_16bit_chunk_argmax(
+                    input,
+                    &compressed_bytes[..bytes_to_stream],
+                    element_start,
+                    prefix_linear,
+                    tensor.dtype,
+                    &mut state,
+                    weight_name,
+                    None,
+                )
+            })?;
+        } else {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                if bytes_to_stream % dtype_size != 0 {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "prefix byte len {bytes_to_stream} is not aligned to dtype size {dtype_size}"
+                    )));
+                }
+
+                let elements_to_stream = bytes_to_stream / dtype_size;
+                let scratch_bytes = elements_to_stream
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| RuntimeError::Shape("prefix f32 scratch overflow".to_string()))?;
+                let scratch_label = format!(
+                    "streaming prefix argmax f32 scratch chunk {} elements 0..{}",
+                    chunk.chunk_id, elements_to_stream
+                );
+                budget.reserve(scratch_bytes, scratch_label.clone())?;
+                let weights = match decode_to_f32(tensor.dtype, &bytes[..bytes_to_stream]) {
+                    Ok(values) => values,
+                    Err(err) => {
+                        budget.release(scratch_bytes, scratch_label)?;
+                        return Err(err);
+                    }
+                };
+                let result = accumulate_weight_chunk_argmax(
+                    input,
+                    &weights,
+                    element_start,
+                    prefix_linear,
+                    &mut state,
+                    weight_name,
+                );
+                drop(weights);
+                budget.release(scratch_bytes, scratch_label)?;
+                result
+            })?;
+        }
+
+        streamed_prefix_bytes = streamed_prefix_bytes
+            .checked_add(bytes_to_stream)
+            .ok_or_else(|| RuntimeError::InvalidTensorData("prefix byte stream overflow".to_string()))?;
+        byte_offset = byte_offset
+            .checked_add(expected_chunk_bytes)
+            .ok_or_else(|| RuntimeError::InvalidTensorData("chunk byte offset overflow".to_string()))?;
+    }
+
+    if streamed_prefix_bytes != prefix_weight_bytes {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} streamed {streamed_prefix_bytes} prefix bytes, expected {prefix_weight_bytes}"
+        )));
+    }
+
+    state.finish(prefix_linear, weight_name)
+}
+
 pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
     model: &mut LazyRllmModel,
     weight_name: &str,

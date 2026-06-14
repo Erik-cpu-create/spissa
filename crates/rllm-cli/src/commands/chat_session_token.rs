@@ -250,6 +250,14 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
         String::new()
     } else {
         let policy_str = stats.aip_policy.map(|p| p.as_str()).unwrap_or("none");
+        let lm_head_note = if stats.lm_head_prefix_rows > 0 {
+            format!(
+                " aip_lm_head_rows={}/{}",
+                stats.lm_head_prefix_rows, stats.lm_head_vocab_rows
+            )
+        } else {
+            String::new()
+        };
         format!(
             " aip_policy={} aip_calls={} aip_fallbacks={} aip_max_topk={} aip_skipped_madds={} aip_scratch_bytes={}",
             policy_str,
@@ -259,6 +267,7 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
             stats.estimated_skipped_madds,
             stats.peak_scratch_bytes
         )
+        + &lm_head_note
     }
 }
 
@@ -598,12 +607,15 @@ mod tests {
             max_selected_topk: 128,
             estimated_skipped_madds: 2048,
             peak_scratch_bytes: 512,
+            lm_head_prefix_rows: 512,
+            lm_head_vocab_rows: 128_256,
         });
 
         assert!(note.contains("aip_policy=quality"));
         assert!(note.contains("aip_calls=4"));
         assert!(note.contains("aip_fallbacks=1"));
         assert!(note.contains("aip_max_topk=128"));
+        assert!(note.contains("aip_lm_head_rows=512/128256"));
     }
 
     #[test]

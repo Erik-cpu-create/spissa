@@ -486,6 +486,57 @@ mod tests {
     }
 
     #[test]
+    fn streaming_tile_linear_argmax_prefix_scans_only_requested_rows() {
+        let path = temp_path("tile-linear-argmax-prefix");
+        let weight = vec![
+            0.5, -1.0, 2.0, -2.0, 0.25, 0.5, 1.0, 1.0, -1.0, 0.0, -0.5, 0.75,
+        ];
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_f32_tensor(
+            &mut writer,
+            0,
+            "linear.argmax.prefix.weight",
+            vec![4, 3],
+            &weight,
+            20,
+        );
+        writer.finalize().unwrap();
+
+        let input = vec![1.5, -2.0, 0.25];
+        let full_bias = vec![0.0, 0.5, -1.0, 4.0];
+        let prefix_bias = vec![0.0, 0.5, -1.0];
+        let full_logits = linear(&input, &weight, Some(&full_bias), 1, 3, 4).unwrap();
+        assert_eq!(sample_argmax(&full_logits).unwrap(), 3);
+        let expected_prefix = sample_argmax(&full_logits[..3]).unwrap();
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(256);
+
+        let actual = streaming_tile_linear_argmax_prefix_from_model(
+            &mut model,
+            "linear.argmax.prefix.weight",
+            &input,
+            Some(&prefix_bias),
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 3,
+                    out_features: 4,
+                },
+                tile_elements: 2,
+            },
+            3,
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected_prefix);
+        assert_ne!(actual, 3);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn streaming_tile_linear_argmax_uses_raw_bf16_batch1_path() {
         let path = temp_path("tile-linear-argmax-bf16");
         let weight_bf16 = vec![
@@ -1256,6 +1307,7 @@ mod tests {
                 enabled: true,
                 aip_policy: crate::RamaAipPolicyKind::Speed,
                 aip_topk: Some(2),
+                aip_lm_head_rows: None,
             },
             &mut stats,
             &mut budget,
@@ -1324,6 +1376,7 @@ mod tests {
                 enabled: true,
                 aip_policy: crate::RamaAipPolicyKind::Speed,
                 aip_topk: Some(2),
+                aip_lm_head_rows: None,
             },
             &mut stats,
             &mut budget,

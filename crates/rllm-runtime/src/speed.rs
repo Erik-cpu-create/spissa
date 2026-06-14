@@ -1,6 +1,7 @@
 pub const RLLM_EXPERIMENTAL_SPEED_ENV: &str = "RLLM_EXPERIMENTAL_SPEED";
 pub const RLLM_AIP_POLICY_ENV: &str = "RLLM_AIP_POLICY";
 pub const RLLM_AIP_TOPK_ENV: &str = "RLLM_AIP_TOPK";
+pub const RLLM_AIP_LM_HEAD_ROWS_ENV: &str = "RLLM_AIP_LM_HEAD_ROWS";
 pub const RLLM_TURBO_TOPK_ENV: &str = "RLLM_TURBO_TOPK";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -52,6 +53,7 @@ pub struct RamaExperimentalSpeedConfig {
     pub enabled: bool,
     pub aip_policy: RamaAipPolicyKind,
     pub aip_topk: Option<usize>,
+    pub aip_lm_head_rows: Option<usize>,
 }
 
 impl RamaExperimentalSpeedConfig {
@@ -66,6 +68,9 @@ impl RamaExperimentalSpeedConfig {
             aip_policy: parse_aip_policy(std::env::var(RLLM_AIP_POLICY_ENV).ok().as_deref())
                 .unwrap_or_default(),
             aip_topk,
+            aip_lm_head_rows: parse_aip_lm_head_rows(
+                std::env::var(RLLM_AIP_LM_HEAD_ROWS_ENV).ok().as_deref(),
+            ),
         }
     }
 
@@ -74,6 +79,7 @@ impl RamaExperimentalSpeedConfig {
             enabled: false,
             aip_policy: RamaAipPolicyKind::Quality,
             aip_topk: None,
+            aip_lm_head_rows: None,
         }
     }
 
@@ -113,6 +119,15 @@ impl RamaExperimentalSpeedConfig {
             }
         }
     }
+
+    pub fn lm_head_prefix_rows(self, vocab_size: usize) -> Option<usize> {
+        if !self.enabled || vocab_size == 0 {
+            return None;
+        }
+        self.aip_lm_head_rows
+            .map(|rows| rows.min(vocab_size).max(1))
+            .filter(|rows| *rows < vocab_size)
+    }
 }
 
 fn quality_policy_allows_layer(layer_index: usize, total_layers: usize) -> bool {
@@ -132,6 +147,8 @@ pub struct RamaExperimentalSpeedStats {
     pub max_selected_topk: usize,
     pub estimated_skipped_madds: usize,
     pub peak_scratch_bytes: usize,
+    pub lm_head_prefix_rows: usize,
+    pub lm_head_vocab_rows: usize,
 }
 
 impl RamaExperimentalSpeedStats {
@@ -151,6 +168,10 @@ impl RamaExperimentalSpeedStats {
             .estimated_skipped_madds
             .saturating_add(other.estimated_skipped_madds);
         self.peak_scratch_bytes = self.peak_scratch_bytes.max(other.peak_scratch_bytes);
+        if self.lm_head_prefix_rows == 0 {
+            self.lm_head_prefix_rows = other.lm_head_prefix_rows;
+            self.lm_head_vocab_rows = other.lm_head_vocab_rows;
+        }
     }
 
     pub fn record_sparse_projection(
@@ -182,6 +203,13 @@ impl RamaExperimentalSpeedStats {
         }
     }
 
+    pub fn record_lm_head_prefix(&mut self, prefix_rows: usize, vocab_rows: usize) {
+        if prefix_rows > 0 {
+            self.lm_head_prefix_rows = prefix_rows;
+            self.lm_head_vocab_rows = vocab_rows;
+        }
+    }
+
     pub fn is_empty(self) -> bool {
         self.aip_policy.is_none()
             && self.sparse_projection_calls == 0
@@ -190,6 +218,8 @@ impl RamaExperimentalSpeedStats {
             && self.max_selected_topk == 0
             && self.estimated_skipped_madds == 0
             && self.peak_scratch_bytes == 0
+            && self.lm_head_prefix_rows == 0
+            && self.lm_head_vocab_rows == 0
     }
 }
 
@@ -212,6 +242,10 @@ pub fn parse_aip_topk(value: Option<&str>) -> Option<usize> {
     value
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
+}
+
+pub fn parse_aip_lm_head_rows(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
 }
 
 pub fn parse_turbo_topk(value: Option<&str>) -> Option<usize> {
@@ -280,6 +314,7 @@ mod tests {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: Some(512),
+            aip_lm_head_rows: None,
         };
         assert_eq!(config.topk_for_input(2048, 256), 512);
         assert_eq!(config.topk_for_input(128, 256), 128);
@@ -288,6 +323,7 @@ mod tests {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: None,
+            aip_lm_head_rows: None,
         };
         assert_eq!(defaulted.topk_for_input(2048, 256), 256);
         assert_eq!(defaulted.topk_for_input(32, 256), 32);
@@ -342,11 +378,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_lm_head_rows_keeps_only_positive_values() {
+        assert_eq!(parse_aip_lm_head_rows(Some("4096")), Some(4096));
+        assert_eq!(parse_aip_lm_head_rows(Some("1")), Some(1));
+        assert_eq!(parse_aip_lm_head_rows(Some("0")), None);
+        assert_eq!(parse_aip_lm_head_rows(Some("-2")), None);
+        assert_eq!(parse_aip_lm_head_rows(Some("bad")), None);
+        assert_eq!(parse_aip_lm_head_rows(None), None);
+    }
+
+    #[test]
+    fn lm_head_prefix_rows_are_bounded_and_only_when_enabled() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: None,
+            aip_lm_head_rows: Some(512),
+        };
+        assert_eq!(config.lm_head_prefix_rows(128_256), Some(512));
+        assert_eq!(config.lm_head_prefix_rows(512), None);
+        assert_eq!(config.lm_head_prefix_rows(256), None);
+
+        let disabled = RamaExperimentalSpeedConfig {
+            enabled: false,
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: None,
+            aip_lm_head_rows: Some(512),
+        };
+        assert_eq!(disabled.lm_head_prefix_rows(128_256), None);
+    }
+
+    #[test]
     fn quality_policy_uses_only_middle_layer_gate_up() {
         let config = RamaExperimentalSpeedConfig {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Quality,
             aip_topk: Some(96),
+            aip_lm_head_rows: None,
         };
 
         assert_eq!(
@@ -373,6 +441,7 @@ mod tests {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Quality,
             aip_topk: Some(64),
+            aip_lm_head_rows: None,
         };
 
         assert_eq!(
@@ -391,6 +460,7 @@ mod tests {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: Some(128),
+            aip_lm_head_rows: None,
         };
 
         assert_eq!(

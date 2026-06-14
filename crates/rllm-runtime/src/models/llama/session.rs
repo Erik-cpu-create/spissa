@@ -12,7 +12,10 @@ use crate::rolling::RollingExecutor;
 #[cfg(test)]
 use crate::rolling::RollingExecutorConfig;
 use crate::rotary::KvCache;
-use crate::streaming::streaming_tile_linear_argmax_with_rolling_from_model;
+use crate::streaming::{
+    streaming_tile_linear_argmax_prefix_from_model,
+    streaming_tile_linear_argmax_with_rolling_from_model,
+};
 use crate::{
     embedding_lookup, rms_norm, sample_top_p, streaming_tile_linear_argmax_from_model,
     streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
@@ -381,7 +384,23 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         };
         let (token_id, logits) = match self.prepared.config.sampling {
             crate::StreamingSamplingConfig::Argmax => {
-                let token_id = if let Some(executor) = self.rolling_executor.as_mut() {
+                let token_id = if let Some(prefix_rows) = self
+                    .experimental_speed_config
+                    .lm_head_prefix_rows(self.vocab_size)
+                {
+                    experimental_speed_stats
+                        .record_aip_policy(self.experimental_speed_config.aip_policy);
+                    experimental_speed_stats.record_lm_head_prefix(prefix_rows, self.vocab_size);
+                    streaming_tile_linear_argmax_prefix_from_model(
+                        self.model,
+                        &self.prepared.lm_head_weight,
+                        last_hidden,
+                        None,
+                        lm_head_config,
+                        prefix_rows,
+                        budget,
+                    )?
+                } else if let Some(executor) = self.rolling_executor.as_mut() {
                     let token = streaming_tile_linear_argmax_with_rolling_from_model(
                         self.model,
                         &self.prepared.lm_head_weight,
@@ -1196,6 +1215,7 @@ mod tests {
             enabled: true,
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(1),
+            aip_lm_head_rows: None,
         });
 
         adapter.append_tokens(&[0], &mut budget, true).unwrap();
@@ -1225,6 +1245,7 @@ mod tests {
             enabled: true,
             aip_policy: crate::RamaAipPolicyKind::Quality,
             aip_topk: Some(1),
+            aip_lm_head_rows: None,
         });
         quality_adapter
             .append_tokens(&[0], &mut quality_budget, true)
@@ -1243,6 +1264,7 @@ mod tests {
             enabled: true,
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(1),
+            aip_lm_head_rows: None,
         });
         speed_adapter
             .append_tokens(&[0], &mut speed_budget, true)
