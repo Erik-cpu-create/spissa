@@ -33,11 +33,30 @@ pub struct RamaSessionTurnResult {
     pub metrics: RamaSessionTurnMetrics,
 }
 
+/// Model-specific adapter used by [`RamaChatSession`] to append tokens into a
+/// cached runtime context.
+///
+/// Implementations must make each [`Self::append_tokens`] call transactional:
+/// session retry safety depends on adapter state either advancing exactly as
+/// specified for a successful append or being fully rolled back before return.
 pub trait RamaSessionAdapter {
     fn context_len(&self) -> usize;
     fn max_seq_len(&self) -> usize;
     fn context_memory_bytes(&self) -> usize;
 
+    /// Append `tokens` to the adapter's cached context.
+    ///
+    /// On a protocol-valid success, the adapter context length must increase by
+    /// exactly `tokens.len()` tokens. When `emit_logits` is `true`, this method
+    /// must return `Ok(Some(step))`, where `step.token_id` is the sampled next
+    /// token from the final appended token. When `emit_logits` is `false`, this
+    /// method must return `Ok(None)`.
+    ///
+    /// Any `Err`, `emit_logits == true` returning `Ok(None)`, or
+    /// `emit_logits == false` returning `Ok(Some(_))` must leave adapter state
+    /// unchanged from the call boundary. Real adapters with multi-layer KV cache
+    /// must checkpoint and roll back all internal cache writes before returning
+    /// one of those failure or protocol-invalid outcomes.
     fn append_tokens(
         &mut self,
         tokens: &[usize],
@@ -145,6 +164,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
         self.token_history.push(first_step.token_id);
         self.pending_uncached_token = Some(first_step.token_id);
         if !on_token(first_step.token_id) {
+            let end_to_end_ms = turn_start.elapsed().as_secs_f64() * 1000.0;
             return Ok(self.turn_result(
                 user_token_ids,
                 generated_token_ids,
@@ -157,9 +177,9 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     ttft_ms,
                     prefill_ms,
                     decode_ms: 0.0,
-                    end_to_end_ms: turn_start.elapsed().as_secs_f64() * 1000.0,
+                    end_to_end_ms,
                     decode_tok_s: 0.0,
-                    end_to_end_tok_s: 1000.0 / ttft_ms.max(f64::EPSILON),
+                    end_to_end_tok_s: 1.0 / (end_to_end_ms / 1000.0).max(f64::EPSILON),
                     context_memory_bytes: self.adapter.context_memory_bytes(),
                     peak_transient_bytes: budget.peak_bytes(),
                 },
@@ -401,6 +421,107 @@ mod tests {
         assert!(result.is_err());
         assert!(session.token_history().is_empty());
         assert!(session.adapter().appends.is_empty());
+    }
+
+    #[test]
+    fn empty_input_is_rejected_before_mutating_adapter_or_history() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16));
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session.generate_turn(&[], 1, &mut budget, |_| true);
+
+        assert!(matches!(result, Err(RuntimeError::InvalidTensorData(_))));
+        assert!(session.token_history().is_empty());
+        assert_eq!(session.pending_uncached_token(), None);
+        assert!(session.adapter().appends.is_empty());
+    }
+
+    #[test]
+    fn zero_max_new_tokens_is_rejected_before_mutating_adapter_or_history() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16));
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session.generate_turn(&[1], 0, &mut budget, |_| true);
+
+        assert!(matches!(result, Err(RuntimeError::InvalidTensorData(_))));
+        assert!(session.token_history().is_empty());
+        assert_eq!(session.pending_uncached_token(), None);
+        assert!(session.adapter().appends.is_empty());
+    }
+
+    #[test]
+    fn first_turn_prefill_error_preserves_empty_visible_state() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16).with_fault(
+            &[1, 2],
+            true,
+            AppendFaultKind::Error,
+        ));
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session.generate_turn(&[1, 2], 1, &mut budget, |_| true);
+
+        assert!(result.is_err());
+        assert!(session.token_history().is_empty());
+        assert_eq!(session.pending_uncached_token(), None);
+        assert_eq!(session.cached_context_len(), 0);
+        assert!(session.adapter().appends.is_empty());
+    }
+
+    #[test]
+    fn first_turn_prefill_none_preserves_empty_visible_state() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16).with_fault(
+            &[1, 2],
+            true,
+            AppendFaultKind::None,
+        ));
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session.generate_turn(&[1, 2], 1, &mut budget, |_| true);
+
+        assert!(result.is_err());
+        assert!(session.token_history().is_empty());
+        assert_eq!(session.pending_uncached_token(), None);
+        assert_eq!(session.cached_context_len(), 0);
+        assert!(session.adapter().appends.is_empty());
+    }
+
+    #[test]
+    fn second_turn_prefill_error_after_flush_keeps_coherent_retry_state() {
+        let mut session = RamaChatSession::new(RecordingAdapter::new(16).with_fault(
+            &[2],
+            true,
+            AppendFaultKind::Error,
+        ));
+        let mut budget = MemoryBudget::unbounded();
+
+        session
+            .generate_turn(&[1], 1, &mut budget, |_| true)
+            .unwrap();
+        assert_eq!(session.pending_uncached_token(), Some(101));
+        assert_eq!(session.cached_context_len(), 1);
+
+        let result = session.generate_turn(&[2], 1, &mut budget, |_| true);
+
+        assert!(result.is_err());
+        assert_eq!(session.pending_uncached_token(), None);
+        assert_eq!(session.token_history(), &[1, 101]);
+        assert_eq!(session.cached_context_len(), 2);
+        assert_eq!(
+            session.adapter().appends,
+            vec![(vec![1], true), (vec![101], false)]
+        );
+
+        let retry = session
+            .generate_turn(&[2], 1, &mut budget, |_| true)
+            .unwrap();
+        assert_eq!(retry.metrics.flushed_pending_tokens, 0);
+        assert_eq!(retry.generated_token_ids, [103]);
+        assert_eq!(session.pending_uncached_token(), Some(103));
+        assert_eq!(session.token_history(), &[1, 101, 2, 103]);
+        assert_eq!(
+            session.adapter().appends,
+            vec![(vec![1], true), (vec![101], false), (vec![2], true)]
+        );
     }
 
     #[test]
