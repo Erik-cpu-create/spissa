@@ -6,7 +6,7 @@ row per trial and update the row when a report moves between status folders.
 | date | trial | folder | model | mode | bottleneck tag | baseline | result | decision | paper value |
 |---|---|---|---|---|---|---|---|---|---|
 | YYYY-MM-DD | example-trial.md | active | model/artifact | exact-lowram | memory bandwidth | baseline metric | trial metric | planned | not paper-worthy yet |
-| 2026-06-14 | 2026-06-14-r1-session-smollm2.md | success | SmolLM2-135M-raw.rllm | exact-lowram | cache locality | turn 2 TTFT 1990.00 ms, decode 7.16 tok/s | turn 2 TTFT 307.86 ms, decode 8.81 tok/s, replayed_tokens=0 | accepted | use as positive evidence |
+| 2026-06-14 | 2026-06-14-r1-session-smollm2.md | inconclusive | SmolLM2-135M-raw.rllm | exact-lowram | tokenizer | turn 2 TTFT 1990.00 ms, decode 7.16 tok/s | strict text transcript validation failed before turn 2 | inconclusive | use as limitation |
 
 ## Folder Mapping
 

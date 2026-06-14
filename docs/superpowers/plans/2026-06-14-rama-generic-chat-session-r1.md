@@ -10,6 +10,8 @@
 
 **Execution Status:** Completed on 2026-06-14. Implementation, review, and first
 SmolLM2 benchmark evidence are recorded in the linked benchmark trial report.
+The first text-transcript benchmark is classified as inconclusive because
+strict tokenizer equivalence failed before turn 2.
 
 ---
 
