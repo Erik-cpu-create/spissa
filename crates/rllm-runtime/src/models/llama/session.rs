@@ -13,7 +13,8 @@ use crate::{
     embedding_lookup, rms_norm, sample_argmax, sample_top_p, LazyRllmModel, MemoryBudget, Result,
     RuntimeError,
 };
-use crate::{RamaSessionAdapter, RamaSessionStep};
+use crate::{RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep};
+use std::time::Instant;
 
 pub struct LlamaRamaSessionAdapter<'a> {
     model: &'a mut LazyRllmModel,
@@ -26,6 +27,7 @@ pub struct LlamaRamaSessionAdapter<'a> {
     layer_norms: Vec<OwnedLlamaStreamingBlockParameters>,
     lm_head_weight_data: Vec<f32>,
     caches: Vec<KvCache>,
+    last_phase_timings: Option<RamaSessionPhaseTimings>,
 }
 
 fn tensor_shape_usize(model: &LazyRllmModel, name: &str) -> Result<Vec<usize>> {
@@ -223,6 +225,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             layer_norms,
             lm_head_weight_data,
             caches,
+            last_phase_timings: None,
         })
     }
 
@@ -249,12 +252,17 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             )));
         }
 
+        let mut phase_timings = RamaSessionPhaseTimings::default();
+        let phase_start = Instant::now();
         let mut hidden = embedding_lookup(
             &self.embedding_data,
             self.vocab_size,
             self.hidden_size,
             tokens,
         )?;
+        phase_timings.embedding_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
+
+        let phase_start = Instant::now();
         for (i, layer_names) in self.prepared.layers.iter().enumerate() {
             let config = LlamaStreamingBlockConfig {
                 seq_len,
@@ -278,11 +286,14 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 Some(&mut self.caches[i]),
             )?;
         }
+        phase_timings.transformer_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
         if !emit_logits {
+            self.last_phase_timings = Some(phase_timings);
             return Ok(None);
         }
 
+        let phase_start = Instant::now();
         let hidden = rms_norm(
             &hidden,
             &self.prepared.final_layernorm_weight,
@@ -290,6 +301,9 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             self.hidden_size,
             self.prepared.config.rms_norm_eps,
         )?;
+        phase_timings.final_norm_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
+
+        let phase_start = Instant::now();
         let last_hidden = &hidden[(seq_len - 1) * self.hidden_size..];
         let mut logits = vec![0.0f32; self.vocab_size];
         for (v, logit) in logits.iter_mut().enumerate() {
@@ -309,6 +323,8 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 seed,
             } => sample_top_p(&logits, temperature, top_p, seed)?,
         };
+        phase_timings.lm_head_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
+        self.last_phase_timings = Some(phase_timings);
         Ok(Some(RamaSessionStep {
             token_id,
             logits: Some(logits),
@@ -336,6 +352,7 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
         budget: &mut MemoryBudget,
         emit_logits: bool,
     ) -> Result<Option<RamaSessionStep>> {
+        self.last_phase_timings = None;
         let old_lens: Vec<usize> = self.caches.iter().map(KvCache::len).collect();
         match self.append_tokens_inner(tokens, budget, emit_logits) {
             Ok(step) => Ok(step),
@@ -343,9 +360,14 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
                 for (cache, len) in self.caches.iter_mut().zip(old_lens) {
                     let _ = cache.truncate(len);
                 }
+                self.last_phase_timings = None;
                 Err(error)
             }
         }
+    }
+
+    fn take_last_phase_timings(&mut self) -> Option<RamaSessionPhaseTimings> {
+        self.last_phase_timings.take()
     }
 }
 
@@ -795,6 +817,44 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(adapter.context_len(), 0);
         assert_eq!(adapter.context_memory_bytes(), 0);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_records_phase_timings_for_logits_append() {
+        let path = temp_path("phase-timing-logits");
+        write_post_cache_failure_model(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(1);
+        let mut budget = MemoryBudget::unbounded();
+        let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget).unwrap();
+
+        let step = adapter.append_tokens(&[0], &mut budget, true).unwrap();
+        let timings = adapter.take_last_phase_timings().unwrap();
+
+        assert!(step.is_some());
+        assert!(timings.embedding_ms >= 0.0);
+        assert!(timings.transformer_ms >= 0.0);
+        assert!(timings.final_norm_ms >= 0.0);
+        assert!(timings.lm_head_ms >= 0.0);
+        assert!(timings.total_ms() >= 0.0);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_clears_phase_timings_after_failed_append() {
+        let path = temp_path("phase-timing-failure");
+        write_post_cache_failure_model(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(2);
+        let mut budget = MemoryBudget::unbounded();
+        let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget).unwrap();
+
+        let result = adapter.append_tokens(&[0], &mut budget, false);
+
+        assert!(result.is_err());
+        assert!(adapter.take_last_phase_timings().is_none());
+        assert_eq!(adapter.context_len(), 0);
         std::fs::remove_file(path).ok();
     }
 }
