@@ -1,3 +1,5 @@
+use crate::{RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats};
+
 /// Low-RAM PyTorch-style linear layer over a chunked `.rllm` weight tensor.
 ///
 /// Computes `input[batch,in] × weight[out,in]^T + bias[out]` while decoding
@@ -605,6 +607,234 @@ pub fn streaming_silu_gate_up_from_model(
         state.finish(config.linear, gate_weight_name)?;
     }
 
+    Ok(Some(output))
+}
+
+/// Experimental sparse batch-1 projection over raw 16-bit weights.
+///
+/// This is an opt-in research path used by RLLM experimental speed mode. It
+/// keeps model weights unchanged and computes an approximate projection from
+/// the top activation dimensions by absolute magnitude.
+pub fn streaming_sparse_tile_linear_from_model(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    bias: Option<&[f32]>,
+    config: StreamingTileLinearConfig,
+    speed_config: RamaExperimentalSpeedConfig,
+    stats: &mut RamaExperimentalSpeedStats,
+    budget: &mut MemoryBudget,
+) -> Result<Option<Vec<f32>>> {
+    validate_tile_linear_config(config)?;
+    validate_linear_shapes(input, bias, config.linear)?;
+    if !speed_config.enabled || config.linear.batch != 1 || config.linear.in_features == 0 {
+        stats.record_exact_fallback();
+        return Ok(None);
+    }
+
+    let tensor = model.tensor(weight_name)?.clone();
+    validate_weight_tensor(&tensor, config.linear)?;
+    if !matches!(
+        tensor.dtype,
+        rllm_container::DType::Fp16 | rllm_container::DType::Bf16
+    ) {
+        stats.record_exact_fallback();
+        return Ok(None);
+    }
+
+    let selected = crate::select_top_abs_indices(
+        input,
+        speed_config.topk_for_input(config.linear.in_features, 256),
+    );
+    if selected.is_empty() {
+        stats.record_exact_fallback();
+        return Ok(None);
+    }
+
+    let chunks: Vec<ChunkMeta> = model.chunks_for_tensor(tensor.tensor_id).to_vec();
+    if chunks.is_empty() || chunks.iter().any(|chunk| chunk.codec_id != "rtc-raw-v1") {
+        stats.record_exact_fallback();
+        return Ok(None);
+    }
+
+    let mut output = vec![0.0f32; config.linear.out_features];
+    if let Some(bias) = bias {
+        output.copy_from_slice(bias);
+    }
+
+    let dtype_size = tensor.dtype.size_bytes();
+    let mut byte_offset = 0usize;
+    for chunk in chunks {
+        if !byte_offset.is_multiple_of(dtype_size) {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} sparse stream reached unaligned byte offset {byte_offset}"
+            )));
+        }
+        let element_start = byte_offset / dtype_size;
+        let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
+            RuntimeError::InvalidTensorData(format!(
+                "chunk {} uncompressed size does not fit usize",
+                chunk.chunk_id
+            ))
+        })?;
+
+        model.with_raw_chunk(chunk.chunk_id, budget, |raw_bytes, _budget| {
+            if raw_bytes.len() != expected_chunk_bytes {
+                return Err(RuntimeError::InvalidTensorData(format!(
+                    "chunk {} raw byte len {} does not match metadata {}",
+                    chunk.chunk_id,
+                    raw_bytes.len(),
+                    expected_chunk_bytes
+                )));
+            }
+            accumulate_sparse_raw_16bit_linear_chunk_batch1(
+                input,
+                &selected,
+                &mut output,
+                raw_bytes,
+                element_start,
+                config.linear,
+                tensor.dtype,
+                weight_name,
+            )
+        })?;
+
+        byte_offset = byte_offset.checked_add(expected_chunk_bytes).ok_or_else(|| {
+            RuntimeError::InvalidTensorData("sparse chunk byte offset overflow".to_string())
+        })?;
+    }
+
+    stats.record_sparse_projection(
+        selected.len(),
+        config.linear.in_features,
+        config.linear.out_features,
+        1,
+    );
+    Ok(Some(output))
+}
+
+/// Experimental sparse LLaMA gated MLP input projection.
+///
+/// Computes `silu(gate_proj(input)) * up_proj(input)` from a deterministic
+/// activation top-k subset. Unsupported layouts return `Ok(None)` so callers
+/// can use the exact low-RAM path.
+pub fn streaming_sparse_silu_gate_up_from_model(
+    model: &mut LazyRllmModel,
+    gate_weight_name: &str,
+    up_weight_name: &str,
+    input: &[f32],
+    config: StreamingTileLinearConfig,
+    speed_config: RamaExperimentalSpeedConfig,
+    stats: &mut RamaExperimentalSpeedStats,
+    budget: &mut MemoryBudget,
+) -> Result<Option<Vec<f32>>> {
+    validate_tile_linear_config(config)?;
+    validate_linear_shapes(input, None, config.linear)?;
+    if !speed_config.enabled || config.linear.batch != 1 || config.linear.in_features == 0 {
+        stats.record_exact_fallback();
+        return Ok(None);
+    }
+
+    let gate_tensor = model.tensor(gate_weight_name)?.clone();
+    let up_tensor = model.tensor(up_weight_name)?.clone();
+    validate_weight_tensor(&gate_tensor, config.linear)?;
+    validate_weight_tensor(&up_tensor, config.linear)?;
+    if gate_tensor.dtype != up_tensor.dtype
+        || !matches!(
+            gate_tensor.dtype,
+            rllm_container::DType::Fp16 | rllm_container::DType::Bf16
+        )
+    {
+        stats.record_exact_fallback();
+        return Ok(None);
+    }
+
+    let selected = crate::select_top_abs_indices(
+        input,
+        speed_config.topk_for_input(config.linear.in_features, 256),
+    );
+    if selected.is_empty() {
+        stats.record_exact_fallback();
+        return Ok(None);
+    }
+
+    let gate_chunks: Vec<ChunkMeta> = model.chunks_for_tensor(gate_tensor.tensor_id).to_vec();
+    let up_chunks: Vec<ChunkMeta> = model.chunks_for_tensor(up_tensor.tensor_id).to_vec();
+    if gate_chunks.is_empty() || gate_chunks.len() != up_chunks.len() {
+        stats.record_exact_fallback();
+        return Ok(None);
+    }
+    for (gate_chunk, up_chunk) in gate_chunks.iter().zip(up_chunks.iter()) {
+        if gate_chunk.codec_id != "rtc-raw-v1"
+            || up_chunk.codec_id != "rtc-raw-v1"
+            || gate_chunk.chunk_offset_in_tensor != up_chunk.chunk_offset_in_tensor
+            || gate_chunk.uncompressed_size != up_chunk.uncompressed_size
+        {
+            stats.record_exact_fallback();
+            return Ok(None);
+        }
+    }
+
+    let mut output = vec![0.0f32; config.linear.out_features];
+    {
+        let mut state = SiluGateUpState::new(&mut output);
+        let dtype_size = gate_tensor.dtype.size_bytes();
+        let mut byte_offset = 0usize;
+        for (gate_chunk, up_chunk) in gate_chunks.iter().zip(up_chunks.iter()) {
+            if !byte_offset.is_multiple_of(dtype_size) {
+                return Err(RuntimeError::InvalidTensorData(format!(
+                    "weight tensors {gate_weight_name}/{up_weight_name} sparse stream reached unaligned byte offset {byte_offset}"
+                )));
+            }
+            let element_start = byte_offset / dtype_size;
+            let expected_chunk_bytes =
+                usize::try_from(gate_chunk.uncompressed_size).map_err(|_| {
+                    RuntimeError::InvalidTensorData(format!(
+                        "chunk {} uncompressed size does not fit usize",
+                        gate_chunk.chunk_id
+                    ))
+                })?;
+
+            model.with_two_raw_chunks(
+                gate_chunk.chunk_id,
+                up_chunk.chunk_id,
+                budget,
+                |gate_bytes, up_bytes, _budget| {
+                    if gate_bytes.len() != expected_chunk_bytes
+                        || up_bytes.len() != expected_chunk_bytes
+                    {
+                        return Err(RuntimeError::InvalidTensorData(format!(
+                            "sparse gate/up raw chunk len mismatch for chunks {}/{}",
+                            gate_chunk.chunk_id, up_chunk.chunk_id
+                        )));
+                    }
+                    accumulate_sparse_silu_gate_up_raw_16bit_chunk_batch1(
+                        input,
+                        &selected,
+                        gate_bytes,
+                        up_bytes,
+                        element_start,
+                        config.linear,
+                        gate_tensor.dtype,
+                        &mut state,
+                        gate_weight_name,
+                    )
+                },
+            )?;
+
+            byte_offset = byte_offset.checked_add(expected_chunk_bytes).ok_or_else(|| {
+                RuntimeError::InvalidTensorData("sparse gate/up byte offset overflow".to_string())
+            })?;
+        }
+        state.finish(config.linear, gate_weight_name)?;
+    }
+
+    stats.record_sparse_projection(
+        selected.len(),
+        config.linear.in_features,
+        config.linear.out_features,
+        2,
+    );
     Ok(Some(output))
 }
 

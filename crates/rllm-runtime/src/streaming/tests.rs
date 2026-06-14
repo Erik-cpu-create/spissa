@@ -1214,6 +1214,149 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[test]
+    fn sparse_raw_bf16_linear_matches_manual_topk_projection() {
+        let path = temp_path("sparse-linear-bf16");
+        let weight_bf16 = vec![
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
+            0x4000, 0x4040,
+        ];
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+        let selected = crate::select_top_abs_indices(&input, 2);
+        assert_eq!(selected, vec![1, 3]);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "linear.sparse.bf16.weight",
+            vec![3, 4],
+            &weight_bf16,
+            14,
+        );
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::unbounded();
+        let mut stats = crate::RamaExperimentalSpeedStats::default();
+        let output = streaming_sparse_tile_linear_from_model(
+            &mut model,
+            "linear.sparse.bf16.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 4,
+                    out_features: 3,
+                },
+                tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+            },
+            crate::RamaExperimentalSpeedConfig {
+                enabled: true,
+                turbo_topk: Some(2),
+            },
+            &mut stats,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(output.len(), 3);
+        assert!((output[0] - 12.0).abs() < 1e-4);
+        assert!((output[1] + 12.0).abs() < 1e-4);
+        assert!((output[2] - 13.0).abs() < 1e-4);
+        assert_eq!(stats.sparse_projection_calls, 1);
+        assert_eq!(stats.max_selected_topk, 2);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sparse_silu_gate_up_matches_manual_topk_projection() {
+        let path = temp_path("sparse-gate-up-bf16");
+        let gate_bf16 = vec![
+            0x3f80, 0x4000, 0x4040, 0x4080, 0x4000, 0x4040, 0x4080, 0x40a0,
+        ];
+        let up_bf16 = vec![
+            0x3f80, 0x3f80, 0x3f80, 0x3f80, 0x4000, 0x4000, 0x4000, 0x4000,
+        ];
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "mlp.gate.sparse.bf16.weight",
+            vec![2, 4],
+            &gate_bf16,
+            10,
+        );
+        add_bf16_tensor(
+            &mut writer,
+            1,
+            "mlp.up.sparse.bf16.weight",
+            vec![2, 4],
+            &up_bf16,
+            10,
+        );
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::unbounded();
+        let mut stats = crate::RamaExperimentalSpeedStats::default();
+        let output = streaming_sparse_silu_gate_up_from_model(
+            &mut model,
+            "mlp.gate.sparse.bf16.weight",
+            "mlp.up.sparse.bf16.weight",
+            &input,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 4,
+                    out_features: 2,
+                },
+                tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+            },
+            crate::RamaExperimentalSpeedConfig {
+                enabled: true,
+                turbo_topk: Some(2),
+            },
+            &mut stats,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+
+        let selected = crate::select_top_abs_indices(&input, 2);
+        let gate_f32: Vec<f32> = gate_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let up_f32: Vec<f32> = up_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let mut expected = Vec::new();
+        for row in 0..2 {
+            let mut gate_acc = 0.0;
+            let mut up_acc = 0.0;
+            for &idx in &selected {
+                gate_acc += input[idx] * gate_f32[row * 4 + idx];
+                up_acc += input[idx] * up_f32[row * 4 + idx];
+            }
+            expected.push(crate::silu(gate_acc) * up_acc);
+        }
+
+        assert_close_vec(&output, &expected, 1e-4);
+        assert_eq!(stats.sparse_projection_calls, 1);
+        assert_eq!(stats.estimated_skipped_madds, 8);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
     fn write_chunked_mlp(path: &std::path::Path) {
         let mut writer = RllmWriter::new(path, GlobalMetadata::new_test()).unwrap();
         add_f32_tensor(
