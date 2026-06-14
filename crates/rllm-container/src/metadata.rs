@@ -148,6 +148,14 @@ pub struct ModelConfigMetadata {
     pub use_parallel_residual: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vocab_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rms_norm_eps: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_key_value_heads: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rope_theta: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tie_word_embeddings: Option<bool>,
 }
 
 /// Minimal tokenizer vocabulary/config metadata persisted in `.rllm` global metadata.
@@ -325,6 +333,10 @@ mod tests {
             layer_norm_eps: Some(1e-5),
             use_parallel_residual: Some(true),
             vocab_size: Some(50_432),
+            num_key_value_heads: None,
+            rms_norm_eps: None,
+            rope_theta: None,
+            tie_word_embeddings: None,
         });
 
         let json = serde_json::to_string(&meta).unwrap();

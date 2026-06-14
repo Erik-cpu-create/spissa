@@ -32,7 +32,7 @@ pub fn run(original: &str, compressed: &str) -> Result<()> {
         .with_context(|| format!("Failed to open original file: {}", original))?;
 
     // Open RLLM reader
-    let mut reader = RllmReader::open(compressed_path)
+    let reader = RllmReader::open(compressed_path)
         .with_context(|| format!("Failed to open compressed file: {}", compressed))?;
 
     // Collect tensor info first

@@ -241,7 +241,7 @@ fn tile_stream_step(model: &LazyRllmModel, runtime_state_bytes: usize) -> Result
 #[cfg(test)]
 fn runtime_f32_bytes_for_chunk(chunk: &ChunkMeta, tensor: &TensorMeta) -> Result<usize> {
     let dtype_size = tensor.dtype.size_bytes() as u64;
-    if dtype_size == 0 || chunk.uncompressed_size % dtype_size != 0 {
+    if dtype_size == 0 || !chunk.uncompressed_size.is_multiple_of(dtype_size) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "chunk {} for tensor {} has uncompressed_size={} not divisible by dtype size {}",
             chunk.chunk_id, tensor.name, chunk.uncompressed_size, dtype_size
@@ -264,7 +264,7 @@ fn runtime_f32_tile_scratch_bytes_for_chunk(
     tensor: &TensorMeta,
 ) -> Result<usize> {
     let dtype_size = tensor.dtype.size_bytes() as u64;
-    if dtype_size == 0 || chunk.uncompressed_size % dtype_size != 0 {
+    if dtype_size == 0 || !chunk.uncompressed_size.is_multiple_of(dtype_size) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "chunk {} for tensor {} has uncompressed_size={} not divisible by dtype size {}",
             chunk.chunk_id, tensor.name, chunk.uncompressed_size, dtype_size
@@ -331,17 +331,17 @@ fn infer_shape_hints(model: &LazyRllmModel) -> ModelShapeHints {
     let mut max_layer_id = None;
 
     for tensor in model.tensors() {
-        if tensor.name.contains("embed_in.weight") || tensor.name == "tok_embeddings.weight" {
-            if tensor.shape.len() == 2 {
-                vocab_size = usize::try_from(tensor.shape[0]).ok();
-                hidden_size = usize::try_from(tensor.shape[1]).ok();
-            }
+        if (tensor.name.contains("embed_in.weight") || tensor.name == "tok_embeddings.weight")
+            && tensor.shape.len() == 2
+        {
+            vocab_size = usize::try_from(tensor.shape[0]).ok();
+            hidden_size = usize::try_from(tensor.shape[1]).ok();
         }
-        if tensor.name.contains("embed_out.weight") || tensor.name == "lm_head.weight" {
-            if tensor.shape.len() == 2 {
-                vocab_size.get_or_insert(usize::try_from(tensor.shape[0]).unwrap_or(0));
-                hidden_size.get_or_insert(usize::try_from(tensor.shape[1]).unwrap_or(0));
-            }
+        if (tensor.name.contains("embed_out.weight") || tensor.name == "lm_head.weight")
+            && tensor.shape.len() == 2
+        {
+            vocab_size.get_or_insert(usize::try_from(tensor.shape[0]).unwrap_or(0));
+            hidden_size.get_or_insert(usize::try_from(tensor.shape[1]).unwrap_or(0));
         }
         if tensor.name.contains("attention.bias") && tensor.shape.len() == 4 {
             max_position_embeddings = usize::try_from(tensor.shape[2]).ok();

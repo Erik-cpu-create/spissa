@@ -41,19 +41,10 @@ pub struct StreamingAttentionConfig {
     pub causal: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct StreamingAttentionRuntime<'a> {
     pub rotary: Option<RotaryEmbeddingConfig>,
     pub kv_cache: Option<&'a mut KvCache>,
-}
-
-impl Default for StreamingAttentionRuntime<'_> {
-    fn default() -> Self {
-        Self {
-            rotary: None,
-            kv_cache: None,
-        }
-    }
 }
 
 impl StreamingAttentionConfig {
@@ -304,7 +295,7 @@ pub fn streaming_linear_from_model(
     let dtype_size = tensor.dtype.size_bytes();
     let mut byte_offset = 0usize;
     for chunk in chunks {
-        if byte_offset % dtype_size != 0 {
+        if !byte_offset.is_multiple_of(dtype_size) {
             return Err(RuntimeError::InvalidTensorData(format!(
                 "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
             )));
@@ -419,7 +410,7 @@ pub fn streaming_tile_linear_from_model(
     let dtype_size = tensor.dtype.size_bytes();
     let mut byte_offset = 0usize;
     for chunk in chunks {
-        if byte_offset % dtype_size != 0 {
+        if !byte_offset.is_multiple_of(dtype_size) {
             return Err(RuntimeError::InvalidTensorData(format!(
                 "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
             )));
@@ -487,9 +478,10 @@ pub fn streaming_tile_linear_from_model(
                     let tile_len = config
                         .tile_elements
                         .min(elements_in_chunk - local_element_start);
-                    let tile_byte_start = local_element_start
-                        .checked_mul(dtype_size)
-                        .ok_or_else(|| RuntimeError::Shape("tile byte start overflow".to_string()))?;
+                    let tile_byte_start =
+                        local_element_start.checked_mul(dtype_size).ok_or_else(|| {
+                            RuntimeError::Shape("tile byte start overflow".to_string())
+                        })?;
                     let tile_byte_len = tile_len
                         .checked_mul(dtype_size)
                         .ok_or_else(|| RuntimeError::Shape("tile byte len overflow".to_string()))?;
@@ -498,7 +490,9 @@ pub fn streaming_tile_linear_from_model(
                         .ok_or_else(|| RuntimeError::Shape("tile byte end overflow".to_string()))?;
                     let scratch_bytes = tile_len
                         .checked_mul(std::mem::size_of::<f32>())
-                        .ok_or_else(|| RuntimeError::Shape("tile f32 scratch overflow".to_string()))?;
+                        .ok_or_else(|| {
+                            RuntimeError::Shape("tile f32 scratch overflow".to_string())
+                        })?;
                     let scratch_label = format!(
                         "streaming fused tile f32 scratch chunk {} elements {}..{}",
                         chunk.chunk_id,
@@ -596,7 +590,7 @@ pub fn streaming_tile_linear_argmax_from_model(
     let mut byte_offset = 0usize;
     let mut state = StreamingLinearArgmaxState::new(bias);
     for chunk in chunks {
-        if byte_offset % dtype_size != 0 {
+        if !byte_offset.is_multiple_of(dtype_size) {
             return Err(RuntimeError::InvalidTensorData(format!(
                 "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
             )));
@@ -810,7 +804,7 @@ fn streaming_mlp_with_timing_from_model(
             return Err(err);
         }
     };
-    if let Some(timing) = timing.as_deref_mut() {
+    if let Some(timing) = timing {
         timing.record_mlp_output_projection(output_projection_started.elapsed());
     }
 
@@ -961,7 +955,7 @@ fn streaming_attention_with_runtime_and_timing_from_model(
         budget.release(qkv_bytes, split_label)?;
         return Err(err);
     }
-    let cache_view = runtime.kv_cache.as_ref().map(|cache| &**cache);
+    let cache_view = runtime.kv_cache.as_deref();
     let score_context_started = Instant::now();
     let attended = match scaled_dot_product_attention_with_cache(
         &q,
@@ -971,6 +965,7 @@ fn streaming_attention_with_runtime_and_timing_from_model(
         KvAttentionConfig {
             query_len: config.seq_len,
             num_heads: config.num_heads,
+            kv_heads: config.num_heads,
             head_dim: config.head_dim,
             causal: config.causal,
         },
@@ -1022,7 +1017,7 @@ fn streaming_attention_with_runtime_and_timing_from_model(
             budget.release(qkv_bytes, split_label)?;
             return Err(err);
         }
-        if let Some(timing) = timing.as_deref_mut() {
+        if let Some(timing) = timing {
             timing.record_attention_kv_append(kv_append_started.elapsed());
         }
         budget.release(qkv_bytes, split_label)?;
@@ -1217,7 +1212,7 @@ pub fn streaming_transformer_block_with_runtime_and_timing_from_model(
     }
     drop(mlp_output);
     budget.release(hidden_bytes, mlp_output_label)?;
-    if let Some(timing) = timing.as_deref_mut() {
+    if let Some(timing) = timing {
         timing.record_mlp_residual(mlp_residual_started.elapsed());
     }
 
@@ -1616,7 +1611,8 @@ fn accumulate_weight_chunk_argmax(
         while idx + 4 <= row_len {
             let w = &weight_row[idx..idx + 4];
             let i_row = &input_row[idx..idx + 4];
-            state.current_acc += w[0] * i_row[0] + w[1] * i_row[1] + w[2] * i_row[2] + w[3] * i_row[3];
+            state.current_acc +=
+                w[0] * i_row[0] + w[1] * i_row[1] + w[2] * i_row[2] + w[3] * i_row[3];
             idx += 4;
         }
         while idx < row_len {
@@ -1626,7 +1622,7 @@ fn accumulate_weight_chunk_argmax(
 
         local_idx += row_len;
         global_idx += row_len;
-        if global_idx % config.in_features == 0 {
+        if global_idx.is_multiple_of(config.in_features) {
             state.finish_current(config, weight_name)?;
         }
     }
@@ -1809,7 +1805,7 @@ fn accumulate_fused_rle_chunk_u8(
     config: StreamingLinearConfig,
     weight_name: &str,
 ) -> Result<()> {
-    if rle_stream.len() % 2 != 0 {
+    if !rle_stream.len().is_multiple_of(2) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "RLE stream for {weight_name} has odd length"
         )));
@@ -1825,26 +1821,26 @@ fn accumulate_fused_rle_chunk_u8(
             let out_feature = current_element / config.in_features;
             let in_feature = current_element % config.in_features;
             let run_in_this_row = (config.in_features - in_feature).min(count - i);
-            
+
             let mut batch_idx = 0;
             while batch_idx < config.batch {
                 let output_idx = batch_idx * config.out_features + out_feature;
                 let input_start = batch_idx * config.in_features + in_feature;
-                
+
                 let mut sum = 0.0;
                 for j in 0..run_in_this_row {
                     sum += input[input_start + j];
                 }
                 output[output_idx] += value * sum;
-                
+
                 batch_idx += 1;
             }
-            
+
             current_element += run_in_this_row;
             i += run_in_this_row;
         }
     }
-    
+
     Ok(())
 }
 
@@ -1856,7 +1852,7 @@ fn accumulate_fused_raw_fp16_chunk(
     config: StreamingLinearConfig,
     weight_name: &str,
 ) -> Result<()> {
-    if raw_bytes.len() % 2 != 0 {
+    if !raw_bytes.len().is_multiple_of(2) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "Raw FP16 stream for {weight_name} has odd length"
         )));

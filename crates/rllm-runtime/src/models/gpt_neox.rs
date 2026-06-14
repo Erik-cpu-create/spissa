@@ -48,18 +48,13 @@ const RAMA_PREFILL_LOW_RAM_MAX_CHUNK_TOKENS: usize = 128;
 const RAMA_PREFILL_SPEED_MAX_CHUNK_TOKENS: usize = 256;
 const RAMA_PREFILL_ESTIMATE_HIDDEN_MULTIPLIER: usize = 7;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RamaPrefillPolicy {
     /// Prefer the measured low-RAM-safe window for the model shape.
+    #[default]
     LowRam,
     /// Prefer a larger speed-biased window, still downshifted by an explicit transient budget.
     Speed,
-}
-
-impl Default for RamaPrefillPolicy {
-    fn default() -> Self {
-        Self::LowRam
-    }
 }
 
 impl RamaPrefillPolicy {
@@ -182,6 +177,7 @@ pub struct LayerDecodedGptNeoxRamaTransformer {
     pub final_layernorm_weight: Vec<f32>,
     pub final_layernorm_bias: Vec<f32>,
     pub lm_head_bias: Option<Vec<f32>>,
+    pub pinned_lm_head_weight: Option<Vec<f32>>,
     pub resident_parameter_bytes: usize,
     pub max_layer_parameter_bytes: usize,
 }
@@ -261,6 +257,34 @@ impl PreparedGptNeoxEchoTransformer {
 }
 
 impl LayerDecodedGptNeoxRamaTransformer {
+    pub fn pin_lm_head(&mut self, model: &mut LazyRllmModel, budget: &mut MemoryBudget) {
+        if self.pinned_lm_head_weight.is_some() {
+            return;
+        }
+        if let Ok(tensor) = model.tensor(&self.lm_head_weight) {
+            if let Ok(runtime_bytes) = crate::lazy::runtime_f32_bytes_for_tensor(tensor) {
+                if budget
+                    .reserve(runtime_bytes, format!("pinned {}", self.lm_head_weight))
+                    .is_ok()
+                {
+                    let expected_shape = [
+                        self.config.vocab_size,
+                        self.config.head_dim * self.config.num_heads,
+                    ];
+                    if let Ok(data) =
+                        decode_matrix_tensor(model, &self.lm_head_weight, &expected_shape)
+                    {
+                        self.pinned_lm_head_weight = Some(data);
+                    } else {
+                        budget
+                            .release(runtime_bytes, format!("pinned {}", self.lm_head_weight))
+                            .ok();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn generate_from_model(
         &self,
         model: &mut LazyRllmModel,
@@ -600,37 +624,84 @@ impl LayerDecodedGptNeoxRamaTransformer {
         let lm_head_started = Instant::now();
         let (logits, token_id) =
             if !collect_logits && matches!(self.config.sampling, StreamingSamplingConfig::Argmax) {
-                let token_id = match streaming_tile_linear_argmax_from_model(
-                    model,
-                    &self.lm_head_weight,
-                    last_hidden,
-                    self.lm_head_bias.as_deref(),
-                    lm_head_config,
-                    budget,
-                ) {
-                    Ok(token_id) => token_id,
-                    Err(err) => {
-                        budget.release(sequence_bytes, final_norm_label)?;
-                        return Err(err);
+                let token_id = if let Some(pinned) = &self.pinned_lm_head_weight {
+                    let logits = match crate::ops::linear(
+                        last_hidden,
+                        pinned,
+                        self.lm_head_bias.as_deref(),
+                        1,
+                        hidden_size,
+                        self.config.vocab_size,
+                    ) {
+                        Ok(l) => l,
+                        Err(err) => {
+                            budget.release(sequence_bytes, final_norm_label)?;
+                            return Err(err);
+                        }
+                    };
+                    if let Some(timing) = timing.as_deref_mut() {
+                        timing.record_lm_head(elapsed_ns_u64(lm_head_started.elapsed()));
                     }
+                    let mut max_id = 0;
+                    let mut max_val = logits[0];
+                    for (i, &v) in logits.iter().enumerate() {
+                        if v > max_val {
+                            max_val = v;
+                            max_id = i;
+                        }
+                    }
+                    max_id
+                } else {
+                    let tid = match streaming_tile_linear_argmax_from_model(
+                        model,
+                        &self.lm_head_weight,
+                        last_hidden,
+                        self.lm_head_bias.as_deref(),
+                        lm_head_config,
+                        budget,
+                    ) {
+                        Ok(token_id) => token_id,
+                        Err(err) => {
+                            budget.release(sequence_bytes, final_norm_label)?;
+                            return Err(err);
+                        }
+                    };
+                    if let Some(timing) = timing.as_deref_mut() {
+                        timing.record_lm_head(elapsed_ns_u64(lm_head_started.elapsed()));
+                    }
+                    tid
                 };
-                if let Some(timing) = timing.as_deref_mut() {
-                    timing.record_lm_head(elapsed_ns_u64(lm_head_started.elapsed()));
-                }
                 (Vec::new(), token_id)
             } else {
-                let logits = match streaming_tile_linear_from_model(
-                    model,
-                    &self.lm_head_weight,
-                    last_hidden,
-                    self.lm_head_bias.as_deref(),
-                    lm_head_config,
-                    budget,
-                ) {
-                    Ok(values) => values,
-                    Err(err) => {
-                        budget.release(sequence_bytes, final_norm_label)?;
-                        return Err(err);
+                let logits = if let Some(pinned) = &self.pinned_lm_head_weight {
+                    match crate::ops::linear(
+                        last_hidden,
+                        pinned,
+                        self.lm_head_bias.as_deref(),
+                        1,
+                        hidden_size,
+                        self.config.vocab_size,
+                    ) {
+                        Ok(l) => l,
+                        Err(err) => {
+                            budget.release(sequence_bytes, final_norm_label)?;
+                            return Err(err);
+                        }
+                    }
+                } else {
+                    match streaming_tile_linear_from_model(
+                        model,
+                        &self.lm_head_weight,
+                        last_hidden,
+                        self.lm_head_bias.as_deref(),
+                        lm_head_config,
+                        budget,
+                    ) {
+                        Ok(values) => values,
+                        Err(err) => {
+                            budget.release(sequence_bytes, final_norm_label)?;
+                            return Err(err);
+                        }
                     }
                 };
                 if let Some(timing) = timing.as_deref_mut() {
@@ -645,7 +716,7 @@ impl LayerDecodedGptNeoxRamaTransformer {
                         return Err(err);
                     }
                 };
-                if let Some(timing) = timing.as_deref_mut() {
+                if let Some(timing) = timing {
                     timing.record_sampling(elapsed_ns_u64(sampling_started.elapsed()));
                 }
                 let logits = if collect_logits { logits } else { Vec::new() };
@@ -778,7 +849,7 @@ fn scaled_prefill_window(value: usize, baseline: usize) -> Result<usize> {
 }
 
 fn div_ceil_usize(numerator: usize, denominator: usize) -> usize {
-    numerator / denominator + usize::from(numerator % denominator != 0)
+    numerator / denominator + usize::from(!numerator.is_multiple_of(denominator))
 }
 
 fn next_power_of_two_at_least(value: usize) -> Result<usize> {
@@ -1178,6 +1249,7 @@ pub fn prepare_gpt_neox_rama_layer_decode_transformer_from_model(
         final_layernorm_weight,
         final_layernorm_bias,
         lm_head_bias,
+        pinned_lm_head_weight: None,
         resident_parameter_bytes,
         max_layer_parameter_bytes,
     })
@@ -1386,6 +1458,23 @@ fn decode_vector_tensor(
     Ok(tensor.data)
 }
 
+fn decode_matrix_tensor(
+    model: &mut LazyRllmModel,
+    name: &str,
+    expected_shape: &[usize],
+) -> Result<Vec<f32>> {
+    let mut budget = MemoryBudget::unbounded();
+    let tensor = model.decode_tensor(name, &mut budget)?;
+    let runtime_bytes = tensor.runtime_size_bytes();
+    budget.release(runtime_bytes, format!("prepared param release: {name}"))?;
+    if tensor.shape != expected_shape {
+        return Err(RuntimeError::Shape(format!(
+            "tensor {name} shape {:?} does not match expected {:?}",
+            tensor.shape, expected_shape
+        )));
+    }
+    Ok(tensor.data)
+}
 fn decode_optional_vector_tensor(
     model: &mut LazyRllmModel,
     name: &str,
@@ -1849,6 +1938,10 @@ mod tests {
             layer_norm_eps: Some(1e-5),
             use_parallel_residual: Some(true),
             vocab_size: Some(VOCAB_SIZE as u64),
+            num_key_value_heads: None,
+            rms_norm_eps: None,
+            rope_theta: None,
+            tie_word_embeddings: None,
         });
         let mut writer = RllmWriter::new(path, meta).unwrap();
         let mut tensor_id = 0u64;

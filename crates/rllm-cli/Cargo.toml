@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "CLI for RLLM - Runtime-compressed Local LLM"
+default-run = "rllm"
 
 [[bin]]
 name = "rllm"

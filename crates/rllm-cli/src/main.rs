@@ -1,4 +1,5 @@
 //! RLLM CLI - Command-line interface for Runtime-compressed Local LLM
+#![allow(clippy::too_many_arguments)]
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

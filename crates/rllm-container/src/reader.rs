@@ -3,13 +3,19 @@
 use crate::error::{ContainerError, Result};
 use crate::header::RllmHeader;
 use crate::metadata::{ChunkMeta, GlobalMetadata, TensorMeta};
+use memmap2::Mmap;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Reader for .rllm files
+///
+/// Uses memory-mapped I/O for zero-copy chunk reads at runtime.
+/// The file is initially parsed via buffered I/O (for headers/metadata),
+/// then the entire file is memory-mapped for zero-copy chunk access.
 pub struct RllmReader {
-    file: BufReader<File>,
+    mmap: Mmap,
+    #[allow(dead_code)]
     header: RllmHeader,
     metadata: GlobalMetadata,
     tensors: Vec<TensorMeta>,
@@ -58,8 +64,15 @@ impl RllmReader {
         reader.read_exact(&mut chunk_dir_bytes)?;
         let chunks: Vec<ChunkMeta> = serde_json::from_slice(&chunk_dir_bytes)?;
 
+        // Drop the BufReader, re-open file for mmap
+        drop(reader);
+        let file = File::open(path.as_ref())?;
+        // SAFETY: The file is opened read-only. We hold the Mmap for the lifetime of RllmReader.
+        // The file must not be modified externally while the reader is alive.
+        let mmap = unsafe { Mmap::map(&file)? };
+
         Ok(Self {
-            file: reader,
+            mmap,
             header,
             metadata,
             tensors,
@@ -87,33 +100,49 @@ impl RllmReader {
         self.tensors.iter().find(|t| t.name == name)
     }
 
-    /// Read a chunk's compressed data
-    pub fn read_chunk(&mut self, chunk_id: u64) -> Result<Vec<u8>> {
+    /// Read a chunk's compressed data as a zero-copy slice from the mmap.
+    ///
+    /// This is the primary high-performance path. No allocation, no memcpy.
+    pub fn read_chunk_slice(&self, chunk_id: u64) -> Result<&[u8]> {
         let chunk = self
             .chunks
             .iter()
             .find(|c| c.chunk_id == chunk_id)
             .ok_or(ContainerError::ChunkNotFound(chunk_id))?;
 
-        self.file.seek(SeekFrom::Start(chunk.file_offset))?;
-        let mut data = vec![0u8; chunk.compressed_size as usize];
-        self.file.read_exact(&mut data)?;
+        let offset = chunk.file_offset as usize;
+        let len = chunk.compressed_size as usize;
+        let end = offset
+            .checked_add(len)
+            .ok_or(ContainerError::InvalidRange {
+                context: format!("chunk {chunk_id}"),
+                offset: chunk.file_offset,
+                len: chunk.compressed_size,
+                size: self.mmap.len() as u64,
+            })?;
 
-        Ok(data)
+        if end > self.mmap.len() {
+            return Err(ContainerError::TruncatedFile {
+                expected: end as u64,
+                actual: self.mmap.len() as u64,
+            });
+        }
+
+        Ok(&self.mmap[offset..end])
     }
 
-    /// Read a byte range from a chunk's compressed payload.
-    ///
-    /// Offsets are relative to the start of the compressed chunk. This primitive
-    /// is a Phase 7.8 building block for future tile/block-indexed codecs. Runtime
-    /// paths that require full-chunk SHA-256 verification should continue reading
-    /// the full chunk until per-range integrity metadata exists.
-    pub fn read_chunk_range(
-        &mut self,
+    /// Read a chunk's compressed data (allocating copy, for backward compatibility).
+    pub fn read_chunk(&self, chunk_id: u64) -> Result<Vec<u8>> {
+        Ok(self.read_chunk_slice(chunk_id)?.to_vec())
+    }
+
+    /// Read a byte range from a chunk's compressed payload as a zero-copy slice.
+    pub fn read_chunk_range_slice(
+        &self,
         chunk_id: u64,
         byte_offset: u64,
         byte_len: u64,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<&[u8]> {
         let chunk = self
             .chunks
             .iter()
@@ -137,18 +166,29 @@ impl RllmReader {
             });
         }
 
-        self.file
-            .seek(SeekFrom::Start(chunk.file_offset + byte_offset))?;
-        let len = usize::try_from(byte_len).map_err(|_| ContainerError::InvalidRange {
-            context: format!("chunk {chunk_id}"),
-            offset: byte_offset,
-            len: byte_len,
-            size: chunk.compressed_size,
-        })?;
-        let mut data = vec![0u8; len];
-        self.file.read_exact(&mut data)?;
+        let abs_offset = (chunk.file_offset + byte_offset) as usize;
+        let abs_end = (chunk.file_offset + end) as usize;
 
-        Ok(data)
+        if abs_end > self.mmap.len() {
+            return Err(ContainerError::TruncatedFile {
+                expected: abs_end as u64,
+                actual: self.mmap.len() as u64,
+            });
+        }
+
+        Ok(&self.mmap[abs_offset..abs_end])
+    }
+
+    /// Read a byte range from a chunk's compressed payload (allocating copy).
+    pub fn read_chunk_range(
+        &self,
+        chunk_id: u64,
+        byte_offset: u64,
+        byte_len: u64,
+    ) -> Result<Vec<u8>> {
+        Ok(self
+            .read_chunk_range_slice(chunk_id, byte_offset, byte_len)?
+            .to_vec())
     }
 
     /// Get all chunks for a tensor
@@ -239,9 +279,13 @@ mod tests {
         writer.finalize().unwrap();
 
         // Read and verify chunk data
-        let mut reader = RllmReader::open(&temp).unwrap();
+        let reader = RllmReader::open(&temp).unwrap();
         let chunk_data = reader.read_chunk(0).unwrap();
         assert_eq!(chunk_data, vec![1, 2, 3, 4]);
+
+        // Also verify zero-copy slice
+        let chunk_slice = reader.read_chunk_slice(0).unwrap();
+        assert_eq!(chunk_slice, &[1, 2, 3, 4]);
 
         std::fs::remove_file(&temp).ok();
     }
@@ -270,7 +314,7 @@ mod tests {
             .unwrap();
         writer.finalize().unwrap();
 
-        let mut reader = RllmReader::open(&temp).unwrap();
+        let reader = RllmReader::open(&temp).unwrap();
         assert_eq!(
             reader.read_chunk_range(0, 2, 4).unwrap(),
             vec![12, 13, 14, 15]

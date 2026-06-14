@@ -1,4 +1,4 @@
-use crate::{softmax_rows, Result, RuntimeError};
+use crate::{Result, RuntimeError};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RotaryEmbeddingConfig {
@@ -23,7 +23,7 @@ pub fn gpt_neox_rotary_dim(head_dim: usize, rotary_pct: f32) -> Result<usize> {
         )));
     }
     let mut dim = (head_dim as f32 * rotary_pct) as usize;
-    if dim % 2 != 0 {
+    if !dim.is_multiple_of(2) {
         dim -= 1;
     }
     if dim == 0 {
@@ -58,6 +58,61 @@ pub fn apply_gpt_neox_rotary_inplace(
                 let cos = angle.cos();
                 let sin = angle.sin();
                 rotate_neox_pair(q, row_start, pair, half_rotary, cos, sin);
+                rotate_neox_pair(k, row_start, pair, half_rotary, cos, sin);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Apply Llama-style rotary position embeddings in-place to Q and K.
+///
+/// Layout is `[seq_len, num_heads, head_dim]`. Llama style rotates adjacent pairs
+/// (dim 2i against 2i+1). Supports GQA where K has fewer heads than Q.
+pub fn apply_llama_rotary_inplace(
+    q: &mut [f32],
+    k: &mut [f32],
+    q_heads: usize,
+    k_heads: usize,
+    config: RotaryEmbeddingConfig,
+) -> Result<()> {
+    if q_heads == 0 || k_heads == 0 {
+        return Err(RuntimeError::Shape("heads must be > 0".to_string()));
+    }
+    let expected_q = config.seq_len * q_heads * config.head_dim;
+    let expected_k = config.seq_len * k_heads * config.head_dim;
+    if q.len() != expected_q || k.len() != expected_k {
+        return Err(RuntimeError::Shape(format!(
+            "rotary shape mismatch: q={}, expected={}, k={}, expected={}",
+            q.len(),
+            expected_q,
+            k.len(),
+            expected_k
+        )));
+    }
+
+    let half_rotary = config.rotary_dim / 2;
+    for pos in 0..config.seq_len {
+        let absolute_pos = config.position_offset + pos;
+
+        // Rotate Q
+        for head in 0..q_heads {
+            let row_start = (pos * q_heads + head) * config.head_dim;
+            for pair in 0..half_rotary {
+                let angle = rotary_angle(absolute_pos, pair, config)?;
+                let cos = angle.cos();
+                let sin = angle.sin();
+                rotate_neox_pair(q, row_start, pair, half_rotary, cos, sin);
+            }
+        }
+
+        // Rotate K
+        for head in 0..k_heads {
+            let row_start = (pos * k_heads + head) * config.head_dim;
+            for pair in 0..half_rotary {
+                let angle = rotary_angle(absolute_pos, pair, config)?;
+                let cos = angle.cos();
+                let sin = angle.sin();
                 rotate_neox_pair(k, row_start, pair, half_rotary, cos, sin);
             }
         }
@@ -171,14 +226,16 @@ impl KvCache {
 pub struct KvAttentionConfig {
     pub query_len: usize,
     pub num_heads: usize,
+    pub kv_heads: usize,
     pub head_dim: usize,
     pub causal: bool,
 }
 
 /// Scaled dot-product attention where keys/values may be prefixed by a KV cache.
 ///
-/// `q`, `current_k`, and `current_v` use `[query_len, num_heads, head_dim]`.
-/// Cached tensors, when present, use `[past_len, num_heads, head_dim]` and are
+/// `q` uses `[query_len, num_heads, head_dim]`.
+/// `current_k` and `current_v` use `[query_len, kv_heads, head_dim]`.
+/// Cached tensors, when present, use `[past_len, kv_heads, head_dim]` and are
 /// treated as absolute positions before the current query window.
 pub fn scaled_dot_product_attention_with_cache(
     q: &[f32],
@@ -197,14 +254,18 @@ pub fn scaled_dot_product_attention_with_cache(
     let mut out = vec![0.0f32; expected_current];
     let mut scores = vec![0.0f32; key_len];
 
+    let repeats = config.num_heads / config.kv_heads;
+
     for query_pos in 0..config.query_len {
         let query_abs_pos = past_len + query_pos;
         for head in 0..config.num_heads {
             let query_start = (query_pos * config.num_heads + head) * config.head_dim;
             let query_row = &q[query_start..query_start + config.head_dim];
-            for key_pos in 0..key_len {
+            let kv_head = head / repeats;
+
+            for (key_pos, score) in scores.iter_mut().enumerate().take(key_len) {
                 if config.causal && key_pos > query_abs_pos {
-                    scores[key_pos] = f32::NEG_INFINITY;
+                    *score = f32::NEG_INFINITY;
                     continue;
                 }
                 let key_row = kv_row(
@@ -212,34 +273,44 @@ pub fn scaled_dot_product_attention_with_cache(
                     current_k,
                     past_len,
                     key_pos,
-                    head,
-                    config,
+                    kv_head,
+                    config.kv_heads,
+                    config.head_dim,
                     KvTensorKind::Key,
                 );
+                let q_ptr = query_row.as_ptr();
+                let k_ptr = key_row.as_ptr();
                 let mut dot = 0.0f32;
                 for dim in 0..config.head_dim {
-                    dot += query_row[dim] * key_row[dim];
+                    unsafe {
+                        dot += *q_ptr.add(dim) * *k_ptr.add(dim);
+                    }
                 }
-                scores[key_pos] = dot * scale;
+                *score = dot * scale;
             }
 
-            let probs = softmax_rows(&scores, 1, key_len)?;
+            softmax_inplace(&mut scores)?;
+
             let out_start = (query_pos * config.num_heads + head) * config.head_dim;
             let out_row = &mut out[out_start..out_start + config.head_dim];
             out_row.fill(0.0);
-            for key_pos in 0..key_len {
+            for (key_pos, prob) in scores.iter().copied().enumerate().take(key_len) {
                 let value_row = kv_row(
                     cache,
                     current_v,
                     past_len,
                     key_pos,
-                    head,
-                    config,
+                    kv_head,
+                    config.kv_heads,
+                    config.head_dim,
                     KvTensorKind::Value,
                 );
-                let prob = probs[key_pos];
+                let v_ptr = value_row.as_ptr();
+                let out_ptr = out_row.as_mut_ptr();
                 for dim in 0..config.head_dim {
-                    out_row[dim] += prob * value_row[dim];
+                    unsafe {
+                        *out_ptr.add(dim) += prob * *v_ptr.add(dim);
+                    }
                 }
             }
         }
@@ -267,7 +338,10 @@ fn validate_rotary_inputs(q: &[f32], k: &[f32], config: RotaryEmbeddingConfig) -
             config.seq_len, config.num_heads, config.head_dim
         )));
     }
-    if config.rotary_dim == 0 || config.rotary_dim > config.head_dim || config.rotary_dim % 2 != 0 {
+    if config.rotary_dim == 0
+        || config.rotary_dim > config.head_dim
+        || !config.rotary_dim.is_multiple_of(2)
+    {
         return Err(RuntimeError::Shape(format!(
             "rotary_dim must be even and in 1..=head_dim, got rotary_dim={}, head_dim={}",
             config.rotary_dim, config.head_dim
@@ -311,30 +385,47 @@ fn validate_kv_attention_inputs(
     cache: Option<&KvCache>,
     config: KvAttentionConfig,
 ) -> Result<()> {
-    if config.query_len == 0 || config.num_heads == 0 || config.head_dim == 0 {
+    if config.query_len == 0
+        || config.num_heads == 0
+        || config.kv_heads == 0
+        || config.head_dim == 0
+    {
         return Err(RuntimeError::Shape(format!(
-            "KV attention dimensions must be non-zero, got query_len={}, num_heads={}, head_dim={}",
-            config.query_len, config.num_heads, config.head_dim
+            "KV attention dimensions must be non-zero, got query_len={}, num_heads={}, kv_heads={}, head_dim={}",
+            config.query_len, config.num_heads, config.kv_heads, config.head_dim
         )));
     }
-    let expected = config
+    if !config.num_heads.is_multiple_of(config.kv_heads) {
+        return Err(RuntimeError::Shape(format!(
+            "query heads {} must be a multiple of key/value heads {}",
+            config.num_heads, config.kv_heads
+        )));
+    }
+    let expected_q = config
         .query_len
         .checked_mul(config.num_heads)
         .and_then(|values| values.checked_mul(config.head_dim))
         .ok_or_else(|| RuntimeError::Shape("KV attention current length overflow".to_string()))?;
-    if q.len() != expected || current_k.len() != expected || current_v.len() != expected {
+    let expected_kv = config
+        .query_len
+        .checked_mul(config.kv_heads)
+        .and_then(|values| values.checked_mul(config.head_dim))
+        .ok_or_else(|| RuntimeError::Shape("KV attention current length overflow".to_string()))?;
+    if q.len() != expected_q || current_k.len() != expected_kv || current_v.len() != expected_kv {
         return Err(RuntimeError::Shape(format!(
-            "KV attention shape mismatch: expected {expected}, got q={}, k={}, v={}",
+            "KV attention shape mismatch: expected q={}, k/v={}, got q={}, k={}, v={}",
+            expected_q,
+            expected_kv,
             q.len(),
             current_k.len(),
             current_v.len()
         )));
     }
     if let Some(cache) = cache {
-        if cache.num_heads != config.num_heads || cache.head_dim != config.head_dim {
+        if cache.num_heads != config.kv_heads || cache.head_dim != config.head_dim {
             return Err(RuntimeError::Shape(format!(
-                "KV cache shape mismatch: cache heads/dim={}/{}, attention heads/dim={}/{}",
-                cache.num_heads, cache.head_dim, config.num_heads, config.head_dim
+                "KV cache shape mismatch: cache heads/dim={}/{}, attention kv_heads/dim={}/{}",
+                cache.num_heads, cache.head_dim, config.kv_heads, config.head_dim
             )));
         }
         let expected_cache_values = cache
@@ -353,6 +444,28 @@ fn validate_kv_attention_inputs(
     Ok(())
 }
 
+fn softmax_inplace(logits: &mut [f32]) -> Result<()> {
+    if logits.is_empty() {
+        return Ok(());
+    }
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0f32;
+    for val in logits.iter_mut() {
+        let exp = (*val - max).exp();
+        *val = exp;
+        sum += exp;
+    }
+    if sum == 0.0 || !sum.is_finite() {
+        return Err(RuntimeError::InvalidTensorData(
+            "softmax produced invalid denominator".to_string(),
+        ));
+    }
+    for val in logits.iter_mut() {
+        *val /= sum;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 enum KvTensorKind {
     Key,
@@ -364,21 +477,22 @@ fn kv_row<'a>(
     current: &'a [f32],
     past_len: usize,
     key_pos: usize,
-    head: usize,
-    config: KvAttentionConfig,
+    kv_head: usize,
+    kv_heads: usize,
+    head_dim: usize,
     kind: KvTensorKind,
 ) -> &'a [f32] {
     if key_pos < past_len {
         let cache = cache.expect("past_len is non-zero only when cache is present");
-        let start = (key_pos * config.num_heads + head) * config.head_dim;
+        let start = (key_pos * kv_heads + kv_head) * head_dim;
         match kind {
-            KvTensorKind::Key => &cache.keys[start..start + config.head_dim],
-            KvTensorKind::Value => &cache.values[start..start + config.head_dim],
+            KvTensorKind::Key => &cache.keys[start..start + head_dim],
+            KvTensorKind::Value => &cache.values[start..start + head_dim],
         }
     } else {
         let current_pos = key_pos - past_len;
-        let start = (current_pos * config.num_heads + head) * config.head_dim;
-        &current[start..start + config.head_dim]
+        let start = (current_pos * kv_heads + kv_head) * head_dim;
+        &current[start..start + head_dim]
     }
 }
 
@@ -489,6 +603,7 @@ mod tests {
             KvAttentionConfig {
                 query_len: 1,
                 num_heads: 1,
+                kv_heads: 1,
                 head_dim: 2,
                 causal: true,
             },

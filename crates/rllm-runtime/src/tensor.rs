@@ -73,7 +73,7 @@ pub fn decode_to_f32(dtype: DType, bytes: &[u8]) -> Result<Vec<f32>> {
     match dtype {
         DType::Fp16 => decode_chunks_2(bytes, fp16_to_f32),
         DType::Bf16 => decode_chunks_2(bytes, bf16_to_f32),
-        DType::Fp32 => decode_chunks_4(bytes, |bits| f32::from_bits(bits)),
+        DType::Fp32 => decode_chunks_4(bytes, f32::from_bits),
         DType::Fp64 => decode_chunks_8(bytes, |bits| f64::from_bits(bits) as f32),
         DType::I8 => Ok(bytes.iter().map(|&b| (b as i8) as f32).collect()),
         DType::U8 => Ok(bytes.iter().map(|&b| b as f32).collect()),
@@ -87,7 +87,7 @@ pub fn decode_to_f32(dtype: DType, bytes: &[u8]) -> Result<Vec<f32>> {
 }
 
 fn decode_chunks_2(bytes: &[u8], f: impl Fn(u16) -> f32) -> Result<Vec<f32>> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "expected even byte length for 16-bit dtype, got {}",
             bytes.len()
@@ -100,7 +100,7 @@ fn decode_chunks_2(bytes: &[u8], f: impl Fn(u16) -> f32) -> Result<Vec<f32>> {
 }
 
 fn decode_chunks_4(bytes: &[u8], f: impl Fn(u32) -> f32) -> Result<Vec<f32>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "expected byte length divisible by 4, got {}",
             bytes.len()
@@ -113,7 +113,7 @@ fn decode_chunks_4(bytes: &[u8], f: impl Fn(u32) -> f32) -> Result<Vec<f32>> {
 }
 
 fn decode_chunks_8(bytes: &[u8], f: impl Fn(u64) -> f32) -> Result<Vec<f32>> {
-    if bytes.len() % 8 != 0 {
+    if !bytes.len().is_multiple_of(8) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "expected byte length divisible by 8, got {}",
             bytes.len()
@@ -179,6 +179,7 @@ pub fn fp16_to_f32(bits: u16) -> f32 {
 }
 
 /// Convert bfloat16 bits to `f32`.
+#[inline(always)]
 pub fn bf16_to_f32(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
 }

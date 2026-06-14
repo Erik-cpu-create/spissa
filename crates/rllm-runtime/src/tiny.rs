@@ -808,7 +808,7 @@ fn embedding_chunk_windows(
     let mut windows = Vec::with_capacity(chunks.len());
     let mut byte_offset = 0usize;
     for chunk in chunks {
-        if byte_offset % dtype_size != 0 {
+        if !byte_offset.is_multiple_of(dtype_size) {
             return Err(RuntimeError::InvalidTensorData(format!(
                 "embedding tensor {embedding_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
             )));

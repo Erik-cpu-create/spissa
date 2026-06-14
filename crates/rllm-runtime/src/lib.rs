@@ -3,13 +3,14 @@
 //! Phase 5 starts with full-decode loading: read a `.rllm` container,
 //! decode every tensor into memory, convert supported dtypes to `f32`, and
 //! expose small tensor operations needed by a toy transformer runtime.
+#![allow(clippy::too_many_arguments)]
 
 mod echo;
 mod error;
-mod gpt_neox;
 mod lazy;
 mod loader;
 mod memory;
+pub mod models;
 mod ops;
 mod planner;
 mod rotary;
@@ -31,20 +32,11 @@ pub use echo::{
     StreamingRamaTransformerTensorNames,
 };
 pub use error::{Result, RuntimeError};
-pub use gpt_neox::{
-    prepare_gpt_neox_echo_transformer_from_metadata, prepare_gpt_neox_echo_transformer_from_model,
-    prepare_gpt_neox_rama_layer_decode_transformer_from_metadata,
-    prepare_gpt_neox_rama_layer_decode_transformer_from_model,
-    prepare_gpt_neox_rama_transformer_from_metadata, prepare_gpt_neox_rama_transformer_from_model,
-    recommend_rama_prefill_chunk_tokens, GptNeoxEchoBuildConfig, GptNeoxEchoGenerationConfig,
-    GptNeoxRamaBuildConfig, GptNeoxRamaGenerationConfig, GptNeoxRamaGenerationOptions,
-    GptNeoxTextGenerationResult, LayerDecodedGptNeoxRamaTransformer, OwnedStreamingBlockParameters,
-    OwnedStreamingBlockTensorNames, PreparedGptNeoxEchoTransformer, PreparedGptNeoxRamaTransformer,
-    RamaPrefillPolicy,
-};
 pub use lazy::{LazyModelStats, LazyRllmModel, RamaIntegrityMode};
 pub use loader::{FullDecodeModel, FullDecodeStats};
 pub use memory::MemoryBudget;
+pub use models::gpt_neox::*;
+pub use models::llama::*;
 pub use ops::*;
 pub use planner::{
     build_runtime_plan, ModelShapeHints, PlanStatus, PlanStep, RuntimeMode, RuntimePlan,

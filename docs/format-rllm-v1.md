@@ -14,23 +14,21 @@ The `.rllm` format is a single-file binary container for storing compressed LLM 
 
 ```
 ┌─────────────────────────────────┐
-│ Header (20 bytes)               │
-├─────────────────────────────────┤
-│ Global Metadata (variable)      │
-├─────────────────────────────────┤
-│ Tensor Directory (variable)     │
-├─────────────────────────────────┤
-│ Chunk Directory (variable)      │
+│ Header (44 bytes)               │
 ├─────────────────────────────────┤
 │ Compressed Chunk Data (variable)│
 ├─────────────────────────────────┤
-│ Footer Checksum (32 bytes)      │
+│ Global Metadata (u64 len + JSON)│
+├─────────────────────────────────┤
+│ Tensor Directory (u64 len + JSON)│
+├─────────────────────────────────┤
+│ Chunk Directory (u64 len + JSON)│
 └─────────────────────────────────┘
 ```
 
 ## Header
 
-Size: 20 bytes, little-endian
+Size: 44 bytes, little-endian
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
@@ -39,10 +37,14 @@ Size: 20 bytes, little-endian
 | 8 | 1 | endian | 0 = little-endian |
 | 9 | 3 | reserved | Must be zero |
 | 12 | 8 | metadata_offset | File offset to global metadata (u64) |
+| 20 | 8 | tensor_dir_offset | File offset to tensor directory (u64) |
+| 28 | 8 | chunk_dir_offset | File offset to chunk directory (u64) |
+| 36 | 8 | data_start_offset | File offset where compressed chunk data starts (u64) |
 
 ## Global Metadata
 
-JSON-encoded, located at `metadata_offset`.
+Length-prefixed JSON, located at `metadata_offset`. The first 8 bytes are a
+little-endian `u64` JSON byte length, followed by the JSON payload.
 
 ```json
 {
@@ -139,9 +141,11 @@ Trade-offs:
 - **Small chunks** (256KB): Better random access, more metadata overhead
 - **Large chunks** (4MB): Better compression ratio, worse random access
 
-## Footer Checksum
+## Integrity
 
-SHA-256 hash of the entire file (excluding the footer itself). Used for integrity verification.
+RLLM v1 stores SHA-256 integrity metadata per tensor and per chunk. Optional
+range checksums may also be present for verified partial reads. There is no
+footer checksum in the current writer implementation.
 
 ## Versioning
 

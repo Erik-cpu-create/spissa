@@ -4,7 +4,7 @@ target/
 debug/
 
 # Local model/data artifacts (large, reproducible downloads)
-models/
+/models/
 *.rllm
 *.safetensors
 *.bin

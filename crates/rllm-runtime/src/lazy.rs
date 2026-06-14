@@ -8,18 +8,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum RamaIntegrityMode {
     /// Verify compressed and decoded chunk checksums every time a chunk is recalled.
+    #[default]
     Strict,
     /// Verify each chunk checksum once per process, then trust the already-verified chunk.
     VerifyOnce,
-}
-
-impl Default for RamaIntegrityMode {
-    fn default() -> Self {
-        Self::Strict
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -252,7 +247,7 @@ impl LazyRllmModel {
             tensor_meta.original_size_bytes as usize,
             format!("tensor raw bytes: {name}"),
         )?;
-        let raw_bytes = match crate::loader::decode_tensor_bytes(&mut self.reader, &tensor_meta) {
+        let raw_bytes = match crate::loader::decode_tensor_bytes(&self.reader, &tensor_meta) {
             Ok(bytes) => bytes,
             Err(err) => {
                 budget.release(
@@ -301,41 +296,61 @@ impl LazyRllmModel {
             .get(&chunk_id)
             .ok_or_else(|| RuntimeError::InvalidTensorData(format!("missing chunk {chunk_id}")))?
             .clone();
-        let tensor_name = self
-            .tensors_by_id
-            .get(&chunk.tensor_id)
-            .map(|tensor| tensor.name.clone());
 
-        let compressed_label = format!("compressed chunk {}", chunk.chunk_id);
-        budget.reserve(chunk.compressed_size as usize, compressed_label.clone())?;
+        let is_bounded = budget.limit_bytes() != usize::MAX;
+        let compressed_label = if is_bounded {
+            format!("compressed chunk {}", chunk.chunk_id)
+        } else {
+            String::new()
+        };
+
+        if is_bounded {
+            budget.reserve(chunk.compressed_size as usize, compressed_label.clone())?;
+        }
+
         let read_start = Instant::now();
-        let compressed = match self.reader.read_chunk(chunk.chunk_id) {
-            Ok(bytes) => bytes,
+        let compressed = match self.reader.read_chunk_slice(chunk.chunk_id) {
+            Ok(bytes) => unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) },
             Err(err) => {
-                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                if is_bounded {
+                    budget.release(chunk.compressed_size as usize, compressed_label)?;
+                }
                 return Err(err.into());
             }
         };
-        self.record_rama_chunk_event(
-            "chunk_read",
-            format!("read chunk {}", chunk.chunk_id),
-            &chunk,
-            tensor_name.as_deref(),
-            read_start,
-            read_start.elapsed(),
-            budget,
-        );
+
+        if self.rama_trace.is_some() {
+            let tensor_name = self
+                .tensors_by_id
+                .get(&chunk.tensor_id)
+                .map(|t| t.name.clone());
+            self.record_rama_chunk_event(
+                "chunk_read",
+                format!("read chunk {}", chunk.chunk_id),
+                &chunk,
+                tensor_name.as_deref(),
+                read_start,
+                read_start.elapsed(),
+                budget,
+            );
+        }
 
         let compressed_checksum_start = Instant::now();
-        let compressed_verified = match self.verify_compressed_chunk_if_needed(&chunk, &compressed)
-        {
+        let compressed_verified = match self.verify_compressed_chunk_if_needed(&chunk, compressed) {
             Ok(verified) => verified,
             Err(err) => {
-                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                if is_bounded {
+                    budget.release(chunk.compressed_size as usize, compressed_label)?;
+                }
                 return Err(err);
             }
         };
-        if compressed_verified {
+
+        if compressed_verified && self.rama_trace.is_some() {
+            let tensor_name = self
+                .tensors_by_id
+                .get(&chunk.tensor_id)
+                .map(|t| t.name.clone());
             self.record_rama_chunk_event(
                 "chunk_compressed_checksum",
                 format!("verify compressed chunk {}", chunk.chunk_id),
@@ -347,8 +362,10 @@ impl LazyRllmModel {
             );
         }
 
-        let result = f(&compressed, budget);
-        budget.release(chunk.compressed_size as usize, compressed_label)?;
+        let result = f(compressed, budget);
+        if is_bounded {
+            budget.release(chunk.compressed_size as usize, compressed_label)?;
+        }
         result
     }
 
@@ -365,41 +382,60 @@ impl LazyRllmModel {
             .get(&chunk_id)
             .ok_or_else(|| RuntimeError::InvalidTensorData(format!("missing chunk {chunk_id}")))?
             .clone();
-        let tensor_name = self
-            .tensors_by_id
-            .get(&chunk.tensor_id)
-            .map(|tensor| tensor.name.clone());
 
-        let compressed_label = format!("compressed chunk {}", chunk.chunk_id);
-        budget.reserve(chunk.compressed_size as usize, compressed_label.clone())?;
+        let is_bounded = budget.limit_bytes() != usize::MAX;
+        let compressed_label = if is_bounded {
+            format!("compressed chunk {}", chunk.chunk_id)
+        } else {
+            String::new()
+        };
+
+        if is_bounded {
+            budget.reserve(chunk.compressed_size as usize, compressed_label.clone())?;
+        }
+
         let read_start = Instant::now();
-        let compressed = match self.reader.read_chunk(chunk.chunk_id) {
-            Ok(bytes) => bytes,
+        let compressed = match self.reader.read_chunk_slice(chunk.chunk_id) {
+            Ok(bytes) => unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) },
             Err(err) => {
-                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                if is_bounded {
+                    budget.release(chunk.compressed_size as usize, compressed_label)?;
+                }
                 return Err(err.into());
             }
         };
-        self.record_rama_chunk_event(
-            "chunk_read",
-            format!("read chunk {}", chunk.chunk_id),
-            &chunk,
-            tensor_name.as_deref(),
-            read_start,
-            read_start.elapsed(),
-            budget,
-        );
+
+        if self.rama_trace.is_some() {
+            let tensor_name = self
+                .tensors_by_id
+                .get(&chunk.tensor_id)
+                .map(|t| t.name.clone());
+            self.record_rama_chunk_event(
+                "chunk_read",
+                format!("read chunk {}", chunk.chunk_id),
+                &chunk,
+                tensor_name.as_deref(),
+                read_start,
+                read_start.elapsed(),
+                budget,
+            );
+        }
 
         let compressed_checksum_start = Instant::now();
-        let compressed_verified = match self.verify_compressed_chunk_if_needed(&chunk, &compressed)
-        {
+        let compressed_verified = match self.verify_compressed_chunk_if_needed(&chunk, compressed) {
             Ok(verified) => verified,
             Err(err) => {
-                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                if is_bounded {
+                    budget.release(chunk.compressed_size as usize, compressed_label)?;
+                }
                 return Err(err);
             }
         };
-        if compressed_verified {
+        if compressed_verified && self.rama_trace.is_some() {
+            let tensor_name = self
+                .tensors_by_id
+                .get(&chunk.tensor_id)
+                .map(|t| t.name.clone());
             self.record_rama_chunk_event(
                 "chunk_compressed_checksum",
                 format!("verify compressed chunk {}", chunk.chunk_id),
@@ -411,23 +447,34 @@ impl LazyRllmModel {
             );
         }
 
-        let decoded_label = format!("decoded chunk {}", chunk.chunk_id);
-        if let Err(err) = budget.reserve(chunk.uncompressed_size as usize, decoded_label.clone()) {
-            budget.release(chunk.compressed_size as usize, compressed_label)?;
-            return Err(err);
+        let decoded_label = if is_bounded {
+            format!("decoded chunk {}", chunk.chunk_id)
+        } else {
+            String::new()
+        };
+
+        if is_bounded {
+            if let Err(err) =
+                budget.reserve(chunk.uncompressed_size as usize, decoded_label.clone())
+            {
+                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                return Err(err);
+            }
         }
 
         let codec = match codec_for_id(&chunk.codec_id) {
             Ok(codec) => codec,
             Err(err) => {
-                budget.release(chunk.uncompressed_size as usize, decoded_label)?;
-                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                if is_bounded {
+                    budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+                    budget.release(chunk.compressed_size as usize, compressed_label)?;
+                }
                 return Err(err);
             }
         };
         let decode_start = Instant::now();
         let decoded = match codec.decode(
-            &compressed,
+            compressed,
             &rtc_codec::DecodeMeta {
                 codec_id: chunk.codec_id.clone(),
                 uncompressed_size: chunk.uncompressed_size,
@@ -435,24 +482,36 @@ impl LazyRllmModel {
         ) {
             Ok(bytes) => bytes,
             Err(err) => {
-                budget.release(chunk.uncompressed_size as usize, decoded_label)?;
-                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                if is_bounded {
+                    budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+                    budget.release(chunk.compressed_size as usize, compressed_label)?;
+                }
                 return Err(err.into());
             }
         };
-        self.record_rama_chunk_event(
-            "chunk_decode",
-            format!("decode chunk {}", chunk.chunk_id),
-            &chunk,
-            tensor_name.as_deref(),
-            decode_start,
-            decode_start.elapsed(),
-            budget,
-        );
-        budget.release(chunk.compressed_size as usize, compressed_label)?;
+        if self.rama_trace.is_some() {
+            let tensor_name = self
+                .tensors_by_id
+                .get(&chunk.tensor_id)
+                .map(|t| t.name.clone());
+            self.record_rama_chunk_event(
+                "chunk_decode",
+                format!("decode chunk {}", chunk.chunk_id),
+                &chunk,
+                tensor_name.as_deref(),
+                decode_start,
+                decode_start.elapsed(),
+                budget,
+            );
+        }
+        if is_bounded {
+            budget.release(chunk.compressed_size as usize, compressed_label)?;
+        }
 
         if decoded.len() != chunk.uncompressed_size as usize {
-            budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+            if is_bounded {
+                budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+            }
             return Err(RuntimeError::InvalidTensorData(format!(
                 "chunk {} decoded to {} bytes, expected {}",
                 chunk.chunk_id,
@@ -464,11 +523,17 @@ impl LazyRllmModel {
         let original_verified = match self.verify_original_chunk_if_needed(&chunk, &decoded) {
             Ok(verified) => verified,
             Err(err) => {
-                budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+                if is_bounded {
+                    budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+                }
                 return Err(err);
             }
         };
-        if original_verified {
+        if original_verified && self.rama_trace.is_some() {
+            let tensor_name = self
+                .tensors_by_id
+                .get(&chunk.tensor_id)
+                .map(|t| t.name.clone());
             self.record_rama_chunk_event(
                 "chunk_original_checksum",
                 format!("verify original chunk {}", chunk.chunk_id),
@@ -482,16 +547,24 @@ impl LazyRllmModel {
 
         let compute_start = Instant::now();
         let result = f(&decoded, budget);
-        self.record_rama_chunk_event(
-            "chunk_compute_closure",
-            format!("compute with decoded chunk {}", chunk.chunk_id),
-            &chunk,
-            tensor_name.as_deref(),
-            compute_start,
-            compute_start.elapsed(),
-            budget,
-        );
-        budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+        if self.rama_trace.is_some() {
+            let tensor_name = self
+                .tensors_by_id
+                .get(&chunk.tensor_id)
+                .map(|t| t.name.clone());
+            self.record_rama_chunk_event(
+                "chunk_compute_closure",
+                format!("compute with decoded chunk {}", chunk.chunk_id),
+                &chunk,
+                tensor_name.as_deref(),
+                compute_start,
+                compute_start.elapsed(),
+                budget,
+            );
+        }
+        if is_bounded {
+            budget.release(chunk.uncompressed_size as usize, decoded_label)?;
+        }
         result
     }
 
@@ -535,18 +608,30 @@ impl LazyRllmModel {
             });
         }
 
-        let compressed_label = format!("compressed chunk {}", chunk.chunk_id);
-        budget.reserve(chunk.compressed_size as usize, compressed_label.clone())?;
-        let compressed = match self.reader.read_chunk(chunk.chunk_id) {
-            Ok(bytes) => bytes,
+        let is_bounded = budget.limit_bytes() != usize::MAX;
+        let compressed_label = if is_bounded {
+            format!("compressed chunk {}", chunk.chunk_id)
+        } else {
+            String::new()
+        };
+
+        if is_bounded {
+            budget.reserve(chunk.compressed_size as usize, compressed_label.clone())?;
+        }
+        let compressed = match self.reader.read_chunk_slice(chunk.chunk_id) {
+            Ok(bytes) => unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) },
             Err(err) => {
-                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                if is_bounded {
+                    budget.release(chunk.compressed_size as usize, compressed_label)?;
+                }
                 return Err(err.into());
             }
         };
 
-        if let Err(err) = self.verify_compressed_chunk_if_needed(&chunk, &compressed) {
-            budget.release(chunk.compressed_size as usize, compressed_label)?;
+        if let Err(err) = self.verify_compressed_chunk_if_needed(&chunk, compressed) {
+            if is_bounded {
+                budget.release(chunk.compressed_size as usize, compressed_label)?;
+            }
             return Err(err);
         }
 
@@ -556,19 +641,25 @@ impl LazyRllmModel {
                 chunk.chunk_id, byte_len
             ))
         })?;
-        let decoded_label = format!(
-            "decoded chunk {} byte range [{}..{})",
-            chunk.chunk_id,
-            byte_offset,
-            range.end()?
-        );
-        if let Err(err) = budget.reserve(decoded_range_bytes, decoded_label.clone()) {
-            budget.release(chunk.compressed_size as usize, compressed_label)?;
-            return Err(err);
+        let decoded_label = if is_bounded {
+            format!(
+                "decoded chunk {} byte range [{}..{})",
+                chunk.chunk_id,
+                byte_offset,
+                range.end()?
+            )
+        } else {
+            String::new()
+        };
+        if is_bounded {
+            if let Err(err) = budget.reserve(decoded_range_bytes, decoded_label.clone()) {
+                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                return Err(err);
+            }
         }
 
         let decoded = match codec.decode_range(
-            &compressed,
+            compressed,
             &rtc_codec::DecodeMeta {
                 codec_id: chunk.codec_id.clone(),
                 uncompressed_size: chunk.uncompressed_size,
@@ -577,15 +668,21 @@ impl LazyRllmModel {
         ) {
             Ok(bytes) => bytes,
             Err(err) => {
-                budget.release(decoded_range_bytes, decoded_label)?;
-                budget.release(chunk.compressed_size as usize, compressed_label)?;
+                if is_bounded {
+                    budget.release(decoded_range_bytes, decoded_label)?;
+                    budget.release(chunk.compressed_size as usize, compressed_label)?;
+                }
                 return Err(err.into());
             }
         };
-        budget.release(chunk.compressed_size as usize, compressed_label)?;
+        if is_bounded {
+            budget.release(chunk.compressed_size as usize, compressed_label)?;
+        }
 
         if decoded.len() != decoded_range_bytes {
-            budget.release(decoded_range_bytes, decoded_label)?;
+            if is_bounded {
+                budget.release(decoded_range_bytes, decoded_label)?;
+            }
             return Err(RuntimeError::InvalidTensorData(format!(
                 "chunk {} range decoded to {} bytes, expected {}",
                 chunk.chunk_id,
@@ -595,7 +692,9 @@ impl LazyRllmModel {
         }
 
         let result = f(&decoded, budget);
-        budget.release(decoded_range_bytes, decoded_label)?;
+        if is_bounded {
+            budget.release(decoded_range_bytes, decoded_label)?;
+        }
         result
     }
 
@@ -607,7 +706,7 @@ impl LazyRllmModel {
             tensor_meta.original_size_bytes as usize,
             format!("roundtrip tensor raw: {name}"),
         )?;
-        let raw_bytes = crate::loader::decode_tensor_bytes(&mut self.reader, &tensor_meta)?;
+        let raw_bytes = crate::loader::decode_tensor_bytes(&self.reader, &tensor_meta)?;
         verify_tensor_checksum(&tensor_meta, &raw_bytes)?;
         budget.release(
             tensor_meta.original_size_bytes as usize,
@@ -619,7 +718,7 @@ impl LazyRllmModel {
 
 pub(crate) fn runtime_f32_bytes_for_tensor(tensor: &TensorMeta) -> Result<usize> {
     let dtype_size = tensor.dtype.size_bytes() as u64;
-    if dtype_size == 0 || tensor.original_size_bytes % dtype_size != 0 {
+    if dtype_size == 0 || !tensor.original_size_bytes.is_multiple_of(dtype_size) {
         return Err(RuntimeError::InvalidTensorData(format!(
             "tensor {} has original_size_bytes={} not divisible by dtype size {}",
             tensor.name, tensor.original_size_bytes, dtype_size

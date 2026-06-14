@@ -147,7 +147,7 @@ fn run_generation(
     } else {
         parse_token_ids(token_ids.expect("checked above"))?
     };
-    let prepared = prepare_gpt_neox_rama_layer_decode_transformer_from_metadata(
+    let mut prepared = prepare_gpt_neox_rama_layer_decode_transformer_from_metadata(
         &mut model,
         GptNeoxRamaGenerationConfig {
             max_new_tokens,
@@ -159,6 +159,7 @@ fn run_generation(
     let mut budget = memory_budget_bytes
         .map(MemoryBudget::new)
         .unwrap_or_else(MemoryBudget::unbounded);
+    prepared.pin_lm_head(&mut model, &mut budget);
     let effective_prefill_chunk_tokens = effective_rama_prefill_chunk_tokens(
         rama_prefill_chunk_tokens,
         no_rama_prefill_chunking,

@@ -21,7 +21,7 @@ pub struct FullDecodeModel {
 
 impl FullDecodeModel {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        let mut reader = RllmReader::open(path)?;
+        let reader = RllmReader::open(path)?;
         let metadata = reader.metadata().clone();
         let tensor_metas: Vec<TensorMeta> = reader.list_tensors().to_vec();
 
@@ -30,7 +30,7 @@ impl FullDecodeModel {
         let mut total_runtime_bytes = 0usize;
 
         for tensor_meta in tensor_metas {
-            let tensor_bytes = decode_tensor_bytes(&mut reader, &tensor_meta)?;
+            let tensor_bytes = decode_tensor_bytes(&reader, &tensor_meta)?;
             verify_tensor_checksum(&tensor_meta, &tensor_bytes)?;
 
             let tensor = Tensor::from_bytes(
@@ -69,7 +69,7 @@ impl FullDecodeModel {
 }
 
 pub(crate) fn decode_tensor_bytes(
-    reader: &mut RllmReader,
+    reader: &RllmReader,
     tensor_meta: &TensorMeta,
 ) -> Result<Vec<u8>> {
     let mut chunks: Vec<ChunkMeta> = reader
@@ -82,12 +82,12 @@ pub(crate) fn decode_tensor_bytes(
     let mut tensor_bytes = Vec::with_capacity(tensor_meta.original_size_bytes as usize);
 
     for chunk in chunks {
-        let compressed = reader.read_chunk(chunk.chunk_id)?;
-        verify_compressed_chunk_checksum(&chunk, &compressed)?;
+        let compressed = reader.read_chunk_slice(chunk.chunk_id)?;
+        verify_compressed_chunk_checksum(&chunk, compressed)?;
 
         let codec = codec_for_id(&chunk.codec_id)?;
         let decoded = codec.decode(
-            &compressed,
+            compressed,
             &DecodeMeta {
                 codec_id: chunk.codec_id.clone(),
                 uncompressed_size: chunk.uncompressed_size,
@@ -355,7 +355,7 @@ mod tests {
             .unwrap();
         writer.finalize().unwrap();
 
-        let mut reader = RllmReader::open(&path).unwrap();
+        let reader = RllmReader::open(&path).unwrap();
         let chunk = reader.list_chunks()[0].clone();
         let range = chunk_range_for_original_bytes(&chunk, 4, 4).unwrap();
         let compressed_range = reader

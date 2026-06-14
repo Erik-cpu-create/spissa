@@ -66,6 +66,7 @@ class LongPromptResult:
     input_tokens: int
     ctx: int
     max_new_tokens: int
+    memory_budget: str
     exit_code: int
     real_seconds: float | None
     user_seconds: float | None
@@ -129,7 +130,17 @@ class LongPromptResult:
         if value is None or value <= 0:
             return None
         return 1.0 / value
+    @property
+    def decode_tokens_per_second(self) -> float | None:
+        if self.decode_ms is None or self.decode_steps is None or self.decode_steps == 0 or self.decode_ms == 0:
+            return None
+        return self.decode_steps / (self.decode_ms / 1000.0)
 
+    @property
+    def prefill_tokens_per_second(self) -> float | None:
+        if self.prefill_ms is None or self.input_tokens is None or self.prefill_ms == 0:
+            return None
+        return self.input_tokens / (self.prefill_ms / 1000.0)
 
 def make_token_ids(length: int) -> list[int]:
     if length <= 0:
@@ -235,6 +246,7 @@ def run_long_prompt_benchmark(
         input_tokens=input_tokens,
         ctx=ctx,
         max_new_tokens=max_new_tokens,
+        memory_budget=memory_budget,
         exit_code=completed.returncode,
         real_seconds=metric_float(metrics, "real_seconds"),
         user_seconds=metric_float(metrics, "user_seconds"),
@@ -299,10 +311,13 @@ def write_csv(path: Path, results: Iterable[LongPromptResult]) -> None:
                 "input_tokens",
                 "ctx",
                 "max_new_tokens",
+                "memory_budget",
                 "exit_code",
                 "real_seconds",
                 "seconds_per_generated_token",
                 "generated_tokens_per_second",
+                "decode_tokens_per_second",
+                "prefill_tokens_per_second",
                 "user_seconds",
                 "sys_seconds",
                 "max_rss_bytes",
@@ -346,13 +361,16 @@ def write_csv(path: Path, results: Iterable[LongPromptResult]) -> None:
         for result in results:
             writer.writerow(
                 [
-                    result.input_tokens,
-                    result.ctx,
-                    result.max_new_tokens,
-                    result.exit_code,
+                    str(result.input_tokens),
+                    str(result.ctx),
+                    str(result.max_new_tokens),
+                    result.memory_budget,
+                    str(result.exit_code),
                     format_optional_float(result.real_seconds),
                     format_optional_float(result.seconds_per_generated_token),
                     format_optional_float(result.generated_tokens_per_second, precision=4),
+                    format_optional_float(result.decode_tokens_per_second, precision=4),
+                    format_optional_float(result.prefill_tokens_per_second, precision=4),
                     format_optional_float(result.user_seconds),
                     format_optional_float(result.sys_seconds),
                     format_optional_int(result.max_rss_bytes),
@@ -445,8 +463,8 @@ def write_markdown(
         [
             "## Rows",
             "",
-            "| input tokens | new tokens | real seconds | sec/gen token | gen tok/sec | max RSS MiB | peak transient | prefill ms | embed ms | layer-param ms | attn ms | qkv ms | score/context ms | attn out ms | rotary ms | kv append ms | mlp ms | mlp in ms | gelu ms | mlp out ms | decode ms | lm_head ms | timed blocks | exit |",
-            "|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| input tokens | new tokens | budget | real sec | sec/gen token | end-to-end tok/s | decode tok/s | prefill tok/s | OS max RSS MiB | peak transient | prefill ms | embed ms | layer-param ms | attn ms | qkv ms | score/context ms | attn out ms | rotary ms | kv append ms | mlp ms | mlp in ms | gelu ms | mlp out ms | decode ms | lm_head ms | timed blocks | exit |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for r in results:
@@ -456,9 +474,12 @@ def write_markdown(
                 [
                     str(r.input_tokens),
                     str(r.max_new_tokens),
+                    r.memory_budget,
                     format_optional_float(r.real_seconds),
                     format_optional_float(r.seconds_per_generated_token),
                     format_optional_float(r.generated_tokens_per_second, precision=3),
+                    format_optional_float(r.decode_tokens_per_second, precision=3),
+                    format_optional_float(r.prefill_tokens_per_second, precision=3),
                     format_optional_float(r.max_rss_mib),
                     r.peak_transient or "",
                     format_optional_float(r.prefill_ms),
@@ -517,6 +538,8 @@ def main() -> int:
     input_lengths = parse_csv_ints(args.input_tokens, flag_name="--input-tokens")
     generation_lengths = parse_csv_ints(args.max_new_tokens, flag_name="--max-new-tokens")
 
+    budgets = [b.strip() for b in args.memory_budget.split(",") if b.strip()]
+
     build_release(skip_build=args.skip_build)
     ensure_ready(artifact)
 
@@ -525,44 +548,45 @@ def main() -> int:
     md_path = out_dir / "phase79d_long_prompt_benchmark.md"
     for input_tokens in input_lengths:
         for max_new_tokens in generation_lengths:
-            extra_run_args: list[str] = []
-            if args.rama_prefill_chunk_tokens is not None:
-                extra_run_args.extend(["--rama-prefill-chunk-tokens", str(args.rama_prefill_chunk_tokens)])
-            rama_timing_path = None
-            if args.rama_timing_dir is not None:
-                timing_dir = args.rama_timing_dir
-                if not timing_dir.is_absolute():
-                    timing_dir = out_dir / timing_dir
-                rama_timing_path = (
-                    timing_dir / f"rama_timing_input{input_tokens}_new{max_new_tokens}.json"
+            for memory_budget in budgets:
+                extra_run_args: list[str] = []
+                if args.rama_prefill_chunk_tokens is not None:
+                    extra_run_args.extend(["--rama-prefill-chunk-tokens", str(args.rama_prefill_chunk_tokens)])
+                rama_timing_path = None
+                if args.rama_timing_dir is not None:
+                    timing_dir = args.rama_timing_dir
+                    if not timing_dir.is_absolute():
+                        timing_dir = out_dir / timing_dir
+                    rama_timing_path = (
+                        timing_dir / f"rama_timing_input{input_tokens}_new{max_new_tokens}_budget{memory_budget}.json"
+                    )
+                result = run_long_prompt_benchmark(
+                    artifact=artifact,
+                    input_tokens=input_tokens,
+                    ctx=args.ctx,
+                    max_new_tokens=max_new_tokens,
+                    memory_budget=memory_budget,
+                    rama_integrity=args.rama_integrity,
+                    timeout_seconds=args.timeout_seconds,
+                    rama_timing_path=rama_timing_path,
+                    extra_run_args=extra_run_args,
                 )
-            result = run_long_prompt_benchmark(
-                artifact=artifact,
-                input_tokens=input_tokens,
-                ctx=args.ctx,
-                max_new_tokens=max_new_tokens,
-                memory_budget=args.memory_budget,
-                rama_integrity=args.rama_integrity,
-                timeout_seconds=args.timeout_seconds,
-                rama_timing_path=rama_timing_path,
-                extra_run_args=extra_run_args,
-            )
-            results.append(result)
-            write_csv(csv_path, results)
-            write_markdown(
-                md_path,
-                results,
-                artifact=artifact,
-                memory_budget=args.memory_budget,
-                rama_integrity=args.rama_integrity,
-                ctx=args.ctx,
-            )
-            if result.exit_code != 0:
-                print(
-                    f"benchmark failed for input_tokens={input_tokens}, max_new_tokens={max_new_tokens}; stopping",
-                    file=sys.stderr,
+                results.append(result)
+                write_csv(csv_path, results)
+                write_markdown(
+                    md_path,
+                    results,
+                    artifact=artifact,
+                    memory_budget=args.memory_budget,
+                    rama_integrity=args.rama_integrity,
+                    ctx=args.ctx,
                 )
-                return result.exit_code
+                if result.exit_code != 0:
+                    print(
+                        f"benchmark failed for input_tokens={input_tokens}, max_new_tokens={max_new_tokens}, budget={memory_budget}; stopping",
+                        file=sys.stderr,
+                    )
+                    return result.exit_code
 
     print(f"Wrote {csv_path}")
     print(f"Wrote {md_path}")
