@@ -15,6 +15,7 @@ mod memory;
 pub mod models;
 mod ops;
 mod planner;
+mod rolling;
 mod rotary;
 mod streaming;
 mod tensor;
