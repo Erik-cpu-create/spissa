@@ -8,6 +8,27 @@ pub struct RamaSessionStep {
     pub cached_context_len_after: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RamaSessionPhaseTimings {
+    pub embedding_ms: f64,
+    pub transformer_ms: f64,
+    pub final_norm_ms: f64,
+    pub lm_head_ms: f64,
+}
+
+impl RamaSessionPhaseTimings {
+    pub fn add_assign(&mut self, other: RamaSessionPhaseTimings) {
+        self.embedding_ms += other.embedding_ms;
+        self.transformer_ms += other.transformer_ms;
+        self.final_norm_ms += other.final_norm_ms;
+        self.lm_head_ms += other.lm_head_ms;
+    }
+
+    pub fn total_ms(&self) -> f64 {
+        self.embedding_ms + self.transformer_ms + self.final_norm_ms + self.lm_head_ms
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RamaSessionTurnMetrics {
     pub input_tokens: usize,
@@ -23,6 +44,7 @@ pub struct RamaSessionTurnMetrics {
     pub end_to_end_tok_s: f64,
     pub context_memory_bytes: usize,
     pub peak_transient_bytes: usize,
+    pub phase_timings: RamaSessionPhaseTimings,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +85,10 @@ pub trait RamaSessionAdapter {
         budget: &mut MemoryBudget,
         emit_logits: bool,
     ) -> Result<Option<RamaSessionStep>>;
+
+    fn take_last_phase_timings(&mut self) -> Option<RamaSessionPhaseTimings> {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -136,12 +162,16 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
         budget.reset_peak();
         let turn_start = Instant::now();
         let mut flushed_pending_tokens = 0usize;
+        let mut phase_timings = RamaSessionPhaseTimings::default();
         if let Some(token) = self.pending_uncached_token {
             let emitted = self.adapter.append_tokens(&[token], budget, false)?;
             if emitted.is_some() {
                 return Err(RuntimeError::InvalidTensorData(
                     "chat session pending-token flush unexpectedly emitted logits".to_string(),
                 ));
+            }
+            if let Some(timings) = self.adapter.take_last_phase_timings() {
+                phase_timings.add_assign(timings);
             }
             self.pending_uncached_token = None;
             flushed_pending_tokens = 1;
@@ -156,6 +186,9 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     "chat session prefill did not emit first token".to_string(),
                 )
             })?;
+        if let Some(timings) = self.adapter.take_last_phase_timings() {
+            phase_timings.add_assign(timings);
+        }
         let prefill_ms = prefill_start.elapsed().as_secs_f64() * 1000.0;
         let ttft_ms = turn_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -182,6 +215,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     end_to_end_tok_s: 1.0 / (end_to_end_ms / 1000.0).max(f64::EPSILON),
                     context_memory_bytes: self.adapter.context_memory_bytes(),
                     peak_transient_bytes: budget.peak_bytes(),
+                    phase_timings,
                 },
             ));
         }
@@ -199,6 +233,9 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                         "chat session decode did not emit next token".to_string(),
                     )
                 })?;
+            if let Some(timings) = self.adapter.take_last_phase_timings() {
+                phase_timings.add_assign(timings);
+            }
             generated_token_ids.push(step.token_id);
             self.token_history.push(step.token_id);
             self.pending_uncached_token = Some(step.token_id);
@@ -232,6 +269,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     / (end_to_end_ms / 1000.0).max(f64::EPSILON),
                 context_memory_bytes: self.adapter.context_memory_bytes(),
                 peak_transient_bytes: budget.peak_bytes(),
+                phase_timings,
             },
         ))
     }
@@ -263,6 +301,7 @@ mod tests {
         appends: Vec<(Vec<usize>, bool)>,
         faults: Vec<AppendFault>,
         transient_bytes: usize,
+        phase_timings: Vec<RamaSessionPhaseTimings>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,6 +327,7 @@ mod tests {
                 appends: Vec::new(),
                 faults: Vec::new(),
                 transient_bytes: 0,
+                phase_timings: Vec::new(),
             }
         }
 
@@ -376,6 +416,14 @@ mod tests {
                 }))
             } else {
                 Ok(None)
+            }
+        }
+
+        fn take_last_phase_timings(&mut self) -> Option<RamaSessionPhaseTimings> {
+            if self.phase_timings.is_empty() {
+                None
+            } else {
+                Some(self.phase_timings.remove(0))
             }
         }
     }
@@ -629,5 +677,33 @@ mod tests {
 
         assert_eq!(turn.metrics.peak_transient_bytes, 64);
         assert_eq!(budget.current_bytes(), 0);
+    }
+
+    #[test]
+    fn turn_metrics_collect_adapter_phase_timings() {
+        let mut adapter = RecordingAdapter::new(16);
+        adapter.phase_timings.push(RamaSessionPhaseTimings {
+            embedding_ms: 1.0,
+            transformer_ms: 2.0,
+            final_norm_ms: 3.0,
+            lm_head_ms: 4.0,
+        });
+        adapter.phase_timings.push(RamaSessionPhaseTimings {
+            embedding_ms: 10.0,
+            transformer_ms: 20.0,
+            final_norm_ms: 30.0,
+            lm_head_ms: 40.0,
+        });
+        let mut session = RamaChatSession::new(adapter);
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session
+            .generate_turn(&[1, 2], 2, &mut budget, |_| true)
+            .unwrap();
+
+        assert_eq!(result.metrics.phase_timings.embedding_ms, 11.0);
+        assert_eq!(result.metrics.phase_timings.transformer_ms, 22.0);
+        assert_eq!(result.metrics.phase_timings.final_norm_ms, 33.0);
+        assert_eq!(result.metrics.phase_timings.lm_head_ms, 44.0);
     }
 }
