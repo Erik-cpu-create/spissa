@@ -319,6 +319,8 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 rope_theta: self.prepared.config.rope_theta,
                 causal: self.prepared.config.causal,
                 position_offset,
+                layer_index: i,
+                total_layers: self.prepared.layers.len(),
                 experimental_speed: self.experimental_speed_config,
             };
             let mut transformer_detail = RamaTransformerPhaseTimings::default();
@@ -944,6 +946,84 @@ mod tests {
         writer.finalize().unwrap();
     }
 
+    fn write_bf16_mlp_speed_model_with_layers(
+        path: &std::path::Path,
+        vocab_size: usize,
+        layer_count: usize,
+    ) {
+        let mut writer = RllmWriter::new(path, llama_metadata_with_vocab(vocab_size)).unwrap();
+        let mut tensor_id = 0u64;
+        add_f32_tensor(
+            &mut writer,
+            tensor_id,
+            "model.embed_tokens.weight",
+            vec![vocab_size as u64, HIDDEN_SIZE as u64],
+            &vec![0.0; vocab_size * HIDDEN_SIZE],
+        );
+        tensor_id += 1;
+        add_bf16_tensor(
+            &mut writer,
+            tensor_id,
+            "lm_head.weight",
+            vec![vocab_size as u64, HIDDEN_SIZE as u64],
+            &vec![0x0000; vocab_size * HIDDEN_SIZE],
+        );
+        tensor_id += 1;
+        for layer_idx in 0..layer_count {
+            add_layer_norms(&mut writer, &mut tensor_id, layer_idx);
+            let prefix = format!("model.layers.{layer_idx}");
+            add_zero_f32_tensor(
+                &mut writer,
+                &mut tensor_id,
+                &format!("{prefix}.self_attn.q_proj.weight"),
+                vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+            );
+            add_zero_f32_tensor(
+                &mut writer,
+                &mut tensor_id,
+                &format!("{prefix}.self_attn.k_proj.weight"),
+                vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+            );
+            add_zero_f32_tensor(
+                &mut writer,
+                &mut tensor_id,
+                &format!("{prefix}.self_attn.v_proj.weight"),
+                vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+            );
+            add_zero_f32_tensor(
+                &mut writer,
+                &mut tensor_id,
+                &format!("{prefix}.self_attn.o_proj.weight"),
+                vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
+            );
+            add_bf16_tensor(
+                &mut writer,
+                tensor_id,
+                &format!("{prefix}.mlp.gate_proj.weight"),
+                vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
+                &[0x0000; INTERMEDIATE_SIZE * HIDDEN_SIZE],
+            );
+            tensor_id += 1;
+            add_bf16_tensor(
+                &mut writer,
+                tensor_id,
+                &format!("{prefix}.mlp.up_proj.weight"),
+                vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
+                &[0x0000; INTERMEDIATE_SIZE * HIDDEN_SIZE],
+            );
+            tensor_id += 1;
+            add_bf16_tensor(
+                &mut writer,
+                tensor_id,
+                &format!("{prefix}.mlp.down_proj.weight"),
+                vec![HIDDEN_SIZE as u64, INTERMEDIATE_SIZE as u64],
+                &[0x0000; HIDDEN_SIZE * INTERMEDIATE_SIZE],
+            );
+            tensor_id += 1;
+        }
+        writer.finalize().unwrap();
+    }
+
     fn write_post_cache_failure_model(path: &std::path::Path) {
         let mut writer = RllmWriter::new(path, llama_metadata()).unwrap();
         let mut tensor_id = 0u64;
@@ -1114,7 +1194,8 @@ mod tests {
         let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget).unwrap();
         adapter.enable_experimental_speed_for_test(crate::RamaExperimentalSpeedConfig {
             enabled: true,
-            turbo_topk: Some(1),
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(1),
         });
 
         adapter.append_tokens(&[0], &mut budget, true).unwrap();
@@ -1122,6 +1203,64 @@ mod tests {
 
         assert!(stats.sparse_projection_calls > 0);
         assert!(stats.max_selected_topk <= 1);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_quality_policy_uses_fewer_aip_calls_than_speed_policy() {
+        let path = temp_path("aip-quality-vs-speed");
+        write_bf16_mlp_speed_model_with_layers(&path, 8, 4);
+
+        let mut quality_model = LazyRllmModel::open(&path).unwrap();
+        let quality_prepared = prepared_with_layers(4);
+        let mut quality_budget = MemoryBudget::unbounded();
+        let mut quality_adapter = LlamaRamaSessionAdapter::new(
+            &mut quality_model,
+            &quality_prepared,
+            &mut quality_budget,
+        )
+        .unwrap();
+        quality_adapter.enable_experimental_speed_for_test(crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Quality,
+            aip_topk: Some(1),
+        });
+        quality_adapter
+            .append_tokens(&[0], &mut quality_budget, true)
+            .unwrap();
+        let quality_stats = quality_adapter
+            .take_last_experimental_speed_stats()
+            .unwrap();
+
+        let mut speed_model = LazyRllmModel::open(&path).unwrap();
+        let speed_prepared = prepared_with_layers(4);
+        let mut speed_budget = MemoryBudget::unbounded();
+        let mut speed_adapter =
+            LlamaRamaSessionAdapter::new(&mut speed_model, &speed_prepared, &mut speed_budget)
+                .unwrap();
+        speed_adapter.enable_experimental_speed_for_test(crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(1),
+        });
+        speed_adapter
+            .append_tokens(&[0], &mut speed_budget, true)
+            .unwrap();
+        let speed_stats = speed_adapter.take_last_experimental_speed_stats().unwrap();
+
+        assert_eq!(
+            quality_stats.aip_policy,
+            Some(crate::RamaAipPolicyKind::Quality)
+        );
+        assert_eq!(
+            speed_stats.aip_policy,
+            Some(crate::RamaAipPolicyKind::Speed)
+        );
+        assert!(quality_stats.sparse_projection_calls > 0);
+        assert!(quality_stats.sparse_projection_calls < speed_stats.sparse_projection_calls);
+        assert_eq!(quality_stats.max_selected_topk, 1);
+        assert_eq!(speed_stats.max_selected_topk, 1);
 
         std::fs::remove_file(path).ok();
     }

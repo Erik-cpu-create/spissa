@@ -25,8 +25,9 @@ mod tokenizer;
 mod trace;
 
 pub use chat_session::{
-    RamaChatSession, RamaRollingStats, RamaSessionAdapter, RamaSessionPhaseTimings,
-    RamaSessionStep, RamaSessionTurnMetrics, RamaSessionTurnResult, RamaTransformerPhaseTimings,
+    RamaChatSession, RamaRepetitionStats, RamaRollingStats, RamaSessionAdapter,
+    RamaSessionPhaseTimings, RamaSessionStep, RamaSessionTurnMetrics, RamaSessionTurnResult,
+    RamaTransformerPhaseTimings,
 };
 pub use echo::{
     streaming_echo_transformer_decode_step_from_model,
@@ -55,7 +56,8 @@ pub use rotary::{
     KvAttentionConfig, KvCache, RotaryEmbeddingConfig,
 };
 pub use speed::{
-    parse_experimental_speed_enabled, parse_turbo_topk, select_top_abs_indices,
+    parse_aip_policy, parse_aip_topk, parse_experimental_speed_enabled, parse_turbo_topk,
+    select_top_abs_indices, RamaAipPolicyKind, RamaAipProjectionDecision, RamaAipProjectionKind,
     RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats,
 };
 pub use streaming::{

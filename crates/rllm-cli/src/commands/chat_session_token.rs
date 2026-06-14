@@ -245,17 +245,33 @@ fn format_rolling_note(stats: rllm_runtime::RamaRollingStats) -> String {
     }
 }
 
-fn format_experimental_speed_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
+fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
     if stats.is_empty() {
         String::new()
     } else {
+        let policy_str = stats.aip_policy.map(|p| p.as_str()).unwrap_or("none");
         format!(
-            " experimental_sparse_calls={} experimental_fallbacks={} experimental_max_topk={} experimental_skipped_madds={} experimental_scratch_bytes={}",
+            " aip_policy={} aip_calls={} aip_fallbacks={} aip_max_topk={} aip_skipped_madds={} aip_scratch_bytes={}",
+            policy_str,
             stats.sparse_projection_calls,
             stats.exact_fallbacks,
             stats.max_selected_topk,
             stats.estimated_skipped_madds,
             stats.peak_scratch_bytes
+        )
+    }
+}
+
+fn format_repetition_note(stats: rllm_runtime::RamaRepetitionStats) -> String {
+    if stats.generated_tokens == 0 {
+        String::new()
+    } else {
+        format!(
+            " repeated_ratio={:.2} max_run={} unique={}/{}",
+            stats.repeated_token_ratio,
+            stats.max_repeated_token_run,
+            stats.unique_generated_tokens,
+            stats.generated_tokens
         )
     }
 }
@@ -302,7 +318,8 @@ fn write_report(
     for row in rows {
         let phase_note = format_phase_timing_note(row.session_result.metrics.phase_timings)
             + &format_rolling_note(row.session_result.metrics.rolling_stats)
-            + &format_experimental_speed_note(row.session_result.metrics.experimental_speed_stats);
+            + &format_aip_note(row.session_result.metrics.experimental_speed_stats)
+            + &format_repetition_note(row.session_result.metrics.repetition_stats);
         body.push_str(&format!(
             "| {} | {} | {} | {} | {} | {:.2} ms | {:.2} ms | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {} | {} | {} | session_replayed={} flushed={} baseline_peak={} session_peak={} |\n",
             row.turn_index,
@@ -457,7 +474,7 @@ fn normalized_path_components(path: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_experimental_speed_note, format_phase_timing_note, format_rolling_note,
+        format_aip_note, format_phase_timing_note, format_repetition_note, format_rolling_note,
         parse_token_turns, token_match_summary, validate_report_output_path,
     };
     use rllm_runtime::{RamaSessionPhaseTimings, RamaTransformerPhaseTimings};
@@ -572,8 +589,9 @@ mod tests {
     }
 
     #[test]
-    fn format_experimental_speed_note_reports_nonzero_stats() {
-        let note = format_experimental_speed_note(rllm_runtime::RamaExperimentalSpeedStats {
+    fn format_aip_note_reports_nonzero_stats() {
+        let note = format_aip_note(rllm_runtime::RamaExperimentalSpeedStats {
+            aip_policy: Some(rllm_runtime::RamaAipPolicyKind::Quality),
             sparse_projection_calls: 4,
             exact_fallbacks: 1,
             selected_topk_sum: 256,
@@ -582,9 +600,24 @@ mod tests {
             peak_scratch_bytes: 512,
         });
 
-        assert!(note.contains("experimental_sparse_calls=4"));
-        assert!(note.contains("experimental_fallbacks=1"));
-        assert!(note.contains("experimental_max_topk=128"));
+        assert!(note.contains("aip_policy=quality"));
+        assert!(note.contains("aip_calls=4"));
+        assert!(note.contains("aip_fallbacks=1"));
+        assert!(note.contains("aip_max_topk=128"));
+    }
+
+    #[test]
+    fn format_repetition_note_reports_nonzero_stats() {
+        let note = format_repetition_note(rllm_runtime::RamaRepetitionStats {
+            generated_tokens: 10,
+            unique_generated_tokens: 5,
+            max_repeated_token_run: 3,
+            repeated_token_ratio: 0.25,
+        });
+
+        assert!(note.contains("repeated_ratio=0.25"));
+        assert!(note.contains("max_run=3"));
+        assert!(note.contains("unique=5/10"));
     }
 
     #[test]

@@ -1,26 +1,79 @@
 pub const RLLM_EXPERIMENTAL_SPEED_ENV: &str = "RLLM_EXPERIMENTAL_SPEED";
+pub const RLLM_AIP_POLICY_ENV: &str = "RLLM_AIP_POLICY";
+pub const RLLM_AIP_TOPK_ENV: &str = "RLLM_AIP_TOPK";
 pub const RLLM_TURBO_TOPK_ENV: &str = "RLLM_TURBO_TOPK";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RamaAipPolicyKind {
+    #[default]
+    Quality,
+    Speed,
+}
+
+impl RamaAipPolicyKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Quality => "quality",
+            Self::Speed => "speed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RamaAipProjectionKind {
+    MlpGateUp,
+    MlpDown,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RamaAipProjectionDecision {
+    pub enabled: bool,
+    pub topk: usize,
+}
+
+impl RamaAipProjectionDecision {
+    pub fn exact() -> Self {
+        Self {
+            enabled: false,
+            topk: 0,
+        }
+    }
+
+    pub fn aip(topk: usize) -> Self {
+        Self {
+            enabled: true,
+            topk,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RamaExperimentalSpeedConfig {
     pub enabled: bool,
-    pub turbo_topk: Option<usize>,
+    pub aip_policy: RamaAipPolicyKind,
+    pub aip_topk: Option<usize>,
 }
 
 impl RamaExperimentalSpeedConfig {
     pub fn from_env() -> Self {
+        let aip_topk = parse_aip_topk(std::env::var(RLLM_AIP_TOPK_ENV).ok().as_deref())
+            .or_else(|| parse_turbo_topk(std::env::var(RLLM_TURBO_TOPK_ENV).ok().as_deref()));
+
         Self {
             enabled: parse_experimental_speed_enabled(
                 std::env::var(RLLM_EXPERIMENTAL_SPEED_ENV).ok().as_deref(),
             ),
-            turbo_topk: parse_turbo_topk(std::env::var(RLLM_TURBO_TOPK_ENV).ok().as_deref()),
+            aip_policy: parse_aip_policy(std::env::var(RLLM_AIP_POLICY_ENV).ok().as_deref())
+                .unwrap_or_default(),
+            aip_topk,
         }
     }
 
     pub fn disabled() -> Self {
         Self {
             enabled: false,
-            turbo_topk: None,
+            aip_policy: RamaAipPolicyKind::Quality,
+            aip_topk: None,
         }
     }
 
@@ -28,15 +81,51 @@ impl RamaExperimentalSpeedConfig {
         if input_len == 0 {
             return 0;
         }
-        self.turbo_topk
+        self.aip_topk
             .unwrap_or(default_topk.max(1))
             .min(input_len)
             .max(1)
     }
+
+    pub fn aip_decision_for_projection(
+        self,
+        layer_index: usize,
+        total_layers: usize,
+        projection: RamaAipProjectionKind,
+        input_len: usize,
+        default_topk: usize,
+    ) -> RamaAipProjectionDecision {
+        if !self.enabled || input_len == 0 || layer_index >= total_layers {
+            return RamaAipProjectionDecision::exact();
+        }
+
+        match self.aip_policy {
+            RamaAipPolicyKind::Speed => {
+                RamaAipProjectionDecision::aip(self.topk_for_input(input_len, default_topk))
+            }
+            RamaAipPolicyKind::Quality => {
+                if projection != RamaAipProjectionKind::MlpGateUp
+                    || !quality_policy_allows_layer(layer_index, total_layers)
+                {
+                    return RamaAipProjectionDecision::exact();
+                }
+                RamaAipProjectionDecision::aip(self.topk_for_input(input_len, default_topk))
+            }
+        }
+    }
+}
+
+fn quality_policy_allows_layer(layer_index: usize, total_layers: usize) -> bool {
+    if total_layers < 4 || layer_index >= total_layers {
+        return false;
+    }
+    let exact_edge_layers = total_layers / 4;
+    layer_index >= exact_edge_layers && layer_index < total_layers.saturating_sub(exact_edge_layers)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RamaExperimentalSpeedStats {
+    pub aip_policy: Option<RamaAipPolicyKind>,
     pub sparse_projection_calls: usize,
     pub exact_fallbacks: usize,
     pub selected_topk_sum: usize,
@@ -47,6 +136,9 @@ pub struct RamaExperimentalSpeedStats {
 
 impl RamaExperimentalSpeedStats {
     pub fn add_assign(&mut self, other: Self) {
+        if self.aip_policy.is_none() {
+            self.aip_policy = other.aip_policy;
+        }
         self.sparse_projection_calls = self
             .sparse_projection_calls
             .saturating_add(other.sparse_projection_calls);
@@ -84,8 +176,15 @@ impl RamaExperimentalSpeedStats {
         self.exact_fallbacks = self.exact_fallbacks.saturating_add(1);
     }
 
+    pub fn record_aip_policy(&mut self, policy: RamaAipPolicyKind) {
+        if self.aip_policy.is_none() {
+            self.aip_policy = Some(policy);
+        }
+    }
+
     pub fn is_empty(self) -> bool {
-        self.sparse_projection_calls == 0
+        self.aip_policy.is_none()
+            && self.sparse_projection_calls == 0
             && self.exact_fallbacks == 0
             && self.selected_topk_sum == 0
             && self.max_selected_topk == 0
@@ -101,10 +200,22 @@ pub fn parse_experimental_speed_enabled(value: Option<&str>) -> bool {
     )
 }
 
-pub fn parse_turbo_topk(value: Option<&str>) -> Option<usize> {
+pub fn parse_aip_policy(value: Option<&str>) -> Option<RamaAipPolicyKind> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("quality") => Some(RamaAipPolicyKind::Quality),
+        Some("speed") => Some(RamaAipPolicyKind::Speed),
+        _ => None,
+    }
+}
+
+pub fn parse_aip_topk(value: Option<&str>) -> Option<usize> {
     value
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|value| *value > 0)
+}
+
+pub fn parse_turbo_topk(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
 }
 
 pub fn select_top_abs_indices(input: &[f32], topk: usize) -> Vec<usize> {
@@ -167,14 +278,16 @@ mod tests {
     fn config_chooses_bounded_topk() {
         let config = RamaExperimentalSpeedConfig {
             enabled: true,
-            turbo_topk: Some(512),
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: Some(512),
         };
         assert_eq!(config.topk_for_input(2048, 256), 512);
         assert_eq!(config.topk_for_input(128, 256), 128);
 
         let defaulted = RamaExperimentalSpeedConfig {
             enabled: true,
-            turbo_topk: None,
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: None,
         };
         assert_eq!(defaulted.topk_for_input(2048, 256), 256);
         assert_eq!(defaulted.topk_for_input(32, 256), 32);
@@ -197,6 +310,123 @@ mod tests {
         assert_eq!(stats.max_selected_topk, 4);
         assert_eq!(stats.estimated_skipped_madds, 2496);
         assert_eq!(stats.peak_scratch_bytes, 32);
+        assert!(!stats.is_empty());
+    }
+
+    #[test]
+    fn parse_aip_policy_accepts_quality_and_speed() {
+        assert_eq!(
+            parse_aip_policy(Some("quality")),
+            Some(RamaAipPolicyKind::Quality)
+        );
+        assert_eq!(
+            parse_aip_policy(Some("speed")),
+            Some(RamaAipPolicyKind::Speed)
+        );
+        assert_eq!(
+            parse_aip_policy(Some(" QUALITY ")),
+            Some(RamaAipPolicyKind::Quality)
+        );
+        assert_eq!(parse_aip_policy(Some("bad")), None);
+        assert_eq!(parse_aip_policy(None), None);
+    }
+
+    #[test]
+    fn parse_aip_topk_keeps_only_positive_values() {
+        assert_eq!(parse_aip_topk(Some("128")), Some(128));
+        assert_eq!(parse_aip_topk(Some("1")), Some(1));
+        assert_eq!(parse_aip_topk(Some("0")), None);
+        assert_eq!(parse_aip_topk(Some("-2")), None);
+        assert_eq!(parse_aip_topk(Some("bad")), None);
+        assert_eq!(parse_aip_topk(None), None);
+    }
+
+    #[test]
+    fn quality_policy_uses_only_middle_layer_gate_up() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: RamaAipPolicyKind::Quality,
+            aip_topk: Some(96),
+        };
+
+        assert_eq!(
+            config.aip_decision_for_projection(0, 8, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::exact()
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(7, 8, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::exact()
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(3, 8, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::aip(96)
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(3, 8, RamaAipProjectionKind::MlpDown, 8192, 512),
+            RamaAipProjectionDecision::exact()
+        );
+    }
+
+    #[test]
+    fn quality_policy_stays_exact_for_tiny_layer_counts() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: RamaAipPolicyKind::Quality,
+            aip_topk: Some(64),
+        };
+
+        assert_eq!(
+            config.aip_decision_for_projection(0, 1, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::exact()
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(1, 3, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::exact()
+        );
+    }
+
+    #[test]
+    fn speed_policy_uses_aip_for_gate_up_and_down() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: Some(128),
+        };
+
+        assert_eq!(
+            config.aip_decision_for_projection(0, 1, RamaAipProjectionKind::MlpGateUp, 2048, 256),
+            RamaAipProjectionDecision::aip(128)
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(0, 1, RamaAipProjectionKind::MlpDown, 8192, 512),
+            RamaAipProjectionDecision::aip(128)
+        );
+    }
+
+    #[test]
+    fn disabled_config_always_selects_exact() {
+        let config = RamaExperimentalSpeedConfig::disabled();
+
+        assert_eq!(
+            config.aip_decision_for_projection(3, 8, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::exact()
+        );
+    }
+
+    #[test]
+    fn stats_record_policy_without_losing_sparse_counts() {
+        let mut stats = RamaExperimentalSpeedStats::default();
+        stats.record_aip_policy(RamaAipPolicyKind::Quality);
+        stats.record_sparse_projection(4, 16, 3, 2);
+
+        let mut other = RamaExperimentalSpeedStats::default();
+        other.record_aip_policy(RamaAipPolicyKind::Speed);
+        other.record_exact_fallback();
+        stats.add_assign(other);
+
+        assert_eq!(stats.aip_policy, Some(RamaAipPolicyKind::Quality));
+        assert_eq!(stats.sparse_projection_calls, 1);
+        assert_eq!(stats.exact_fallbacks, 1);
         assert!(!stats.is_empty());
     }
 }
