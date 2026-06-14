@@ -542,6 +542,68 @@ mod tests {
     }
 
     #[test]
+    fn streaming_tile_linear_argmax_with_rolling_records_stats() {
+        let path = temp_path("tile-linear-argmax-bf16-rolling");
+        let weight_bf16 = vec![
+            0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000,
+            0xbf00, 0x3f40, 0x3f80, 0x4000, 0x4040, 0xc040, 0x3f00, 0x3e80, 0x3f00,
+            0x3f80, 0x4000, 0x4040, 0x4080, 0x40a0,
+        ];
+        let weight_f32: Vec<f32> = weight_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "linear.argmax.bf16.rolling.weight",
+            vec![8, 3],
+            &weight_bf16,
+            weight_bf16.len() * 2,
+        );
+        writer.finalize().unwrap();
+
+        let input = vec![1.5, -2.0, 0.25];
+        let bias = vec![0.0, 0.5, -1.0, 4.0, 0.25, -0.25, 0.75, 1.25];
+        let logits = linear(&input, &weight_f32, Some(&bias), 1, 3, 8).unwrap();
+        let expected = sample_argmax(&logits).unwrap();
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(64);
+        let mut executor =
+            crate::rolling::RollingExecutor::new(crate::rolling::RollingExecutorConfig {
+                enabled: true,
+                worker_count: 4,
+                min_rows_per_worker: 1,
+            });
+
+        let actual = streaming_tile_linear_argmax_with_rolling_from_model(
+            &mut model,
+            "linear.argmax.bf16.rolling.weight",
+            &input,
+            Some(&bias),
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 3,
+                    out_features: 8,
+                },
+                tile_elements: 2,
+            },
+            &mut budget,
+            Some(&mut executor),
+        )
+        .unwrap();
+        let stats = executor.take_stats();
+
+        assert_eq!(actual, expected);
+        assert!(stats.submitted_tasks > 0);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn raw_bf16_argmax_row_block_kernel_matches_materialized_partial_chunk() {
         let weight_bf16 = vec![
             0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000, 0xbf00,
@@ -571,6 +633,7 @@ mod tests {
             DType::Bf16,
             &mut state,
             "linear.argmax.bf16.row-block.weight",
+            None,
         )
         .unwrap();
         let actual = state

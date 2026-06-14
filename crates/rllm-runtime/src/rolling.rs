@@ -9,16 +9,6 @@ pub(crate) struct RollingExecutorConfig {
     pub min_rows_per_worker: usize,
 }
 
-impl RollingExecutorConfig {
-    pub(crate) fn disabled() -> Self {
-        Self {
-            enabled: false,
-            worker_count: 1,
-            min_rows_per_worker: 4,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct RollingExecutor {
     config: RollingExecutorConfig,
