@@ -6,6 +6,7 @@ use crate::models::llama::generate::{
 };
 use crate::models::llama::model::{
     LayerDecodedLlamaRamaTransformer, OwnedLlamaStreamingBlockParameters,
+    OwnedLlamaStreamingBlockTensorNames,
 };
 use crate::rotary::KvCache;
 use crate::{
@@ -85,6 +86,51 @@ fn validate_matrix_shape(
     Ok(())
 }
 
+fn checked_projection_rows(label: &str, heads: usize, head_dim: usize) -> Result<usize> {
+    heads.checked_mul(head_dim).ok_or_else(|| {
+        RuntimeError::Shape(format!(
+            "llama session {label} projection row count overflow"
+        ))
+    })
+}
+
+fn validate_layer_tensor_shapes(
+    model: &LazyRllmModel,
+    layer_names: &OwnedLlamaStreamingBlockTensorNames,
+    hidden_size: usize,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    intermediate_size: usize,
+) -> Result<()> {
+    let q_rows = checked_projection_rows("q", q_heads, head_dim)?;
+    let kv_rows = checked_projection_rows("kv", kv_heads, head_dim)?;
+
+    validate_matrix_shape(model, &layer_names.q_weight, q_rows, hidden_size)?;
+    validate_matrix_shape(model, &layer_names.k_weight, kv_rows, hidden_size)?;
+    validate_matrix_shape(model, &layer_names.v_weight, kv_rows, hidden_size)?;
+    validate_matrix_shape(model, &layer_names.o_weight, hidden_size, q_rows)?;
+    validate_matrix_shape(
+        model,
+        &layer_names.gate_weight,
+        intermediate_size,
+        hidden_size,
+    )?;
+    validate_matrix_shape(
+        model,
+        &layer_names.up_weight,
+        intermediate_size,
+        hidden_size,
+    )?;
+    validate_matrix_shape(
+        model,
+        &layer_names.down_weight,
+        hidden_size,
+        intermediate_size,
+    )?;
+    Ok(())
+}
+
 impl<'a> LlamaRamaSessionAdapter<'a> {
     pub fn new(
         model: &'a mut LazyRllmModel,
@@ -124,6 +170,17 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         let vocab_size =
             validate_matrix_with_columns(model, &prepared.embedding_weight, hidden_size)?;
         validate_matrix_shape(model, &prepared.lm_head_weight, vocab_size, hidden_size)?;
+        for layer_names in &prepared.layers {
+            validate_layer_tensor_shapes(
+                model,
+                layer_names,
+                hidden_size,
+                prepared.config.num_heads,
+                prepared.config.num_key_value_heads,
+                head_dim,
+                intermediate_size,
+            )?;
+        }
 
         let embedding_data = model
             .decode_tensor(&prepared.embedding_weight, budget)?
@@ -438,64 +495,183 @@ mod tests {
         *tensor_id += 1;
     }
 
+    fn zero_values(shape: &[u64]) -> Vec<f32> {
+        vec![0.0; shape.iter().product::<u64>() as usize]
+    }
+
+    fn add_zero_f32_tensor(
+        writer: &mut RllmWriter,
+        tensor_id: &mut u64,
+        name: &str,
+        shape: Vec<u64>,
+    ) {
+        let values = zero_values(&shape);
+        add_f32_tensor(writer, *tensor_id, name, shape, &values);
+        *tensor_id += 1;
+    }
+
+    fn add_layer_projection_tensors(
+        writer: &mut RllmWriter,
+        tensor_id: &mut u64,
+        layer_idx: usize,
+        o_shape: Vec<u64>,
+        down_shape: Vec<u64>,
+        short_q_data: bool,
+    ) {
+        let prefix = format!("model.layers.{layer_idx}");
+        let hidden = HIDDEN_SIZE as u64;
+        let intermediate = INTERMEDIATE_SIZE as u64;
+        let hidden_square = vec![hidden, hidden];
+
+        if short_q_data {
+            add_f32_tensor(
+                writer,
+                *tensor_id,
+                &format!("{prefix}.self_attn.q_proj.weight"),
+                hidden_square.clone(),
+                &[0.0],
+            );
+            *tensor_id += 1;
+        } else {
+            add_zero_f32_tensor(
+                writer,
+                tensor_id,
+                &format!("{prefix}.self_attn.q_proj.weight"),
+                hidden_square.clone(),
+            );
+        }
+        add_zero_f32_tensor(
+            writer,
+            tensor_id,
+            &format!("{prefix}.self_attn.k_proj.weight"),
+            hidden_square.clone(),
+        );
+        add_zero_f32_tensor(
+            writer,
+            tensor_id,
+            &format!("{prefix}.self_attn.v_proj.weight"),
+            hidden_square.clone(),
+        );
+        add_zero_f32_tensor(
+            writer,
+            tensor_id,
+            &format!("{prefix}.self_attn.o_proj.weight"),
+            o_shape,
+        );
+        add_zero_f32_tensor(
+            writer,
+            tensor_id,
+            &format!("{prefix}.mlp.gate_proj.weight"),
+            vec![intermediate, hidden],
+        );
+        add_zero_f32_tensor(
+            writer,
+            tensor_id,
+            &format!("{prefix}.mlp.up_proj.weight"),
+            vec![intermediate, hidden],
+        );
+        add_zero_f32_tensor(
+            writer,
+            tensor_id,
+            &format!("{prefix}.mlp.down_proj.weight"),
+            down_shape,
+        );
+    }
+
+    fn add_complete_layer(writer: &mut RllmWriter, tensor_id: &mut u64, layer_idx: usize) {
+        let hidden = HIDDEN_SIZE as u64;
+        let intermediate = INTERMEDIATE_SIZE as u64;
+        add_layer_norms(writer, tensor_id, layer_idx);
+        add_layer_projection_tensors(
+            writer,
+            tensor_id,
+            layer_idx,
+            vec![hidden, hidden],
+            vec![hidden, intermediate],
+            false,
+        );
+    }
+
+    fn add_layer_with_bad_o_projection(
+        writer: &mut RllmWriter,
+        tensor_id: &mut u64,
+        layer_idx: usize,
+    ) {
+        let hidden = HIDDEN_SIZE as u64;
+        let intermediate = INTERMEDIATE_SIZE as u64;
+        add_layer_norms(writer, tensor_id, layer_idx);
+        add_layer_projection_tensors(
+            writer,
+            tensor_id,
+            layer_idx,
+            vec![hidden - 1, hidden],
+            vec![hidden, intermediate],
+            false,
+        );
+    }
+
+    fn add_layer_with_bad_down_projection(
+        writer: &mut RllmWriter,
+        tensor_id: &mut u64,
+        layer_idx: usize,
+    ) {
+        let hidden = HIDDEN_SIZE as u64;
+        let intermediate = INTERMEDIATE_SIZE as u64;
+        add_layer_norms(writer, tensor_id, layer_idx);
+        add_layer_projection_tensors(
+            writer,
+            tensor_id,
+            layer_idx,
+            vec![hidden, hidden],
+            vec![hidden, intermediate - 1],
+            false,
+        );
+    }
+
+    fn add_layer_with_runtime_q_failure(
+        writer: &mut RllmWriter,
+        tensor_id: &mut u64,
+        layer_idx: usize,
+    ) {
+        let hidden = HIDDEN_SIZE as u64;
+        let intermediate = INTERMEDIATE_SIZE as u64;
+        add_layer_norms(writer, tensor_id, layer_idx);
+        add_layer_projection_tensors(
+            writer,
+            tensor_id,
+            layer_idx,
+            vec![hidden, hidden],
+            vec![hidden, intermediate],
+            true,
+        );
+    }
+
+    fn write_bad_attention_projection_model(path: &std::path::Path) {
+        let mut writer = RllmWriter::new(path, llama_metadata()).unwrap();
+        let mut tensor_id = 0u64;
+        add_base_tensors(
+            &mut writer,
+            &mut tensor_id,
+            vec![VOCAB_SIZE as u64, HIDDEN_SIZE as u64],
+        );
+        add_layer_with_bad_o_projection(&mut writer, &mut tensor_id, 0);
+        writer.finalize().unwrap();
+    }
+
+    fn write_bad_mlp_projection_model(path: &std::path::Path) {
+        let mut writer = RllmWriter::new(path, llama_metadata()).unwrap();
+        let mut tensor_id = 0u64;
+        add_base_tensors(
+            &mut writer,
+            &mut tensor_id,
+            vec![VOCAB_SIZE as u64, HIDDEN_SIZE as u64],
+        );
+        add_layer_with_bad_down_projection(&mut writer, &mut tensor_id, 0);
+        writer.finalize().unwrap();
+    }
+
     fn add_complete_layer_zero(writer: &mut RllmWriter, tensor_id: &mut u64) {
-        add_layer_norms(writer, tensor_id, 0);
-        add_f32_tensor(
-            writer,
-            *tensor_id,
-            "model.layers.0.self_attn.q_proj.weight",
-            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
-            &[0.0; HIDDEN_SIZE * HIDDEN_SIZE],
-        );
-        *tensor_id += 1;
-        add_f32_tensor(
-            writer,
-            *tensor_id,
-            "model.layers.0.self_attn.k_proj.weight",
-            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
-            &[0.0; HIDDEN_SIZE * HIDDEN_SIZE],
-        );
-        *tensor_id += 1;
-        add_f32_tensor(
-            writer,
-            *tensor_id,
-            "model.layers.0.self_attn.v_proj.weight",
-            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
-            &[0.0; HIDDEN_SIZE * HIDDEN_SIZE],
-        );
-        *tensor_id += 1;
-        add_f32_tensor(
-            writer,
-            *tensor_id,
-            "model.layers.0.self_attn.o_proj.weight",
-            vec![HIDDEN_SIZE as u64, HIDDEN_SIZE as u64],
-            &[0.0; HIDDEN_SIZE * HIDDEN_SIZE],
-        );
-        *tensor_id += 1;
-        add_f32_tensor(
-            writer,
-            *tensor_id,
-            "model.layers.0.mlp.gate_proj.weight",
-            vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
-            &[0.0; INTERMEDIATE_SIZE * HIDDEN_SIZE],
-        );
-        *tensor_id += 1;
-        add_f32_tensor(
-            writer,
-            *tensor_id,
-            "model.layers.0.mlp.up_proj.weight",
-            vec![INTERMEDIATE_SIZE as u64, HIDDEN_SIZE as u64],
-            &[0.0; INTERMEDIATE_SIZE * HIDDEN_SIZE],
-        );
-        *tensor_id += 1;
-        add_f32_tensor(
-            writer,
-            *tensor_id,
-            "model.layers.0.mlp.down_proj.weight",
-            vec![HIDDEN_SIZE as u64, INTERMEDIATE_SIZE as u64],
-            &[0.0; HIDDEN_SIZE * INTERMEDIATE_SIZE],
-        );
-        *tensor_id += 1;
+        add_complete_layer(writer, tensor_id, 0);
     }
 
     fn write_constructor_model(path: &std::path::Path, lm_head_shape: Vec<u64>) {
@@ -515,7 +691,7 @@ mod tests {
             vec![VOCAB_SIZE as u64, HIDDEN_SIZE as u64],
         );
         add_complete_layer_zero(&mut writer, &mut tensor_id);
-        add_layer_norms(&mut writer, &mut tensor_id, 1);
+        add_layer_with_runtime_q_failure(&mut writer, &mut tensor_id, 1);
         writer.finalize().unwrap();
     }
 
@@ -567,6 +743,40 @@ mod tests {
         assert!(matches!(
             result,
             Err(RuntimeError::Shape(message)) if message.contains("final_layernorm_weight")
+        ));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_new_rejects_malformed_attention_projection_shape() {
+        let path = temp_path("malformed-attention-projection");
+        write_bad_attention_projection_model(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(1);
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget);
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Shape(message)) if message.contains("self_attn.o_proj.weight")
+        ));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_new_rejects_malformed_mlp_projection_shape() {
+        let path = temp_path("malformed-mlp-projection");
+        write_bad_mlp_projection_model(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(1);
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget);
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Shape(message)) if message.contains("mlp.down_proj.weight")
         ));
         std::fs::remove_file(path).ok();
     }
