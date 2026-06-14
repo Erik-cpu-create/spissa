@@ -149,6 +149,8 @@ printf 'good morning\nexit\n' | \
 # RLLM_AIP_LM_HEAD_TOPK.
 # Optional R32 layer-edge probes:
 # RLLM_AIP_EDGE_LAYERS, RLLM_AIP_EDGE_TOPK.
+# Optional R33 repeat-margin controller:
+# RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI=500
 
 # Force the runtime worker count for CPU-only benchmarks.
 RLLM_THREADS=1 cargo run --release -p rllm-cli --bin llama-test -- \
