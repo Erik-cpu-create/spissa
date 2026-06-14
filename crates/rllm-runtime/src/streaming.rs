@@ -453,6 +453,28 @@ pub fn streaming_tile_linear_from_model(
                     weight_name,
                 )
             })?;
+        } else if chunk.codec_id == "rtc-raw-v1"
+            && tensor.dtype == rllm_container::DType::Bf16
+            && config.linear.batch == 1
+        {
+            model.with_raw_chunk(chunk.chunk_id, budget, |compressed_bytes, _budget| {
+                if compressed_bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} raw byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        compressed_bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_fused_raw_bf16_chunk_batch1(
+                    input,
+                    &mut output,
+                    compressed_bytes,
+                    element_start,
+                    config.linear,
+                    weight_name,
+                )
+            })?;
         } else {
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
                 if bytes.len() != expected_chunk_bytes {
@@ -2636,6 +2658,134 @@ fn accumulate_fused_raw_fp16_chunk_batch1_row_blocked(
     Ok(())
 }
 
+fn accumulate_fused_raw_bf16_chunk_batch1(
+    input: &[f32],
+    output: &mut [f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    weight_name: &str,
+) -> Result<()> {
+    accumulate_fused_raw_16bit_chunk_batch1_row_blocked(
+        input,
+        output,
+        raw_bytes,
+        element_start,
+        config,
+        rllm_container::DType::Bf16,
+        weight_name,
+    )
+}
+
+fn accumulate_fused_raw_16bit_chunk_batch1_row_blocked(
+    input: &[f32],
+    output: &mut [f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    dtype: rllm_container::DType,
+    weight_name: &str,
+) -> Result<()> {
+    if !raw_bytes.len().is_multiple_of(2) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "Raw 16-bit stream for {weight_name} has odd length"
+        )));
+    }
+    if !matches!(
+        dtype,
+        rllm_container::DType::Fp16 | rllm_container::DType::Bf16
+    ) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "Raw 16-bit stream for {weight_name} has unsupported dtype {dtype:?}"
+        )));
+    }
+
+    if config.batch != 1 {
+        return Err(RuntimeError::Shape(format!(
+            "raw 16-bit batch1 row-block kernel requires batch=1, got {}",
+            config.batch
+        )));
+    }
+
+    let expected_weight_elements = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
+    let weight_elements = raw_bytes.len() / 2;
+    let element_end = element_start
+        .checked_add(weight_elements)
+        .ok_or_else(|| RuntimeError::Shape("weight chunk element range overflow".to_string()))?;
+    if element_end > expected_weight_elements {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} chunk elements {element_start}..{element_end} exceed expected {expected_weight_elements}"
+        )));
+    }
+
+    let mut local_idx = 0usize;
+    let mut global_idx = element_start;
+
+    while local_idx < weight_elements && !global_idx.is_multiple_of(config.in_features) {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+        let mut acc = output[out_feature];
+        acc += raw_16bit_dot_segment(input, raw_bytes, local_idx, in_feature, row_len, dtype)?;
+        output[out_feature] = acc;
+        local_idx += row_len;
+        global_idx += row_len;
+    }
+
+    let row_block_elements = config
+        .in_features
+        .checked_mul(4)
+        .ok_or_else(|| RuntimeError::Shape("row block element count overflow".to_string()))?;
+    while local_idx + row_block_elements <= weight_elements {
+        let out_feature = global_idx / config.in_features;
+        if out_feature + 3 >= config.out_features {
+            break;
+        }
+
+        let mut acc0 = output[out_feature];
+        let mut acc1 = output[out_feature + 1];
+        let mut acc2 = output[out_feature + 2];
+        let mut acc3 = output[out_feature + 3];
+        let row0_start = local_idx;
+        let row1_start = local_idx + config.in_features;
+        let row2_start = row1_start + config.in_features;
+        let row3_start = row2_start + config.in_features;
+
+        let mut idx = 0usize;
+        while idx < config.in_features {
+            let x = input[idx];
+            acc0 += x * raw_16bit_weight_at(raw_bytes, row0_start + idx, dtype);
+            acc1 += x * raw_16bit_weight_at(raw_bytes, row1_start + idx, dtype);
+            acc2 += x * raw_16bit_weight_at(raw_bytes, row2_start + idx, dtype);
+            acc3 += x * raw_16bit_weight_at(raw_bytes, row3_start + idx, dtype);
+            idx += 1;
+        }
+
+        output[out_feature] = acc0;
+        output[out_feature + 1] = acc1;
+        output[out_feature + 2] = acc2;
+        output[out_feature + 3] = acc3;
+        local_idx += row_block_elements;
+        global_idx += row_block_elements;
+    }
+
+    while local_idx < weight_elements {
+        let out_feature = global_idx / config.in_features;
+        let in_feature = global_idx % config.in_features;
+        let row_len = (config.in_features - in_feature).min(weight_elements - local_idx);
+        let mut acc = output[out_feature];
+        acc += raw_16bit_dot_segment(input, raw_bytes, local_idx, in_feature, row_len, dtype)?;
+        output[out_feature] = acc;
+        local_idx += row_len;
+        global_idx += row_len;
+    }
+
+    Ok(())
+}
+
 fn raw_fp16_dot_segment(
     input: &[f32],
     raw_bytes: &[u8],
@@ -2661,6 +2811,37 @@ fn raw_fp16_dot_segment(
     }
     while idx < row_len {
         acc += input[in_feature + idx] * fp16_weight_at(raw_bytes, local_idx + idx);
+        idx += 1;
+    }
+    Ok(acc)
+}
+
+fn raw_16bit_dot_segment(
+    input: &[f32],
+    raw_bytes: &[u8],
+    local_idx: usize,
+    in_feature: usize,
+    row_len: usize,
+    dtype: rllm_container::DType,
+) -> Result<f32> {
+    let mut acc = 0.0f32;
+    let mut idx = 0usize;
+    while idx + 4 <= row_len {
+        let byte_idx = (local_idx + idx) * 2;
+        let bytes = &raw_bytes[byte_idx..byte_idx + 8];
+        let input_start = in_feature + idx;
+        acc += input[input_start]
+            * raw_16bit_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]), dtype)
+            + input[input_start + 1]
+                * raw_16bit_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]), dtype)
+            + input[input_start + 2]
+                * raw_16bit_to_f32(u16::from_le_bytes([bytes[4], bytes[5]]), dtype)
+            + input[input_start + 3]
+                * raw_16bit_to_f32(u16::from_le_bytes([bytes[6], bytes[7]]), dtype);
+        idx += 4;
+    }
+    while idx < row_len {
+        acc += input[in_feature + idx] * raw_16bit_weight_at(raw_bytes, local_idx + idx, dtype);
         idx += 1;
     }
     Ok(acc)
@@ -3672,6 +3853,61 @@ mod tests {
 
         assert_close_vec(&actual, &expected, 1e-6);
         assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_uses_raw_bf16_batch1_path() {
+        let path = temp_path("tile-linear-bf16-batch1");
+        let weight_bf16 = vec![
+            0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000, 0xbf00,
+            0x3f40,
+        ];
+        let weight_f32: Vec<f32> = weight_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "linear.bf16.batch1.weight",
+            vec![4, 3],
+            &weight_bf16,
+            14,
+        );
+        writer.finalize().unwrap();
+
+        let input = vec![1.5, -2.0, 0.25];
+        let bias = vec![0.0, 0.5, -1.0, 4.0];
+        let expected = linear(&input, &weight_f32, Some(&bias), 1, 3, 4).unwrap();
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let mut budget = MemoryBudget::new(16);
+        let actual = streaming_tile_linear_from_model(
+            &mut model,
+            "linear.bf16.batch1.weight",
+            &input,
+            Some(&bias),
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 3,
+                    out_features: 4,
+                },
+                tile_elements: 2,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_close_vec(&actual, &expected, 1e-6);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(
+            budget.peak_bytes() <= 16,
+            "peak was {}",
+            budget.peak_bytes()
+        );
 
         std::fs::remove_file(&path).ok();
     }
