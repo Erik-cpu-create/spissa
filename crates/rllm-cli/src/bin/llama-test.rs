@@ -15,6 +15,14 @@ use rllm_runtime::{
 struct Args {
     #[arg(short, long)]
     model: String,
+
+    /// Maximum context length for the persistent token session.
+    #[arg(long, default_value_t = 2048)]
+    ctx: usize,
+
+    /// Maximum assistant tokens to generate per turn.
+    #[arg(long, default_value_t = 64)]
+    max_new_tokens: usize,
 }
 
 fn interactive_turn_text(has_context: bool, text: &str) -> String {
@@ -27,6 +35,12 @@ fn interactive_turn_text(has_context: bool, text: &str) -> String {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.ctx == 0 {
+        anyhow::bail!("--ctx must be greater than zero");
+    }
+    if args.max_new_tokens == 0 {
+        anyhow::bail!("--max-new-tokens must be greater than zero");
+    }
     let mut model = LazyRllmModel::open(&args.model)?;
 
     let tokenizer_meta = model
@@ -39,8 +53,8 @@ fn main() -> Result<()> {
     let eos_token_id = tokenizer_meta.eos_token_id;
 
     let config = LlamaRamaGenerationConfig {
-        max_new_tokens: 64,
-        max_seq_len: Some(2048),
+        max_new_tokens: args.max_new_tokens,
+        max_seq_len: Some(args.ctx),
         causal: true,
         sampling: StreamingSamplingConfig::Argmax,
     };
@@ -120,5 +134,30 @@ mod tests {
     fn interactive_turn_text_uses_only_current_turn_with_separator() {
         assert_eq!(interactive_turn_text(false, "good morning"), "good morning");
         assert_eq!(interactive_turn_text(true, "halo"), "\nhalo");
+    }
+
+    #[test]
+    fn args_default_to_2k_context_and_accept_override() {
+        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        assert_eq!(default_args.ctx, 2048);
+
+        let overridden_args =
+            Args::parse_from(["llama-test", "--model", "model.rllm", "--ctx", "4096"]);
+        assert_eq!(overridden_args.ctx, 4096);
+    }
+
+    #[test]
+    fn args_default_to_64_new_tokens_and_accept_override() {
+        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        assert_eq!(default_args.max_new_tokens, 64);
+
+        let overridden_args = Args::parse_from([
+            "llama-test",
+            "--model",
+            "model.rllm",
+            "--max-new-tokens",
+            "1",
+        ]);
+        assert_eq!(overridden_args.max_new_tokens, 1);
     }
 }
