@@ -189,6 +189,29 @@ impl KvCache {
         self.len = 0;
     }
 
+    pub fn truncate(&mut self, len: usize) -> Result<()> {
+        if len > self.len {
+            return Err(RuntimeError::Shape(format!(
+                "KV cache truncate cannot grow from {} to {len}",
+                self.len
+            )));
+        }
+        let value_len = len
+            .checked_mul(self.token_width())
+            .ok_or_else(|| RuntimeError::Shape("KV truncate length overflow".to_string()))?;
+        self.keys.truncate(value_len);
+        self.values.truncate(value_len);
+        self.len = len;
+        Ok(())
+    }
+
+    pub fn resident_bytes(&self) -> usize {
+        self.len
+            .saturating_mul(self.token_width())
+            .saturating_mul(2)
+            .saturating_mul(std::mem::size_of::<f32>())
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -584,6 +607,42 @@ mod tests {
         assert!(matches!(err, RuntimeError::Shape(_)));
         assert_eq!(cache.len(), 2);
         assert_eq!(cache.keys(), &[1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn kv_cache_truncate_rolls_back_len_and_buffers() {
+        let mut cache = KvCache::new(2, 3, 4).unwrap();
+        cache
+            .append(
+                &[
+                    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+                ],
+                &[
+                    13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0,
+                ],
+                2,
+            )
+            .unwrap();
+
+        cache.truncate(1).unwrap();
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.keys(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(cache.values(), &[13.0, 14.0, 15.0, 16.0, 17.0, 18.0]);
+        assert_eq!(cache.resident_bytes(), 48);
+    }
+
+    #[test]
+    fn kv_cache_truncate_rejects_growth() {
+        let mut cache = KvCache::new(1, 2, 4).unwrap();
+        cache.append(&[1.0, 2.0], &[3.0, 4.0], 1).unwrap();
+
+        let result = cache.truncate(2);
+
+        assert!(result.is_err());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.keys(), &[1.0, 2.0]);
+        assert_eq!(cache.values(), &[3.0, 4.0]);
     }
 
     #[test]
