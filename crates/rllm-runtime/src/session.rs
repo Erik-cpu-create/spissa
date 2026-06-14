@@ -848,27 +848,41 @@ mod tests {
     #[test]
     fn turn_metrics_collect_adapter_rolling_stats() {
         let mut adapter = RecordingAdapter::new(16);
-        adapter.steps = vec![Ok(Some(RamaSessionStep {
-            token_id: 7,
-            logits: None,
-            cached_context_len_after: 1,
-        }))];
+        adapter.steps = vec![
+            Ok(Some(RamaSessionStep {
+                token_id: 7,
+                logits: None,
+                cached_context_len_after: 1,
+            })),
+            Ok(Some(RamaSessionStep {
+                token_id: 8,
+                logits: None,
+                cached_context_len_after: 2,
+            })),
+        ];
         adapter.rolling_stats.push(RamaRollingStats {
             submitted_tasks: 3,
             worker_wakeups: 2,
             sequential_fallbacks: 1,
             peak_scratch_bytes: 64,
         });
+        adapter.rolling_stats.push(RamaRollingStats {
+            submitted_tasks: 5,
+            worker_wakeups: 4,
+            sequential_fallbacks: 2,
+            peak_scratch_bytes: 32,
+        });
         let mut session = RamaChatSession::new(adapter);
         let mut budget = MemoryBudget::unbounded();
 
         let result = session
-            .generate_turn(&[1], 1, &mut budget, |_| true)
+            .generate_turn(&[1], 2, &mut budget, |_| true)
             .unwrap();
 
-        assert_eq!(result.metrics.rolling_stats.submitted_tasks, 3);
-        assert_eq!(result.metrics.rolling_stats.worker_wakeups, 2);
-        assert_eq!(result.metrics.rolling_stats.sequential_fallbacks, 1);
+        assert_eq!(result.generated_token_ids, [7, 8]);
+        assert_eq!(result.metrics.rolling_stats.submitted_tasks, 8);
+        assert_eq!(result.metrics.rolling_stats.worker_wakeups, 6);
+        assert_eq!(result.metrics.rolling_stats.sequential_fallbacks, 3);
         assert_eq!(result.metrics.rolling_stats.peak_scratch_bytes, 64);
     }
 }
