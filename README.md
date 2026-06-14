@@ -112,10 +112,14 @@ cargo run -- doctor
 
 # Interactive LLaMA-family token-native session
 cargo run --release -p rllm-cli --bin llama-test -- \
-  --model models/SmolLM2-135M-raw.rllm
+  --model models/SmolLM2-135M-raw.rllm \
+  --ctx 2048 \
+  --max-new-tokens 64
 
 cargo run --release -p rllm-cli --bin llama-test -- \
-  --model models/Llama-3.2-1B-Instruct-raw.rllm
+  --model models/Llama-3.2-1B-Instruct-raw.rllm \
+  --ctx 2048 \
+  --max-new-tokens 64
 
 # Pack a safetensors model into .rllm
 cargo run -- pack ./models/pythia-70m/model.safetensors \
