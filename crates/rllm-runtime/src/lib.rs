@@ -5,6 +5,8 @@
 //! expose small tensor operations needed by a toy transformer runtime.
 #![allow(clippy::too_many_arguments)]
 
+#[path = "session.rs"]
+mod chat_session;
 mod echo;
 mod error;
 mod lazy;
@@ -14,13 +16,16 @@ pub mod models;
 mod ops;
 mod planner;
 mod rotary;
-mod session;
 mod streaming;
 mod tensor;
 mod tiny;
 mod tokenizer;
 mod trace;
 
+pub use chat_session::{
+    RamaChatSession, RamaSessionAdapter, RamaSessionStep, RamaSessionTurnMetrics,
+    RamaSessionTurnResult,
+};
 pub use echo::{
     streaming_echo_transformer_decode_step_from_model,
     streaming_echo_transformer_generate_from_model, streaming_echo_transformer_prefill_from_model,
@@ -46,10 +51,6 @@ pub use planner::{
 pub use rotary::{
     apply_gpt_neox_rotary_inplace, gpt_neox_rotary_dim, scaled_dot_product_attention_with_cache,
     KvAttentionConfig, KvCache, RotaryEmbeddingConfig,
-};
-pub use session::{
-    RamaChatSession, RamaSessionAdapter, RamaSessionStep, RamaSessionTurnMetrics,
-    RamaSessionTurnResult,
 };
 pub use streaming::{
     streaming_attention_from_model, streaming_attention_with_runtime_from_model,
