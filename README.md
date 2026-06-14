@@ -317,7 +317,15 @@ rllm/
 │   ├── rllm-cli/        # CLI binary (`rllm`)
 │   ├── rllm-container/  # .rllm binary format parser/writer
 │   ├── rllm-import/     # Safetensors import
-│   ├── rllm-runtime/    # Full-decode runtime loader + tensor ops
+│   ├── rllm-runtime/    # Lazy/streaming runtime, session cache, tensor ops
+│   │   └── src/streaming/
+│   │       ├── linear.rs      # streaming/tiled linear projections
+│   │       ├── argmax.rs      # LM-head argmax + CPU-aware row parallelism
+│   │       ├── kernels.rs     # raw fp16/bf16 row kernels
+│   │       ├── mlp.rs         # streaming MLP helpers
+│   │       ├── attention.rs   # streaming attention helpers
+│   │       ├── block.rs       # transformer block orchestration
+│   │       └── validation.rs  # shape/config validation
 │   └── rtc-codec/       # In-house lossless tensor compression codecs
 ├── docs/
 │   ├── format-rllm-v1.md
@@ -333,7 +341,7 @@ rllm/
 | `rllm-cli` | Command-line interface (`rllm` binary) |
 | `rllm-container` | `.rllm` file format: header, metadata, tensor/chunk directories |
 | `rllm-import` | External format import, currently safetensors |
-| `rllm-runtime` | Full-decode loader, memory-budgeted lazy runtime planner, tensor ops |
+| `rllm-runtime` | Lazy/runtime loader, memory-budgeted planner, streaming kernels, session cache, tensor ops |
 | `rtc-codec` | Lossless tensor codecs: raw, RLE, Huffman |
 
 ## File Format
