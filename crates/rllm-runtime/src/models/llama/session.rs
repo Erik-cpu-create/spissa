@@ -8,7 +8,9 @@ use crate::models::llama::model::{
     LayerDecodedLlamaRamaTransformer, OwnedLlamaStreamingBlockParameters,
     OwnedLlamaStreamingBlockTensorNames,
 };
-use crate::rolling::{RollingExecutor, RollingExecutorConfig};
+use crate::rolling::RollingExecutor;
+#[cfg(test)]
+use crate::rolling::RollingExecutorConfig;
 use crate::rotary::KvCache;
 use crate::streaming::streaming_tile_linear_argmax_with_rolling_from_model;
 use crate::{

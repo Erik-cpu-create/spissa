@@ -33,6 +33,20 @@ fn interactive_turn_text(has_context: bool, text: &str) -> String {
     }
 }
 
+fn format_rolling_suffix(stats: rllm_runtime::RamaRollingStats) -> String {
+    if stats.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " | Rolling: tasks={} wakeups={} fallbacks={} scratch={} bytes",
+            stats.submitted_tasks,
+            stats.worker_wakeups,
+            stats.sequential_fallbacks,
+            stats.peak_scratch_bytes
+        )
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.ctx == 0 {
@@ -111,14 +125,16 @@ fn main() -> Result<()> {
         )?;
 
         println!();
+        let rolling_suffix = format_rolling_suffix(result.metrics.rolling_stats);
         println!(
-            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes]",
+            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes{}]",
             result.metrics.ttft_ms / 1000.0,
             result.metrics.decode_tok_s,
             result.metrics.end_to_end_tok_s,
             result.metrics.generated_tokens,
             session.token_history().len(),
-            result.metrics.peak_transient_bytes
+            result.metrics.peak_transient_bytes,
+            rolling_suffix
         );
         has_context = true;
     }
@@ -134,6 +150,27 @@ mod tests {
     fn interactive_turn_text_uses_only_current_turn_with_separator() {
         assert_eq!(interactive_turn_text(false, "good morning"), "good morning");
         assert_eq!(interactive_turn_text(true, "halo"), "\nhalo");
+    }
+
+    #[test]
+    fn rolling_suffix_is_empty_without_activity() {
+        assert_eq!(
+            format_rolling_suffix(rllm_runtime::RamaRollingStats::default()),
+            ""
+        );
+    }
+
+    #[test]
+    fn rolling_suffix_reports_nonzero_activity() {
+        let suffix = format_rolling_suffix(rllm_runtime::RamaRollingStats {
+            submitted_tasks: 8,
+            worker_wakeups: 8,
+            sequential_fallbacks: 1,
+            peak_scratch_bytes: 64,
+        });
+
+        assert!(suffix.contains("tasks=8"));
+        assert!(suffix.contains("fallbacks=1"));
     }
 
     #[test]
