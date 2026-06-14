@@ -369,6 +369,138 @@ impl LazyRllmModel {
         result
     }
 
+    /// Expose two raw compressed chunks at once for fused kernels that combine
+    /// compatible tensors without materializing either full intermediate.
+    pub fn with_two_raw_chunks<R>(
+        &mut self,
+        first_chunk_id: u64,
+        second_chunk_id: u64,
+        budget: &mut MemoryBudget,
+        f: impl FnOnce(&[u8], &[u8], &mut MemoryBudget) -> Result<R>,
+    ) -> Result<R> {
+        let first_chunk = self
+            .chunks_by_id
+            .get(&first_chunk_id)
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData(format!("missing chunk {first_chunk_id}"))
+            })?
+            .clone();
+        let second_chunk = self
+            .chunks_by_id
+            .get(&second_chunk_id)
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData(format!("missing chunk {second_chunk_id}"))
+            })?
+            .clone();
+
+        let is_bounded = budget.limit_bytes() != usize::MAX;
+        let first_label = if is_bounded {
+            format!("compressed chunk {}", first_chunk.chunk_id)
+        } else {
+            String::new()
+        };
+        let second_label = if is_bounded {
+            format!("compressed chunk {}", second_chunk.chunk_id)
+        } else {
+            String::new()
+        };
+
+        if is_bounded {
+            budget.reserve(first_chunk.compressed_size as usize, first_label.clone())?;
+            if let Err(err) =
+                budget.reserve(second_chunk.compressed_size as usize, second_label.clone())
+            {
+                budget.release(first_chunk.compressed_size as usize, first_label)?;
+                return Err(err);
+            }
+        }
+
+        let first_raw = match self.reader.read_chunk_slice(first_chunk.chunk_id) {
+            Ok(bytes) => unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) },
+            Err(err) => {
+                if is_bounded {
+                    budget.release(second_chunk.compressed_size as usize, second_label)?;
+                    budget.release(first_chunk.compressed_size as usize, first_label)?;
+                }
+                return Err(err.into());
+            }
+        };
+        let second_raw = match self.reader.read_chunk_slice(second_chunk.chunk_id) {
+            Ok(bytes) => unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) },
+            Err(err) => {
+                if is_bounded {
+                    budget.release(second_chunk.compressed_size as usize, second_label)?;
+                    budget.release(first_chunk.compressed_size as usize, first_label)?;
+                }
+                return Err(err.into());
+            }
+        };
+
+        let first_verified = match self.verify_compressed_chunk_if_needed(&first_chunk, first_raw) {
+            Ok(verified) => verified,
+            Err(err) => {
+                if is_bounded {
+                    budget.release(second_chunk.compressed_size as usize, second_label)?;
+                    budget.release(first_chunk.compressed_size as usize, first_label)?;
+                }
+                return Err(err);
+            }
+        };
+        let second_verified =
+            match self.verify_compressed_chunk_if_needed(&second_chunk, second_raw) {
+                Ok(verified) => verified,
+                Err(err) => {
+                    if is_bounded {
+                        budget.release(second_chunk.compressed_size as usize, second_label)?;
+                        budget.release(first_chunk.compressed_size as usize, first_label)?;
+                    }
+                    return Err(err);
+                }
+            };
+
+        if self.rama_trace.is_some() {
+            if first_verified {
+                let now = Instant::now();
+                let tensor_name = self
+                    .tensors_by_id
+                    .get(&first_chunk.tensor_id)
+                    .map(|t| t.name.clone());
+                self.record_rama_chunk_event(
+                    "chunk_compressed_checksum",
+                    format!("verify compressed chunk {}", first_chunk.chunk_id),
+                    &first_chunk,
+                    tensor_name.as_deref(),
+                    now,
+                    now.elapsed(),
+                    budget,
+                );
+            }
+            if second_verified {
+                let now = Instant::now();
+                let tensor_name = self
+                    .tensors_by_id
+                    .get(&second_chunk.tensor_id)
+                    .map(|t| t.name.clone());
+                self.record_rama_chunk_event(
+                    "chunk_compressed_checksum",
+                    format!("verify compressed chunk {}", second_chunk.chunk_id),
+                    &second_chunk,
+                    tensor_name.as_deref(),
+                    now,
+                    now.elapsed(),
+                    budget,
+                );
+            }
+        }
+
+        let result = f(first_raw, second_raw, budget);
+        if is_bounded {
+            budget.release(second_chunk.compressed_size as usize, second_label)?;
+            budget.release(first_chunk.compressed_size as usize, first_label)?;
+        }
+        result
+    }
+
     /// Decode a single compressed chunk, run a closure with the decoded bytes,
     /// and release both compressed and decoded buffers before returning.
     pub fn with_decoded_chunk<R>(
