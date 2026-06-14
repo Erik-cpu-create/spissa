@@ -1,4 +1,4 @@
-use crate::{MemoryBudget, Result, RuntimeError};
+use crate::{MemoryBudget, RamaExperimentalSpeedStats, Result, RuntimeError};
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -139,6 +139,7 @@ pub struct RamaSessionTurnMetrics {
     pub context_memory_bytes: usize,
     pub peak_transient_bytes: usize,
     pub rolling_stats: RamaRollingStats,
+    pub experimental_speed_stats: RamaExperimentalSpeedStats,
     pub phase_timings: RamaSessionPhaseTimings,
 }
 
@@ -186,6 +187,10 @@ pub trait RamaSessionAdapter {
     }
 
     fn take_last_rolling_stats(&mut self) -> Option<RamaRollingStats> {
+        None
+    }
+
+    fn take_last_experimental_speed_stats(&mut self) -> Option<RamaExperimentalSpeedStats> {
         None
     }
 }
@@ -263,6 +268,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
         let mut flushed_pending_tokens = 0usize;
         let mut phase_timings = RamaSessionPhaseTimings::default();
         let mut rolling_stats = RamaRollingStats::default();
+        let mut experimental_speed_stats = RamaExperimentalSpeedStats::default();
         if let Some(token) = self.pending_uncached_token {
             let emitted = self.adapter.append_tokens(&[token], budget, false)?;
             if emitted.is_some() {
@@ -275,6 +281,9 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
             }
             if let Some(stats) = self.adapter.take_last_rolling_stats() {
                 rolling_stats.add_assign(stats);
+            }
+            if let Some(stats) = self.adapter.take_last_experimental_speed_stats() {
+                experimental_speed_stats.add_assign(stats);
             }
             self.pending_uncached_token = None;
             flushed_pending_tokens = 1;
@@ -294,6 +303,9 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
         }
         if let Some(stats) = self.adapter.take_last_rolling_stats() {
             rolling_stats.add_assign(stats);
+        }
+        if let Some(stats) = self.adapter.take_last_experimental_speed_stats() {
+            experimental_speed_stats.add_assign(stats);
         }
         let prefill_ms = prefill_start.elapsed().as_secs_f64() * 1000.0;
         let ttft_ms = turn_start.elapsed().as_secs_f64() * 1000.0;
@@ -322,6 +334,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     context_memory_bytes: self.adapter.context_memory_bytes(),
                     peak_transient_bytes: budget.peak_bytes(),
                     rolling_stats,
+                    experimental_speed_stats,
                     phase_timings,
                 },
             ));
@@ -345,6 +358,9 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
             }
             if let Some(stats) = self.adapter.take_last_rolling_stats() {
                 rolling_stats.add_assign(stats);
+            }
+            if let Some(stats) = self.adapter.take_last_experimental_speed_stats() {
+                experimental_speed_stats.add_assign(stats);
             }
             generated_token_ids.push(step.token_id);
             self.token_history.push(step.token_id);
@@ -380,6 +396,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                 context_memory_bytes: self.adapter.context_memory_bytes(),
                 peak_transient_bytes: budget.peak_bytes(),
                 rolling_stats,
+                experimental_speed_stats,
                 phase_timings,
             },
         ))
@@ -415,6 +432,7 @@ mod tests {
         transient_bytes: usize,
         phase_timings: Vec<RamaSessionPhaseTimings>,
         rolling_stats: Vec<RamaRollingStats>,
+        experimental_speed_stats: Vec<RamaExperimentalSpeedStats>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,6 +461,7 @@ mod tests {
                 transient_bytes: 0,
                 phase_timings: Vec::new(),
                 rolling_stats: Vec::new(),
+                experimental_speed_stats: Vec::new(),
             }
         }
 
@@ -560,6 +579,14 @@ mod tests {
                 None
             } else {
                 Some(self.rolling_stats.remove(0))
+            }
+        }
+
+        fn take_last_experimental_speed_stats(&mut self) -> Option<RamaExperimentalSpeedStats> {
+            if self.experimental_speed_stats.is_empty() {
+                None
+            } else {
+                Some(self.experimental_speed_stats.remove(0))
             }
         }
     }
@@ -884,5 +911,74 @@ mod tests {
         assert_eq!(result.metrics.rolling_stats.worker_wakeups, 6);
         assert_eq!(result.metrics.rolling_stats.sequential_fallbacks, 3);
         assert_eq!(result.metrics.rolling_stats.peak_scratch_bytes, 64);
+    }
+
+    #[test]
+    fn turn_metrics_collect_adapter_experimental_speed_stats() {
+        let mut adapter = RecordingAdapter::new(16);
+        adapter.steps = vec![
+            Ok(Some(RamaSessionStep {
+                token_id: 7,
+                logits: None,
+                cached_context_len_after: 1,
+            })),
+            Ok(Some(RamaSessionStep {
+                token_id: 8,
+                logits: None,
+                cached_context_len_after: 2,
+            })),
+        ];
+        adapter
+            .experimental_speed_stats
+            .push(RamaExperimentalSpeedStats {
+                sparse_projection_calls: 2,
+                exact_fallbacks: 1,
+                selected_topk_sum: 128,
+                max_selected_topk: 64,
+                estimated_skipped_madds: 1024,
+                peak_scratch_bytes: 512,
+            });
+        adapter
+            .experimental_speed_stats
+            .push(RamaExperimentalSpeedStats {
+                sparse_projection_calls: 3,
+                exact_fallbacks: 0,
+                selected_topk_sum: 256,
+                max_selected_topk: 128,
+                estimated_skipped_madds: 2048,
+                peak_scratch_bytes: 256,
+            });
+        let mut session = RamaChatSession::new(adapter);
+        let mut budget = MemoryBudget::unbounded();
+
+        let result = session
+            .generate_turn(&[1], 2, &mut budget, |_| true)
+            .unwrap();
+
+        assert_eq!(result.generated_token_ids, [7, 8]);
+        assert_eq!(
+            result
+                .metrics
+                .experimental_speed_stats
+                .sparse_projection_calls,
+            5
+        );
+        assert_eq!(result.metrics.experimental_speed_stats.exact_fallbacks, 1);
+        assert_eq!(
+            result.metrics.experimental_speed_stats.selected_topk_sum,
+            384
+        );
+        assert_eq!(result.metrics.experimental_speed_stats.max_selected_topk, 128);
+        assert_eq!(
+            result
+                .metrics
+                .experimental_speed_stats
+                .estimated_skipped_madds,
+            3072
+        );
+        assert_eq!(
+            result.metrics.experimental_speed_stats.peak_scratch_bytes,
+            512
+        );
     }
 }
