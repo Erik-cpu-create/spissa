@@ -23,8 +23,8 @@ mod tokenizer;
 mod trace;
 
 pub use chat_session::{
-    RamaChatSession, RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep,
-    RamaSessionTurnMetrics, RamaSessionTurnResult, RamaTransformerPhaseTimings,
+    RamaChatSession, RamaRollingStats, RamaSessionAdapter, RamaSessionPhaseTimings,
+    RamaSessionStep, RamaSessionTurnMetrics, RamaSessionTurnResult, RamaTransformerPhaseTimings,
 };
 pub use echo::{
     streaming_echo_transformer_decode_step_from_model,
