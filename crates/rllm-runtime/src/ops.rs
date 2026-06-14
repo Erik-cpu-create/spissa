@@ -186,6 +186,16 @@ pub fn gelu_inplace(values: &mut [f32]) {
     }
 }
 
+pub fn silu(x: f32) -> f32 {
+    x / (1.0 + (-x).exp())
+}
+
+pub fn silu_inplace(values: &mut [f32]) {
+    for value in values {
+        *value = silu(*value);
+    }
+}
+
 pub fn softmax_rows(logits: &[f32], rows: usize, cols: usize) -> Result<Vec<f32>> {
     if logits.len() != rows * cols {
         return Err(RuntimeError::Shape(format!(
@@ -246,9 +256,9 @@ pub fn scaled_dot_product_attention(
 
     for pos in 0..seq_len {
         for head in 0..num_heads {
-            for key_pos in 0..seq_len {
+            for (key_pos, score) in scores.iter_mut().enumerate().take(seq_len) {
                 if causal && key_pos > pos {
-                    scores[key_pos] = f32::NEG_INFINITY;
+                    *score = f32::NEG_INFINITY;
                     continue;
                 }
 
@@ -258,16 +268,16 @@ pub fn scaled_dot_product_attention(
                     let k_idx = ((key_pos * num_heads + head) * head_dim) + dim;
                     dot += q[q_idx] * k[k_idx];
                 }
-                scores[key_pos] = dot * scale;
+                *score = dot * scale;
             }
 
             let probs = softmax_rows(&scores, 1, seq_len)?;
             for dim in 0..head_dim {
                 let out_idx = ((pos * num_heads + head) * head_dim) + dim;
                 let mut value = 0.0f32;
-                for key_pos in 0..seq_len {
+                for (key_pos, prob) in probs.iter().copied().enumerate().take(seq_len) {
                     let v_idx = ((key_pos * num_heads + head) * head_dim) + dim;
-                    value += probs[key_pos] * v[v_idx];
+                    value += prob * v[v_idx];
                 }
                 out[out_idx] = value;
             }
@@ -437,6 +447,13 @@ mod tests {
     fn gelu_is_reasonable_for_known_points() {
         assert!((gelu(0.0) - 0.0).abs() < 1e-6);
         assert!((gelu(1.0) - 0.841_191_96).abs() < 1e-5);
+    }
+
+    #[test]
+    fn silu_is_reasonable_for_known_points() {
+        assert!((silu(0.0) - 0.0).abs() < 1e-6);
+        // sigmoid(1) = 0.731058
+        assert!((silu(1.0) - 0.731058).abs() < 1e-5);
     }
 
     #[test]

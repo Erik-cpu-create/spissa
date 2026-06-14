@@ -105,6 +105,12 @@ impl RllmHeader {
     }
 }
 
+impl Default for RllmHeader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

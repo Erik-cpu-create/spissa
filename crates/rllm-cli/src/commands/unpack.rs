@@ -22,7 +22,7 @@ pub fn run(file: &str, out: &str) -> Result<()> {
 
     println!("Unpacking: {}", file);
 
-    let mut reader =
+    let reader =
         RllmReader::open(path).with_context(|| format!("Failed to open file: {}", file))?;
 
     let tensors = reader.list_tensors();

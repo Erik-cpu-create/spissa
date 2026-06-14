@@ -56,6 +56,22 @@ impl Ord for HeapItem {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FlatNode {
+    left: u16,
+    right: u16,
+    symbol: u8,
+    is_leaf: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LutEntry {
+    symbol: u8,
+    consumed: u8,
+    next_node: u16,
+    is_leaf: bool,
+}
+
 /// Byte-level static Huffman codec.
 pub struct HuffmanCodec;
 
@@ -221,6 +237,76 @@ impl HuffmanCodec {
         Ok((bit_len, payload))
     }
 
+    fn flatten_tree(node: &Node, flat_nodes: &mut Vec<FlatNode>) -> u16 {
+        let idx = flat_nodes.len() as u16;
+        flat_nodes.push(FlatNode {
+            left: 0,
+            right: 0,
+            symbol: 0,
+            is_leaf: false,
+        });
+        match node {
+            Node::Leaf(symbol) => {
+                flat_nodes[idx as usize] = FlatNode {
+                    left: 0,
+                    right: 0,
+                    symbol: *symbol,
+                    is_leaf: true,
+                };
+            }
+            Node::Branch(left, right) => {
+                let left_idx = Self::flatten_tree(left, flat_nodes);
+                let right_idx = Self::flatten_tree(right, flat_nodes);
+                flat_nodes[idx as usize] = FlatNode {
+                    left: left_idx,
+                    right: right_idx,
+                    symbol: 0,
+                    is_leaf: false,
+                };
+            }
+        }
+        idx
+    }
+
+    fn build_lut(flat_nodes: &[FlatNode]) -> [LutEntry; 256] {
+        let mut lut = [LutEntry {
+            symbol: 0,
+            consumed: 0,
+            next_node: 0,
+            is_leaf: false,
+        }; 256];
+
+        for prefix in 0..256 {
+            let mut cursor_idx = 0; // Root is index 0
+            let mut consumed = 0;
+            let mut is_leaf = false;
+            let mut symbol = 0;
+
+            for step in 0..8 {
+                let bit = (prefix >> (7 - step)) & 1;
+                let node = &flat_nodes[cursor_idx as usize];
+                cursor_idx = if bit == 0 { node.left } else { node.right };
+                consumed += 1;
+
+                let next_node = &flat_nodes[cursor_idx as usize];
+                if next_node.is_leaf {
+                    is_leaf = true;
+                    symbol = next_node.symbol;
+                    break;
+                }
+            }
+
+            lut[prefix as usize] = LutEntry {
+                symbol,
+                consumed,
+                next_node: cursor_idx,
+                is_leaf,
+            };
+        }
+
+        lut
+    }
+
     fn decode_bits(
         root: &Node,
         bit_len: u64,
@@ -234,37 +320,77 @@ impl HuffmanCodec {
             )));
         }
 
+        // 1. Flatten the tree
+        let mut flat_nodes = Vec::with_capacity(512);
+        let root_idx = Self::flatten_tree(root, &mut flat_nodes);
+
+        // 2. Build the LUT
+        let lut = Self::build_lut(&flat_nodes);
+
+        // 3. Decode
         let mut out = Vec::with_capacity(expected_size);
-        let mut cursor = root;
+        let mut cursor_idx = root_idx;
 
-        for bit_index in 0..bit_len {
-            let byte = payload[(bit_index / 8) as usize];
-            let shift = 7 - (bit_index % 8);
-            let bit = (byte >> shift) & 1;
+        let mut bit_buf = 0u64;
+        let mut bit_count = 0u32;
+        let mut byte_idx = 0;
+        let mut bits_consumed_total = 0u64;
 
-            cursor = match cursor {
-                Node::Branch(left, right) => {
-                    if bit == 0 {
-                        left.as_ref()
-                    } else {
-                        right.as_ref()
+        while bits_consumed_total < bit_len {
+            // Refill bit buffer
+            while bit_count <= 56 && byte_idx < payload.len() {
+                bit_buf = (bit_buf << 8) | (payload[byte_idx] as u64);
+                bit_count += 8;
+                byte_idx += 1;
+            }
+
+            let bits_left = bit_len - bits_consumed_total;
+
+            if cursor_idx == 0 && bits_left >= 8 && bit_count >= 8 {
+                let shift = bit_count - 8;
+                let val = ((bit_buf >> shift) & 0xFF) as usize;
+                let entry = unsafe { lut.get_unchecked(val) };
+
+                if entry.is_leaf {
+                    out.push(entry.symbol);
+                    if out.len() > expected_size {
+                        return Err(CodecError::InvalidData(
+                            "Huffman decoded more bytes than expected".to_string(),
+                        ));
                     }
+                    bit_count -= entry.consumed as u32;
+                    bits_consumed_total += entry.consumed as u64;
+                    cursor_idx = 0;
+                } else {
+                    cursor_idx = entry.next_node;
+                    bit_count -= 8;
+                    bits_consumed_total += 8;
                 }
-                Node::Leaf(_) => {
-                    return Err(CodecError::InvalidData(
-                        "Unexpected leaf before consuming bit".to_string(),
-                    ));
+            } else {
+                let bits_to_process = std::cmp::min(bits_left, 1);
+                if bits_to_process == 0 {
+                    break;
                 }
-            };
+                if bit_count == 0 {
+                    break;
+                }
+                let bit = ((bit_buf >> (bit_count - 1)) & 1) as u8;
+                bit_count -= 1;
+                bits_consumed_total += 1;
 
-            if let Node::Leaf(symbol) = cursor {
-                out.push(*symbol);
-                if out.len() > expected_size {
-                    return Err(CodecError::InvalidData(
-                        "Huffman decoded more bytes than expected".to_string(),
-                    ));
+                let node = unsafe { flat_nodes.get_unchecked(cursor_idx as usize) };
+                cursor_idx = if bit == 0 { node.left } else { node.right };
+
+                let next_node = unsafe { flat_nodes.get_unchecked(cursor_idx as usize) };
+                if next_node.is_leaf {
+                    out.push(next_node.symbol);
+                    if out.len() > expected_size {
+                        return Err(CodecError::InvalidData(
+                            "Huffman decoded more bytes than expected".to_string(),
+                        ));
+                    }
+                    cursor_idx = 0;
                 }
-                cursor = root;
             }
         }
 
@@ -390,12 +516,8 @@ mod tests {
     fn test_huff_biased_distribution_compresses() {
         let codec = HuffmanCodec::new();
         let mut data = Vec::new();
-        for _ in 0..80_000 {
-            data.push(0);
-        }
-        for _ in 0..15_000 {
-            data.push(1);
-        }
+        data.extend(std::iter::repeat_n(0, 80_000));
+        data.extend(std::iter::repeat_n(1, 15_000));
         for i in 0..5_000 {
             data.push((i % 64) as u8);
         }

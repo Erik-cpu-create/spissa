@@ -56,6 +56,10 @@ struct HuggingFaceModelConfig {
     layer_norm_eps: Option<f32>,
     use_parallel_residual: Option<bool>,
     vocab_size: Option<u64>,
+    rms_norm_eps: Option<f32>,
+    num_key_value_heads: Option<u64>,
+    rope_theta: Option<f32>,
+    tie_word_embeddings: Option<bool>,
 }
 
 pub fn read_model_config_metadata(path: impl AsRef<Path>) -> Result<ModelConfigMetadata> {
@@ -83,6 +87,10 @@ pub fn model_config_metadata_from_json_str(json: &str) -> Result<ModelConfigMeta
         layer_norm_eps: config.layer_norm_eps,
         use_parallel_residual: config.use_parallel_residual,
         vocab_size: config.vocab_size,
+        rms_norm_eps: config.rms_norm_eps,
+        num_key_value_heads: config.num_key_value_heads,
+        rope_theta: config.rope_theta,
+        tie_word_embeddings: config.tie_word_embeddings,
     })
 }
 
@@ -90,6 +98,8 @@ fn normalize_architecture_type(value: &str) -> String {
     let normalized = value.to_ascii_lowercase().replace('-', "_");
     if normalized == "gpt_neox" || normalized.contains("gptneox") {
         "gpt_neox".to_string()
+    } else if normalized == "llamaforcausallm" || normalized.contains("llama") {
+        "llama".to_string()
     } else {
         normalized
     }

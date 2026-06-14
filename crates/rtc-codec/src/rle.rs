@@ -49,7 +49,7 @@ impl RleCodec {
 
     /// Decode RLE data
     fn decode_rle(&self, encoded: &[u8]) -> Result<Vec<u8>> {
-        if encoded.len() % 2 != 0 {
+        if !encoded.len().is_multiple_of(2) {
             return Err(CodecError::InvalidData(
                 "RLE encoded data must have even length".to_string(),
             ));
