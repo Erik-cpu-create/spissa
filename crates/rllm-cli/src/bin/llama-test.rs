@@ -7,8 +7,8 @@ use rllm_runtime::{
         prepare_llama_rama_layer_decode_transformer_from_metadata, LlamaRamaGenerationConfig,
         LlamaRamaSessionAdapter,
     },
-    LazyRllmModel, MemoryBudget, RamaChatSession, RamaIntegrityMode, RllmTokenizer,
-    StreamingSamplingConfig,
+    LazyRllmModel, MemoryBudget, RamaChatSession, RamaIntegrityMode, RamaSessionPhaseTimings,
+    RllmTokenizer, StreamingSamplingConfig,
 };
 
 #[derive(Parser)]
@@ -23,6 +23,10 @@ struct Args {
     /// Maximum assistant tokens to generate per turn.
     #[arg(long, default_value_t = 64)]
     max_new_tokens: usize,
+
+    /// Print decode-phase timing breakdown for profiler runs.
+    #[arg(long, default_value_t = false)]
+    profile_phases: bool,
 }
 
 fn interactive_turn_text(has_context: bool, text: &str) -> String {
@@ -86,6 +90,36 @@ fn format_repetition_suffix(stats: rllm_runtime::RamaRepetitionStats) -> String 
     }
 }
 
+fn format_phase_profile_suffix(timings: RamaSessionPhaseTimings, decode_wall_ms: f64) -> String {
+    if timings.total_ms() == 0.0 {
+        return String::new();
+    }
+
+    let detail = timings.transformer_detail;
+    let profiled_total_ms = timings.total_ms();
+    let overhead_ms = (decode_wall_ms - profiled_total_ms).max(0.0);
+    format!(
+        " | Profile: decode_total={:.2}ms profiled={:.2}ms overhead={:.2}ms embedding={:.2}ms transformer={:.2}ms attention_total={:.2}ms mlp_total={:.2}ms final_norm={:.2}ms lm_head={:.2}ms layers={} q={:.2}ms k={:.2}ms v={:.2}ms attn={:.2}ms gate={:.2}ms up={:.2}ms down={:.2}ms",
+        decode_wall_ms,
+        profiled_total_ms,
+        overhead_ms,
+        timings.embedding_ms,
+        timings.transformer_ms,
+        detail.attention_total_ms(),
+        detail.mlp_total_ms(),
+        timings.final_norm_ms,
+        timings.lm_head_ms,
+        detail.profiled_layers,
+        detail.q_projection_ms,
+        detail.k_projection_ms,
+        detail.v_projection_ms,
+        detail.attention_ms,
+        detail.gate_projection_ms,
+        detail.up_projection_ms,
+        detail.down_projection_ms
+    )
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.ctx == 0 {
@@ -118,7 +152,8 @@ fn main() -> Result<()> {
 
     let prepared = prepare_llama_rama_layer_decode_transformer_from_metadata(&mut model, config)?;
     let mut budget = MemoryBudget::unbounded();
-    let adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget)?;
+    let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget)?;
+    adapter.set_transformer_detail_timing(args.profile_phases);
     let mut session = RamaChatSession::new(adapter);
 
     println!("===================================================");
@@ -167,8 +202,16 @@ fn main() -> Result<()> {
         let rolling_suffix = format_rolling_suffix(result.metrics.rolling_stats);
         let aip_suffix = format_aip_suffix(result.metrics.experimental_speed_stats);
         let repetition_suffix = format_repetition_suffix(result.metrics.repetition_stats);
+        let phase_profile_suffix = if args.profile_phases {
+            format_phase_profile_suffix(
+                result.metrics.decode_phase_timings,
+                result.metrics.decode_ms,
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes{}{}{}]",
+            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes{}{}{}{}]",
             result.metrics.ttft_ms / 1000.0,
             result.metrics.decode_tok_s,
             result.metrics.end_to_end_tok_s,
@@ -177,7 +220,8 @@ fn main() -> Result<()> {
             result.metrics.peak_transient_bytes,
             rolling_suffix,
             aip_suffix,
-            repetition_suffix
+            repetition_suffix,
+            phase_profile_suffix
         );
         has_context = true;
     }
@@ -292,5 +336,47 @@ mod tests {
             "1",
         ]);
         assert_eq!(overridden_args.max_new_tokens, 1);
+    }
+
+    #[test]
+    fn args_disable_phase_profile_by_default_and_accept_override() {
+        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        assert!(!default_args.profile_phases);
+
+        let profiled_args =
+            Args::parse_from(["llama-test", "--model", "model.rllm", "--profile-phases"]);
+        assert!(profiled_args.profile_phases);
+    }
+
+    #[test]
+    fn phase_profile_suffix_reports_decode_subphases_and_overhead() {
+        let suffix = format_phase_profile_suffix(
+            rllm_runtime::RamaSessionPhaseTimings {
+                embedding_ms: 1.0,
+                transformer_ms: 20.0,
+                transformer_detail: rllm_runtime::RamaTransformerPhaseTimings {
+                    q_projection_ms: 2.0,
+                    k_projection_ms: 3.0,
+                    v_projection_ms: 4.0,
+                    attention_ms: 5.0,
+                    gate_projection_ms: 6.0,
+                    up_projection_ms: 7.0,
+                    down_projection_ms: 8.0,
+                    profiled_layers: 16,
+                    ..Default::default()
+                },
+                final_norm_ms: 9.0,
+                lm_head_ms: 10.0,
+            },
+            44.0,
+        );
+
+        assert!(suffix.contains("Profile: decode_total=44.00ms"));
+        assert!(suffix.contains("profiled=40.00ms"));
+        assert!(suffix.contains("overhead=4.00ms"));
+        assert!(suffix.contains("attention_total=14.00ms"));
+        assert!(suffix.contains("mlp_total=21.00ms"));
+        assert!(suffix.contains("lm_head=10.00ms"));
+        assert!(suffix.contains("layers=16"));
     }
 }
