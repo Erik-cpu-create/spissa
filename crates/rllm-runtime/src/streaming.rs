@@ -7,6 +7,54 @@ use rllm_container::{ChunkMeta, TensorMeta};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_STREAMING_TILE_ELEMENTS: usize = 4096;
+const RLLM_THREADS_ENV: &str = "RLLM_THREADS";
+const MIN_ROWS_PER_PARALLEL_ARGMAX: usize = 4;
+const LARGE_VOCAB_ARGMAX_THRESHOLD: usize = 65_536;
+const LARGE_VOCAB_AUTO_THREAD_CAP: usize = 2;
+
+fn available_runtime_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+}
+
+fn argmax_runtime_thread_count(out_features: usize) -> usize {
+    effective_argmax_runtime_threads(
+        std::env::var(RLLM_THREADS_ENV).ok().as_deref(),
+        available_runtime_threads(),
+        out_features,
+    )
+}
+
+fn effective_argmax_runtime_threads(
+    override_value: Option<&str>,
+    available: usize,
+    out_features: usize,
+) -> usize {
+    if override_value.is_some() {
+        effective_runtime_threads(override_value, available)
+    } else if out_features > LARGE_VOCAB_ARGMAX_THRESHOLD {
+        available.clamp(1, LARGE_VOCAB_AUTO_THREAD_CAP)
+    } else {
+        effective_runtime_threads(None, available)
+    }
+}
+
+fn effective_runtime_threads(override_value: Option<&str>, available: usize) -> usize {
+    let available = available.max(1);
+    match override_value.and_then(|value| value.trim().parse::<usize>().ok()) {
+        Some(value) if value > 0 => value.min(available),
+        _ => available,
+    }
+}
+
+fn effective_row_block_threads(rows: usize, available_threads: usize) -> usize {
+    if rows < MIN_ROWS_PER_PARALLEL_ARGMAX {
+        1
+    } else {
+        available_threads.max(1).min(rows)
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingLinearConfig {
@@ -1919,6 +1967,121 @@ impl<'a> StreamingLinearArgmaxState<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ArgmaxCandidate {
+    best_index: usize,
+    best_value: f32,
+    seen: bool,
+}
+
+impl ArgmaxCandidate {
+    fn empty() -> Self {
+        Self {
+            best_index: 0,
+            best_value: f32::NEG_INFINITY,
+            seen: false,
+        }
+    }
+
+    fn observe(&mut self, index: usize, value: f32) {
+        if !self.seen || value > self.best_value {
+            self.best_index = index;
+            self.best_value = value;
+            self.seen = true;
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        if other.seen {
+            self.observe(other.best_index, other.best_value);
+        }
+    }
+}
+
+fn parallel_raw_16bit_argmax_rows(
+    input: &[f32],
+    raw_bytes: &[u8],
+    local_row_start: usize,
+    out_feature_start: usize,
+    rows: usize,
+    config: StreamingLinearConfig,
+    dtype: rllm_container::DType,
+    bias: Option<&[f32]>,
+    threads: usize,
+) -> ArgmaxCandidate {
+    let threads = effective_row_block_threads(rows, threads);
+    if threads == 1 {
+        return raw_16bit_argmax_rows_range(
+            input,
+            raw_bytes,
+            local_row_start,
+            out_feature_start,
+            rows,
+            config,
+            dtype,
+            bias,
+        );
+    }
+
+    let rows_per_thread = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        for thread_idx in 0..threads {
+            let row_offset = thread_idx * rows_per_thread;
+            if row_offset >= rows {
+                break;
+            }
+            let row_count = rows_per_thread.min(rows - row_offset);
+            handles.push(scope.spawn(move || {
+                raw_16bit_argmax_rows_range(
+                    input,
+                    raw_bytes,
+                    local_row_start + row_offset * config.in_features,
+                    out_feature_start + row_offset,
+                    row_count,
+                    config,
+                    dtype,
+                    bias,
+                )
+            }));
+        }
+
+        let mut best = ArgmaxCandidate::empty();
+        for handle in handles {
+            best.merge(handle.join().expect("argmax worker panicked"));
+        }
+        best
+    })
+}
+
+fn raw_16bit_argmax_rows_range(
+    input: &[f32],
+    raw_bytes: &[u8],
+    local_row_start: usize,
+    out_feature_start: usize,
+    rows: usize,
+    config: StreamingLinearConfig,
+    dtype: rllm_container::DType,
+    bias: Option<&[f32]>,
+) -> ArgmaxCandidate {
+    let mut best = ArgmaxCandidate::empty();
+    for row_idx in 0..rows {
+        let out_feature = out_feature_start + row_idx;
+        let row_start = local_row_start + row_idx * config.in_features;
+        let mut acc = bias
+            .and_then(|values| values.get(out_feature))
+            .copied()
+            .unwrap_or(0.0);
+        let mut input_idx = 0usize;
+        while input_idx < config.in_features {
+            acc += input[input_idx] * raw_16bit_weight_at(raw_bytes, row_start + input_idx, dtype);
+            input_idx += 1;
+        }
+        best.observe(out_feature, acc);
+    }
+    best
+}
+
 struct StreamingLinearMultiplyIntoState<'a> {
     target: &'a mut [f32],
     bias: Option<&'a [f32]>,
@@ -2158,6 +2321,54 @@ fn accumulate_raw_16bit_chunk_argmax_row_blocked(
         global_idx += row_len;
         if global_idx.is_multiple_of(config.in_features) {
             state.finish_current(config, weight_name)?;
+        }
+    }
+
+    let full_rows = ((weight_elements - local_idx) / config.in_features)
+        .min(config.out_features - (global_idx / config.in_features));
+    let worker_count =
+        effective_row_block_threads(full_rows, argmax_runtime_thread_count(config.out_features));
+    if worker_count > 1 {
+        let out_feature = global_idx / config.in_features;
+        while state.current_out_feature < out_feature {
+            state.finish_current(config, weight_name)?;
+        }
+        if state.current_out_feature != out_feature {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+                out_feature, state.current_out_feature
+            )));
+        }
+
+        let candidate = parallel_raw_16bit_argmax_rows(
+            input,
+            raw_bytes,
+            local_idx,
+            out_feature,
+            full_rows,
+            config,
+            dtype,
+            state.bias,
+            worker_count,
+        );
+        if candidate.seen && (!state.seen || candidate.best_value > state.best_value) {
+            state.best_index = candidate.best_index;
+            state.best_value = candidate.best_value;
+            state.seen = true;
+        }
+
+        let consumed = full_rows.checked_mul(config.in_features).ok_or_else(|| {
+            RuntimeError::Shape("parallel argmax consumed rows overflow".to_string())
+        })?;
+        local_idx += consumed;
+        global_idx += consumed;
+        state.current_out_feature += full_rows;
+        if state.current_out_feature < config.out_features {
+            state.current_acc = state
+                .bias
+                .and_then(|values| values.get(state.current_out_feature))
+                .copied()
+                .unwrap_or(0.0);
         }
     }
 
@@ -4031,6 +4242,70 @@ mod tests {
             .unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn runtime_thread_policy_uses_auto_and_numeric_override() {
+        assert_eq!(effective_runtime_threads(Some("1"), 8), 1);
+        assert_eq!(effective_runtime_threads(Some("4"), 8), 4);
+        assert_eq!(effective_runtime_threads(Some("32"), 8), 8);
+        assert_eq!(effective_runtime_threads(Some("0"), 8), 8);
+        assert_eq!(effective_runtime_threads(Some("bad"), 8), 8);
+        assert_eq!(effective_runtime_threads(None, 8), 8);
+    }
+
+    #[test]
+    fn auto_argmax_threads_caps_large_vocab_without_overriding_manual_setting() {
+        assert_eq!(effective_argmax_runtime_threads(None, 6, 49_152), 6);
+        assert_eq!(effective_argmax_runtime_threads(None, 6, 128_256), 2);
+        assert_eq!(effective_argmax_runtime_threads(Some("6"), 6, 128_256), 6);
+        assert_eq!(effective_argmax_runtime_threads(Some("1"), 6, 128_256), 1);
+    }
+
+    #[test]
+    fn row_parallelism_is_capped_by_rows_and_minimum_work() {
+        assert_eq!(effective_row_block_threads(0, 8), 1);
+        assert_eq!(effective_row_block_threads(1, 8), 1);
+        assert_eq!(effective_row_block_threads(3, 8), 1);
+        assert_eq!(effective_row_block_threads(4, 8), 4);
+        assert_eq!(effective_row_block_threads(32, 8), 8);
+    }
+
+    #[test]
+    fn parallel_raw_bf16_argmax_rows_match_materialized_logits() {
+        let weight_bf16 = vec![
+            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x0000, 0x0000, 0x4040, 0xbf80, 0x3f80,
+            0x0000, 0x3f00, 0x3f00, 0x3f00, 0xc000, 0x0000, 0x3f80, 0x0000, 0xc040, 0x3f80, 0x3f80,
+            0x3f80, 0x3f80,
+        ];
+        let raw = bf16_bytes(&weight_bf16);
+        let weight_f32: Vec<f32> = weight_bf16
+            .iter()
+            .map(|bits| crate::tensor::bf16_to_f32(*bits))
+            .collect();
+        let input = vec![1.0, -2.0, 0.5];
+        let bias = vec![0.0, 0.25, -0.25, 0.5, 0.0, 1.0, -1.0, 0.75];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 3,
+            out_features: 8,
+        };
+        let expected_logits = linear(&input, &weight_f32, Some(&bias), 1, 3, 8).unwrap();
+        let expected = sample_argmax(&expected_logits).unwrap();
+
+        let actual = parallel_raw_16bit_argmax_rows(
+            &input,
+            &raw,
+            0,
+            0,
+            8,
+            config,
+            DType::Bf16,
+            Some(&bias),
+            4,
+        );
+
+        assert_eq!(actual.best_index, expected);
     }
 
     #[test]
