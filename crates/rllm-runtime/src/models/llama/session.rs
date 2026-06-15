@@ -433,7 +433,20 @@ fn apply_phrase_novelty_controller(
         return selected_token;
     };
 
-    for candidate in top_sparse_candidates_by_value(logits, 4, excluded_token) {
+    let candidates = top_sparse_candidates_by_value(logits, 4, excluded_token);
+    if let Some(gap_limit_milli) = config.aip_lm_head_novelty_gap_milli {
+        if let Some(gap_milli) = selected_candidate_gap_milli(logits, &candidates, selected_token) {
+            if gap_milli > gap_limit_milli {
+                if let Some(stats) = stats.as_deref_mut() {
+                    stats.record_lm_head_phrase_novelty(false, repeated_ngram);
+                    stats.record_lm_head_phrase_novelty_gap_skip(gap_milli);
+                }
+                return selected_token;
+            }
+        }
+    }
+
+    for candidate in candidates {
         if candidate == selected_token || Some(candidate) == excluded_token {
             continue;
         }
@@ -477,6 +490,26 @@ fn top_sparse_candidates_by_value(
         }
     }
     top.into_iter().map(|(idx, _)| idx).collect()
+}
+
+fn selected_candidate_gap_milli(
+    logits: &[f32],
+    candidates: &[usize],
+    selected_token: usize,
+) -> Option<usize> {
+    let selected_rank = candidates
+        .iter()
+        .position(|candidate| *candidate == selected_token)?;
+    let next_candidate = candidates.get(selected_rank + 1).copied()?;
+    let gap = logits
+        .get(selected_token)
+        .copied()
+        .unwrap_or(f32::NEG_INFINITY)
+        - logits
+            .get(next_candidate)
+            .copied()
+            .unwrap_or(f32::NEG_INFINITY);
+    Some(gap_to_milli(gap))
 }
 
 fn gap_to_milli(gap: f32) -> usize {
@@ -907,6 +940,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                         aip_lm_head_repeat_margin_milli: None,
                         aip_lm_head_repeat_margin_adaptive: false,
                         aip_lm_head_novelty_window: None,
+                        aip_lm_head_novelty_gap_milli: None,
                         aip_column_cache: false,
                         aip_input_tiles: true,
                         aip_no_repeat_last: false,
@@ -1837,6 +1871,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: None,
             aip_lm_head_repeat_margin_adaptive: false,
             aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -1870,6 +1905,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: None,
             aip_lm_head_repeat_margin_adaptive: false,
             aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: true,
             aip_no_repeat_last: true,
@@ -1904,6 +1940,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: None,
             aip_lm_head_repeat_margin_adaptive: false,
             aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: true,
             aip_no_repeat_last: false,
@@ -1938,6 +1975,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: Some(250),
             aip_lm_head_repeat_margin_adaptive: false,
             aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: true,
             aip_no_repeat_last: false,
@@ -1980,6 +2018,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: Some(250),
             aip_lm_head_repeat_margin_adaptive: false,
             aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: true,
             aip_no_repeat_last: false,
@@ -2015,6 +2054,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: Some(500),
             aip_lm_head_repeat_margin_adaptive: true,
             aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: true,
             aip_no_repeat_last: false,
@@ -2074,6 +2114,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: None,
             aip_lm_head_repeat_margin_adaptive: false,
             aip_lm_head_novelty_window: Some(16),
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: true,
             aip_no_repeat_last: false,
@@ -2105,6 +2146,56 @@ mod tests {
     }
 
     #[test]
+    fn sparse_lm_head_argmax_phrase_novelty_keeps_confident_top_candidate() {
+        let config = crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
+            aip_lm_head_repeat_margin_adaptive: false,
+            aip_lm_head_novelty_window: Some(16),
+            aip_lm_head_novelty_gap_milli: Some(250),
+            aip_column_cache: false,
+            aip_input_tiles: true,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: Some(2),
+        };
+        let mut stats = RamaExperimentalSpeedStats::default();
+        let mut repeat_state = LmHeadRepeatMarginState::default();
+        let mut novelty_state = LmHeadPhraseNoveltyState::default();
+        for token in [1, 2, 3, 1, 2] {
+            novelty_state.push(token);
+        }
+
+        assert_eq!(
+            sample_sparse_lm_head_argmax_with_controller_state(
+                &[0.0, 0.1, 0.2, 3.0, 2.0],
+                &[2],
+                1,
+                config,
+                &mut stats,
+                &mut repeat_state,
+                &mut novelty_state
+            )
+            .unwrap(),
+            3
+        );
+        assert_eq!(stats.lm_head_phrase_novelty_checks, 1);
+        assert_eq!(stats.lm_head_phrase_novelty_switches, 0);
+        assert_eq!(stats.lm_head_phrase_novelty_gap_skips, 1);
+        assert_eq!(stats.lm_head_phrase_novelty_max_gap_milli, 1000);
+    }
+
+    #[test]
     fn sparse_lm_head_rescore_candidates_only_when_top_token_repeats() {
         let config = crate::RamaExperimentalSpeedConfig {
             enabled: true,
@@ -2122,6 +2213,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: None,
             aip_lm_head_repeat_margin_adaptive: false,
             aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: true,
             aip_no_repeat_last: true,
@@ -2186,6 +2278,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: None,
             aip_lm_head_repeat_margin_adaptive: false,
             aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -2220,6 +2313,7 @@ mod tests {
             aip_lm_head_repeat_margin_milli: None,
             aip_lm_head_repeat_margin_adaptive: false,
             aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
