@@ -62,6 +62,12 @@ impl RllmTokenizer {
         self.id_to_token.len()
     }
 
+    pub fn token_id_for_raw_token(&self, token: &str) -> Option<usize> {
+        self.id_to_token
+            .iter()
+            .position(|candidate| candidate == token)
+    }
+
     pub fn encode(&self, text: &str) -> Result<Vec<usize>> {
         if text.is_empty() {
             return Err(RuntimeError::InvalidTensorData(
@@ -155,5 +161,28 @@ mod tests {
 
         assert_eq!(tokenizer.encode("Hello world\n").unwrap(), [0, 1, 2]);
         assert_eq!(tokenizer.decode(&[0, 1, 2]).unwrap(), "Hello world\n");
+    }
+
+    #[test]
+    fn token_id_for_raw_token_finds_special_added_tokens() {
+        let tokenizer = RllmTokenizer::from_metadata(&TokenizerMetadata {
+            tokenizer_type: Some("hf-bpe".to_string()),
+            id_to_token: vec![
+                "Hello".to_string(),
+                "<|begin_of_text|>".to_string(),
+                "<|eot_id|>".to_string(),
+            ],
+            unk_token_id: None,
+            bos_token_id: None,
+            eos_token_id: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            tokenizer.token_id_for_raw_token("<|begin_of_text|>"),
+            Some(1)
+        );
+        assert_eq!(tokenizer.token_id_for_raw_token("<|eot_id|>"), Some(2));
+        assert_eq!(tokenizer.token_id_for_raw_token("<missing>"), None);
     }
 }

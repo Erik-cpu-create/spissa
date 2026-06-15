@@ -2,6 +2,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::io::{self, Write};
 
+#[path = "../chat_template.rs"]
+mod chat_template;
+
+use chat_template::{render_interactive_user_turn, stop_token_ids, ChatTemplateKind};
 use rllm_runtime::{
     models::llama::{
         prepare_llama_rama_layer_decode_transformer_from_metadata, LlamaRamaGenerationConfig,
@@ -27,14 +31,14 @@ struct Args {
     /// Print decode-phase timing breakdown for profiler runs.
     #[arg(long, default_value_t = false)]
     profile_phases: bool,
-}
 
-fn interactive_turn_text(has_context: bool, text: &str) -> String {
-    if has_context {
-        format!("\n{text}")
-    } else {
-        text.to_string()
-    }
+    /// Chat template used to format interactive turns: raw or llama3.
+    #[arg(long, default_value = "raw")]
+    chat_template: String,
+
+    /// Optional system prompt for chat-template modes.
+    #[arg(long)]
+    system_prompt: Option<String>,
 }
 
 fn format_rolling_suffix(stats: rllm_runtime::RamaRollingStats) -> String {
@@ -260,7 +264,8 @@ fn main() -> Result<()> {
         .context("Model does not have tokenizer metadata packed inside")?;
 
     let tokenizer = RllmTokenizer::from_metadata(tokenizer_meta)?;
-    let eos_token_id = tokenizer_meta.eos_token_id;
+    let chat_template: ChatTemplateKind = args.chat_template.parse()?;
+    let stop_token_ids = stop_token_ids(chat_template, &tokenizer, tokenizer_meta.eos_token_id);
 
     let config = LlamaRamaGenerationConfig {
         max_new_tokens: args.max_new_tokens,
@@ -281,10 +286,12 @@ fn main() -> Result<()> {
 
     println!("===================================================");
     println!("RLLM Interactive Chat (Llama Architecture, token-native session)");
+    println!("Chat template: {}", args.chat_template);
     println!("Type 'quit' or 'exit' to end.");
     println!("===================================================");
 
     let mut has_context = false;
+    let mut previous_assistant_ended = true;
 
     loop {
         print!("> ");
@@ -302,16 +309,27 @@ fn main() -> Result<()> {
         if text == "exit" || text == "quit" {
             break;
         }
-        let turn_text = interactive_turn_text(has_context, text);
+        let turn_text = render_interactive_user_turn(
+            chat_template,
+            has_context,
+            previous_assistant_ended,
+            args.system_prompt.as_deref(),
+            text,
+        );
         let input_tokens = tokenizer.encode(&turn_text)?;
 
+        let mut assistant_ended = false;
         let mut on_token = |token: usize| -> bool {
+            if stop_token_ids.contains(&token) {
+                assistant_ended = true;
+                return false;
+            }
             if let Ok(word) = tokenizer.decode(&[token]) {
                 print!("{}", word);
                 io::stdout().flush().unwrap();
             }
 
-            Some(token as u64) != eos_token_id
+            true
         };
 
         let result = session.generate_turn(
@@ -347,6 +365,7 @@ fn main() -> Result<()> {
             phase_profile_suffix
         );
         has_context = true;
+        previous_assistant_ended = assistant_ended;
     }
 
     Ok(())
@@ -355,12 +374,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn interactive_turn_text_uses_only_current_turn_with_separator() {
-        assert_eq!(interactive_turn_text(false, "good morning"), "good morning");
-        assert_eq!(interactive_turn_text(true, "halo"), "\nhalo");
-    }
 
     #[test]
     fn rolling_suffix_is_empty_without_activity() {
@@ -518,6 +531,28 @@ mod tests {
         let profiled_args =
             Args::parse_from(["llama-test", "--model", "model.rllm", "--profile-phases"]);
         assert!(profiled_args.profile_phases);
+    }
+
+    #[test]
+    fn args_default_to_raw_chat_template_and_accept_llama3() {
+        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        assert_eq!(default_args.chat_template, "raw");
+        assert_eq!(default_args.system_prompt, None);
+
+        let templated_args = Args::parse_from([
+            "llama-test",
+            "--model",
+            "model.rllm",
+            "--chat-template",
+            "llama3",
+            "--system-prompt",
+            "You are concise.",
+        ]);
+        assert_eq!(templated_args.chat_template, "llama3");
+        assert_eq!(
+            templated_args.system_prompt.as_deref(),
+            Some("You are concise.")
+        );
     }
 
     #[test]
