@@ -98,12 +98,21 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
             String::new()
         };
         let lm_head_repeat_margin_note = if stats.lm_head_repeat_margin_checks > 0 {
+            let adaptive_note = if stats.lm_head_repeat_margin_adaptive_throttles > 0 {
+                format!(
+                    " adaptive_throttles={} min_margin_milli={}",
+                    stats.lm_head_repeat_margin_adaptive_throttles,
+                    stats.lm_head_repeat_margin_min_effective_milli
+                )
+            } else {
+                String::new()
+            };
             format!(
                 " lm_head_repeat_margin={}/{} max_gap_milli={}",
                 stats.lm_head_repeat_margin_switches,
                 stats.lm_head_repeat_margin_checks,
                 stats.lm_head_repeat_margin_max_gap_milli
-            )
+            ) + &adaptive_note
         } else {
             String::new()
         };
@@ -341,6 +350,8 @@ mod tests {
             lm_head_repeat_margin_checks: 7,
             lm_head_repeat_margin_switches: 5,
             lm_head_repeat_margin_max_gap_milli: 125,
+            lm_head_repeat_margin_adaptive_throttles: 2,
+            lm_head_repeat_margin_min_effective_milli: 125,
         });
 
         assert!(suffix.contains("AIP: policy=quality"));
@@ -359,6 +370,7 @@ mod tests {
             suffix.contains("lm_head_agreement=selected:4/10 raw:3/10 exact_in_topk:6/10 topk=8")
         );
         assert!(suffix.contains("lm_head_repeat_margin=5/7 max_gap_milli=125"));
+        assert!(suffix.contains("adaptive_throttles=2 min_margin_milli=125"));
     }
 
     #[test]
