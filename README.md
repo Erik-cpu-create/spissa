@@ -158,6 +158,8 @@ printf 'good morning\nexit\n' | \
 # RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI=75
 # RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE=1
 # RLLM_AIP_LM_HEAD_NOVELTY_WINDOW=4
+# Optional R37 confidence-gated novelty:
+# RLLM_AIP_LM_HEAD_NOVELTY_GAP_MILLI=100
 
 # Force the runtime worker count for CPU-only benchmarks.
 RLLM_THREADS=1 cargo run --release -p rllm-cli --bin llama-test -- \
