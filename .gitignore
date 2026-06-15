@@ -5,6 +5,7 @@ debug/
 
 # Local model/data artifacts (large, reproducible downloads)
 /models/
+/references/inference-engines/
 *.rllm
 *.safetensors
 *.bin
