@@ -12,6 +12,8 @@ pub const RLLM_AIP_EDGE_LAYERS_ENV: &str = "RLLM_AIP_EDGE_LAYERS";
 pub const RLLM_AIP_EDGE_TOPK_ENV: &str = "RLLM_AIP_EDGE_TOPK";
 pub const RLLM_AIP_EXACT_EDGE_LAYERS_ENV: &str = "RLLM_AIP_EXACT_EDGE_LAYERS";
 pub const RLLM_AIP_EXACT_EDGE_PROJECTION_ENV: &str = "RLLM_AIP_EXACT_EDGE_PROJECTION";
+pub const RLLM_AIP_EXACT_LAYER_ENV: &str = "RLLM_AIP_EXACT_LAYER";
+pub const RLLM_AIP_EXACT_LAYER_PROJECTION_ENV: &str = "RLLM_AIP_EXACT_LAYER_PROJECTION";
 pub const RLLM_AIP_LM_HEAD_TOPK_ENV: &str = "RLLM_AIP_LM_HEAD_TOPK";
 pub const RLLM_AIP_LM_HEAD_RESCORE_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE";
 pub const RLLM_AIP_LM_HEAD_RESCORE_GAP_MILLI_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE_GAP_MILLI";
@@ -94,6 +96,8 @@ pub struct RamaExperimentalSpeedConfig {
     pub aip_edge_topk: Option<usize>,
     pub aip_exact_edge_layers: Option<usize>,
     pub aip_exact_edge_projection: Option<RamaAipProjectionKind>,
+    pub aip_exact_layer: Option<usize>,
+    pub aip_exact_layer_projection: Option<RamaAipProjectionKind>,
     pub aip_lm_head_topk: Option<usize>,
     pub aip_lm_head_rescore: Option<usize>,
     pub aip_lm_head_rescore_gap_milli: Option<usize>,
@@ -151,6 +155,14 @@ impl RamaExperimentalSpeedConfig {
             ),
             aip_exact_edge_projection: parse_aip_exact_edge_projection(
                 std::env::var(RLLM_AIP_EXACT_EDGE_PROJECTION_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
+            aip_exact_layer: parse_aip_exact_layer(
+                std::env::var(RLLM_AIP_EXACT_LAYER_ENV).ok().as_deref(),
+            ),
+            aip_exact_layer_projection: parse_aip_exact_layer_projection(
+                std::env::var(RLLM_AIP_EXACT_LAYER_PROJECTION_ENV)
                     .ok()
                     .as_deref(),
             ),
@@ -233,6 +245,8 @@ impl RamaExperimentalSpeedConfig {
             aip_edge_topk: None,
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -340,6 +354,26 @@ impl RamaExperimentalSpeedConfig {
             .unwrap_or(true)
     }
 
+    fn exact_layer_projection(
+        self,
+        layer_index: usize,
+        total_layers: usize,
+        projection: RamaAipProjectionKind,
+    ) -> bool {
+        if layer_index >= total_layers {
+            return false;
+        }
+        let Some(exact_layer) = self.aip_exact_layer else {
+            return false;
+        };
+        if exact_layer == 0 || layer_index + 1 != exact_layer {
+            return false;
+        }
+        self.aip_exact_layer_projection
+            .map(|exact_projection| exact_projection == projection)
+            .unwrap_or(true)
+    }
+
     pub fn aip_decision_for_projection(
         self,
         layer_index: usize,
@@ -349,6 +383,9 @@ impl RamaExperimentalSpeedConfig {
         default_topk: usize,
     ) -> RamaAipProjectionDecision {
         if !self.enabled || input_len == 0 || layer_index >= total_layers {
+            return RamaAipProjectionDecision::exact();
+        }
+        if self.exact_layer_projection(layer_index, total_layers, projection) {
             return RamaAipProjectionDecision::exact();
         }
         if self.exact_edge_projection(layer_index, total_layers, projection) {
@@ -1087,6 +1124,14 @@ pub fn parse_aip_exact_edge_projection(value: Option<&str>) -> Option<RamaAipPro
     }
 }
 
+pub fn parse_aip_exact_layer(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
+pub fn parse_aip_exact_layer_projection(value: Option<&str>) -> Option<RamaAipProjectionKind> {
+    parse_aip_exact_edge_projection(value)
+}
+
 pub fn parse_turbo_topk(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
@@ -1293,6 +1338,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -1325,6 +1372,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -1530,6 +1579,83 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_exact_layer_controls_keep_only_positive_values() {
+        assert_eq!(parse_aip_exact_layer(Some("2")), Some(2));
+        assert_eq!(parse_aip_exact_layer(Some("1")), Some(1));
+        assert_eq!(parse_aip_exact_layer(Some("0")), None);
+        assert_eq!(parse_aip_exact_layer(Some("-2")), None);
+        assert_eq!(parse_aip_exact_layer(Some("bad")), None);
+        assert_eq!(parse_aip_exact_layer(None), None);
+    }
+
+    #[test]
+    fn parse_aip_exact_layer_projection_accepts_known_projection_names() {
+        assert_eq!(parse_aip_exact_layer_projection(Some("all")), None);
+        assert_eq!(
+            parse_aip_exact_layer_projection(Some("attention")),
+            Some(RamaAipProjectionKind::Attention)
+        );
+        assert_eq!(
+            parse_aip_exact_layer_projection(Some("gateup")),
+            Some(RamaAipProjectionKind::MlpGateUp)
+        );
+        assert_eq!(
+            parse_aip_exact_layer_projection(Some("down")),
+            Some(RamaAipProjectionKind::MlpDown)
+        );
+        assert_eq!(parse_aip_exact_layer_projection(Some("bad")), None);
+        assert_eq!(parse_aip_exact_layer_projection(None), None);
+    }
+
+    #[test]
+    fn speed_policy_exact_layer_projection_overrides_only_target_layer_projection() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
+            aip_exact_layer: Some(2),
+            aip_exact_layer_projection: Some(RamaAipProjectionKind::Attention),
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
+            aip_lm_head_repeat_margin_adaptive: false,
+            aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
+            aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
+            aip_column_cache: false,
+            aip_input_tiles: false,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
+        };
+
+        assert_eq!(
+            config.aip_decision_for_projection(1, 4, RamaAipProjectionKind::Attention, 2048, 128),
+            RamaAipProjectionDecision::exact()
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(1, 4, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::aip(4)
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(0, 4, RamaAipProjectionKind::Attention, 2048, 128),
+            RamaAipProjectionDecision::aip(4)
+        );
+    }
+
+    #[test]
     fn speed_policy_exact_edge_layers_override_sparse_projection() {
         let config = RamaExperimentalSpeedConfig {
             enabled: true,
@@ -1544,6 +1670,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: Some(1),
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -1590,6 +1718,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: Some(1),
             aip_exact_edge_projection: Some(RamaAipProjectionKind::MlpDown),
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -1921,6 +2051,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -1954,6 +2086,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -1988,6 +2122,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -2038,6 +2174,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -2080,6 +2218,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -2122,6 +2262,8 @@ mod tests {
             aip_edge_topk: None,
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: Some(16),
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,
@@ -2169,6 +2311,8 @@ mod tests {
             aip_edge_topk: Some(8),
             aip_exact_edge_layers: None,
             aip_exact_edge_projection: None,
+            aip_exact_layer: None,
+            aip_exact_layer_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
             aip_lm_head_rescore_gap_milli: None,

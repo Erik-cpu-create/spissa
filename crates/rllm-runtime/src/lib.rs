@@ -58,7 +58,8 @@ pub use rotary::{
 pub use speed::{
     parse_aip_attention_locality_extra, parse_aip_attention_locality_window,
     parse_aip_column_cache_enabled, parse_aip_edge_layers, parse_aip_edge_topk,
-    parse_aip_exact_edge_layers, parse_aip_exact_edge_projection, parse_aip_input_tiles_enabled,
+    parse_aip_exact_edge_layers, parse_aip_exact_edge_projection, parse_aip_exact_layer,
+    parse_aip_exact_layer_projection, parse_aip_input_tiles_enabled,
     parse_aip_layer_drift_probe_enabled, parse_aip_lm_head_agreement_enabled,
     parse_aip_lm_head_exact_every, parse_aip_lm_head_novelty_gap_milli,
     parse_aip_lm_head_novelty_repeat_penalty_milli, parse_aip_lm_head_novelty_retention_milli,
