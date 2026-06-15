@@ -17,6 +17,7 @@ pub const RLLM_AIP_LM_HEAD_RESCORE_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE";
 pub const RLLM_AIP_LM_HEAD_RESCORE_GAP_MILLI_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE_GAP_MILLI";
 pub const RLLM_AIP_LM_HEAD_AGREEMENT_ENV: &str = "RLLM_AIP_LM_HEAD_AGREEMENT";
 pub const RLLM_AIP_LM_HEAD_EXACT_EVERY_ENV: &str = "RLLM_AIP_LM_HEAD_EXACT_EVERY";
+pub const RLLM_AIP_LAYER_DRIFT_PROBE_ENV: &str = "RLLM_AIP_LAYER_DRIFT_PROBE";
 pub const RLLM_AIP_LM_HEAD_ROWS_ENV: &str = "RLLM_AIP_LM_HEAD_ROWS";
 pub const RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI_ENV: &str = "RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI";
 pub const RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE_ENV: &str =
@@ -401,6 +402,65 @@ fn quality_policy_allows_layer(layer_index: usize, total_layers: usize) -> bool 
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RamaLayerDriftProbeStats {
+    pub samples: usize,
+    pub layers: usize,
+    pub mismatch_layers: usize,
+    pub first_mismatch_layer: usize,
+    pub max_l2_milli: usize,
+    pub max_cosine_gap_milli: usize,
+    pub max_exact_margin_milli: usize,
+}
+
+impl RamaLayerDriftProbeStats {
+    pub fn add_assign(&mut self, other: Self) {
+        self.samples = self.samples.saturating_add(other.samples);
+        self.layers = self.layers.saturating_add(other.layers);
+        self.mismatch_layers = self.mismatch_layers.saturating_add(other.mismatch_layers);
+        self.first_mismatch_layer =
+            min_non_zero(self.first_mismatch_layer, other.first_mismatch_layer);
+        self.max_l2_milli = self.max_l2_milli.max(other.max_l2_milli);
+        self.max_cosine_gap_milli = self.max_cosine_gap_milli.max(other.max_cosine_gap_milli);
+        self.max_exact_margin_milli = self
+            .max_exact_margin_milli
+            .max(other.max_exact_margin_milli);
+    }
+
+    pub fn record(
+        &mut self,
+        layers: usize,
+        mismatch_layers: usize,
+        first_mismatch_layer: Option<usize>,
+        max_l2_milli: usize,
+        max_cosine_gap_milli: usize,
+        max_exact_margin_milli: usize,
+    ) {
+        if layers == 0 {
+            return;
+        }
+        self.samples = self.samples.saturating_add(1);
+        self.layers = self.layers.saturating_add(layers);
+        self.mismatch_layers = self.mismatch_layers.saturating_add(mismatch_layers);
+        if let Some(layer) = first_mismatch_layer.filter(|layer| *layer > 0) {
+            self.first_mismatch_layer = min_non_zero(self.first_mismatch_layer, layer);
+        }
+        self.max_l2_milli = self.max_l2_milli.max(max_l2_milli);
+        self.max_cosine_gap_milli = self.max_cosine_gap_milli.max(max_cosine_gap_milli);
+        self.max_exact_margin_milli = self.max_exact_margin_milli.max(max_exact_margin_milli);
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.samples == 0
+            && self.layers == 0
+            && self.mismatch_layers == 0
+            && self.first_mismatch_layer == 0
+            && self.max_l2_milli == 0
+            && self.max_cosine_gap_milli == 0
+            && self.max_exact_margin_milli == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RamaExperimentalSpeedStats {
     pub aip_policy: Option<RamaAipPolicyKind>,
     pub sparse_projection_calls: usize,
@@ -443,6 +503,7 @@ pub struct RamaExperimentalSpeedStats {
     pub lm_head_phrase_novelty_max_gap_milli: usize,
     pub lm_head_phrase_novelty_soft_choices: usize,
     pub lm_head_phrase_novelty_retentions: usize,
+    pub layer_drift_probe: RamaLayerDriftProbeStats,
 }
 
 impl RamaExperimentalSpeedStats {
@@ -563,6 +624,7 @@ impl RamaExperimentalSpeedStats {
         self.lm_head_phrase_novelty_retentions = self
             .lm_head_phrase_novelty_retentions
             .saturating_add(other.lm_head_phrase_novelty_retentions);
+        self.layer_drift_probe.add_assign(other.layer_drift_probe);
     }
 
     pub fn record_sparse_projection(
@@ -721,6 +783,25 @@ impl RamaExperimentalSpeedStats {
             self.lm_head_phrase_novelty_retentions.saturating_add(1);
     }
 
+    pub fn record_layer_drift_probe(
+        &mut self,
+        layers: usize,
+        mismatch_layers: usize,
+        first_mismatch_layer: Option<usize>,
+        max_l2_milli: usize,
+        max_cosine_gap_milli: usize,
+        max_exact_margin_milli: usize,
+    ) {
+        self.layer_drift_probe.record(
+            layers,
+            mismatch_layers,
+            first_mismatch_layer,
+            max_l2_milli,
+            max_cosine_gap_milli,
+            max_exact_margin_milli,
+        );
+    }
+
     pub fn is_empty(self) -> bool {
         self.aip_policy.is_none()
             && self.sparse_projection_calls == 0
@@ -763,6 +844,7 @@ impl RamaExperimentalSpeedStats {
             && self.lm_head_phrase_novelty_max_gap_milli == 0
             && self.lm_head_phrase_novelty_soft_choices == 0
             && self.lm_head_phrase_novelty_retentions == 0
+            && self.layer_drift_probe.is_empty()
     }
 }
 
@@ -847,6 +929,13 @@ pub fn parse_aip_lm_head_exact_every(value: Option<&str>) -> Option<usize> {
 }
 
 pub fn parse_aip_lm_head_agreement_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+pub fn parse_aip_layer_drift_probe_enabled(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "on")
@@ -1567,6 +1656,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_layer_drift_probe_enabled_accepts_explicit_truthy_values() {
+        assert!(parse_aip_layer_drift_probe_enabled(Some("1")));
+        assert!(parse_aip_layer_drift_probe_enabled(Some("true")));
+        assert!(parse_aip_layer_drift_probe_enabled(Some("yes")));
+        assert!(parse_aip_layer_drift_probe_enabled(Some("on")));
+        assert!(!parse_aip_layer_drift_probe_enabled(Some("0")));
+        assert!(!parse_aip_layer_drift_probe_enabled(Some("false")));
+        assert!(!parse_aip_layer_drift_probe_enabled(Some("")));
+        assert!(!parse_aip_layer_drift_probe_enabled(None));
+    }
+
+    #[test]
     fn parse_aip_lm_head_exact_every_keeps_only_positive_values() {
         assert_eq!(parse_aip_lm_head_exact_every(Some("4")), Some(4));
         assert_eq!(parse_aip_lm_head_exact_every(Some("1")), Some(1));
@@ -1591,6 +1692,25 @@ mod tests {
         assert_eq!(stats.lm_head_agreement_selected_matches, 2);
         assert_eq!(stats.lm_head_agreement_exact_in_sparse_topk, 2);
         assert_eq!(stats.lm_head_agreement_max_topk, 8);
+        assert!(!stats.is_empty());
+    }
+
+    #[test]
+    fn stats_record_layer_drift_probe_and_merge() {
+        let mut stats = RamaExperimentalSpeedStats::default();
+        stats.record_layer_drift_probe(4, 2, Some(2), 1_250, 15, 900);
+
+        let mut other = RamaExperimentalSpeedStats::default();
+        other.record_layer_drift_probe(4, 1, Some(1), 1_000, 50, 1_200);
+        stats.add_assign(other);
+
+        assert_eq!(stats.layer_drift_probe.samples, 2);
+        assert_eq!(stats.layer_drift_probe.layers, 8);
+        assert_eq!(stats.layer_drift_probe.mismatch_layers, 3);
+        assert_eq!(stats.layer_drift_probe.first_mismatch_layer, 1);
+        assert_eq!(stats.layer_drift_probe.max_l2_milli, 1_250);
+        assert_eq!(stats.layer_drift_probe.max_cosine_gap_milli, 50);
+        assert_eq!(stats.layer_drift_probe.max_exact_margin_milli, 1_200);
         assert!(!stats.is_empty());
     }
 
