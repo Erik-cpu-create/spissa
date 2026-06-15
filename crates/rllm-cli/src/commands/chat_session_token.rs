@@ -390,6 +390,21 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
         } else {
             String::new()
         };
+        let layer_attribution_note = if stats.layer_attribution_probe.samples > 0 {
+            format!(
+                " aip_layer_attribution_probe={} aip_layer_attribution_layer={} aip_layer_attribution_attention_l2_milli={} aip_layer_attribution_attention_cosine_gap_milli={} aip_layer_attribution_gate_up_l2_milli={} aip_layer_attribution_gate_up_cosine_gap_milli={} aip_layer_attribution_down_l2_milli={} aip_layer_attribution_down_cosine_gap_milli={}",
+                stats.layer_attribution_probe.samples,
+                stats.layer_attribution_probe.layer,
+                stats.layer_attribution_probe.attention_l2_milli,
+                stats.layer_attribution_probe.attention_cosine_gap_milli,
+                stats.layer_attribution_probe.gate_up_l2_milli,
+                stats.layer_attribution_probe.gate_up_cosine_gap_milli,
+                stats.layer_attribution_probe.down_l2_milli,
+                stats.layer_attribution_probe.down_cosine_gap_milli
+            )
+        } else {
+            String::new()
+        };
         format!(
             " aip_policy={} aip_calls={} aip_fallbacks={} aip_max_topk={} aip_skipped_madds={} aip_scratch_bytes={}",
             policy_str,
@@ -409,6 +424,7 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
             + &lm_head_repeat_margin_note
             + &lm_head_phrase_novelty_note
             + &layer_drift_note
+            + &layer_attribution_note
     }
 }
 
@@ -791,6 +807,16 @@ mod tests {
                 max_cosine_gap_milli: 15,
                 max_exact_margin_milli: 900,
             },
+            layer_attribution_probe: rllm_runtime::RamaLayerAttributionProbeStats {
+                samples: 1,
+                layer: 2,
+                attention_l2_milli: 111,
+                attention_cosine_gap_milli: 11,
+                gate_up_l2_milli: 222,
+                gate_up_cosine_gap_milli: 22,
+                down_l2_milli: 333,
+                down_cosine_gap_milli: 33,
+            },
         });
 
         assert!(note.contains("aip_policy=quality"));
@@ -830,6 +856,14 @@ mod tests {
         assert!(note.contains("aip_layer_drift_max_l2_milli=1250"));
         assert!(note.contains("aip_layer_drift_max_cosine_gap_milli=15"));
         assert!(note.contains("aip_layer_drift_max_exact_margin_milli=900"));
+        assert!(note.contains("aip_layer_attribution_probe=1"));
+        assert!(note.contains("aip_layer_attribution_layer=2"));
+        assert!(note.contains("aip_layer_attribution_attention_l2_milli=111"));
+        assert!(note.contains("aip_layer_attribution_attention_cosine_gap_milli=11"));
+        assert!(note.contains("aip_layer_attribution_gate_up_l2_milli=222"));
+        assert!(note.contains("aip_layer_attribution_gate_up_cosine_gap_milli=22"));
+        assert!(note.contains("aip_layer_attribution_down_l2_milli=333"));
+        assert!(note.contains("aip_layer_attribution_down_cosine_gap_milli=33"));
     }
 
     #[test]
