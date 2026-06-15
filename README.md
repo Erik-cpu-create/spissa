@@ -90,6 +90,7 @@ Implemented:
   - Phase 7.12A generic shape/budget-aware prefill policy: `rllm run` now defaults to auto low-RAM prefill selection from GPT-NeoX/Pythia shape and explicit transient budget, preserving Pythia-70M-like 32-token defaults while selecting 64 for Pythia-160M-like low-RAM runs; `--rama-prefill-policy speed` selects the speed-biased larger window when budget allows.
   - Phase 7.12B generic eight-row projection reuse: the shared tiled-linear hot loop now reuses each decoded weight row fragment across 8 prompt-token rows before falling back to the existing 4-row/scalar tails, improving the measured Pythia-160M 512-token speed-policy row from 13.21s to 12.34s wall time while keeping tracked transient memory unchanged at 3.79 MiB.
   - R57 edge attention locality cache for the Llama experimental-speed path: optional per-layer recent-index caches can reuse a tiny number of previous edge-attention input features for sparse Q/K/V. The retained `window=8, extra=1` preset preserved the 30 tok/s floor on Llama 3.2 1B Instruct and slightly improved cheap quality counters, while the wider `window=16, extra=4` probe was rejected.
+  - R58 Llama3 chat-template baseline: `llama-test --chat-template llama3` formats Llama 3.x Instruct prompts with BOS/header/EOT tokens and uses raw special-token stop fallbacks when older `.rllm` metadata lacks `eos_token_id`. Exact mode now has a coherent chat baseline before sparse AIP quality is judged.
 
 
 Not yet implemented:
@@ -123,6 +124,15 @@ cargo run --release -p rllm-cli --bin llama-test -- \
   --model models/Llama-3.2-1B-Instruct-raw.rllm \
   --ctx 2048 \
   --max-new-tokens 64
+
+# R58 Llama3 Instruct chat-template baseline. Use this when checking whether
+# the model/runtime can behave like chat before enabling experimental speed.
+cargo run --release -p rllm-cli --bin llama-test -- \
+  --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+  --ctx 2048 \
+  --max-new-tokens 64 \
+  --chat-template llama3 \
+  --system-prompt "You are a concise assistant."
 
 # Experimental speed artifact for Llama 3.2 1B. Use this artifact and the env
 # flags below when testing the sparse research path; running the raw artifact
