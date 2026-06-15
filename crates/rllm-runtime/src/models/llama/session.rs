@@ -13,7 +13,8 @@ use crate::rolling::RollingExecutor;
 use crate::rolling::RollingExecutorConfig;
 use crate::rotary::KvCache;
 use crate::speed::{
-    parse_aip_exact_prefill_enabled, parse_aip_lm_head_exact_every, RLLM_AIP_EXACT_PREFILL_ENV,
+    parse_aip_exact_prefill_enabled, parse_aip_layer_drift_probe_enabled,
+    parse_aip_lm_head_exact_every, RLLM_AIP_EXACT_PREFILL_ENV, RLLM_AIP_LAYER_DRIFT_PROBE_ENV,
     RLLM_AIP_LM_HEAD_EXACT_EVERY_ENV,
 };
 use crate::streaming::{
@@ -50,6 +51,7 @@ pub struct LlamaRamaSessionAdapter<'a> {
     experimental_speed_config: RamaExperimentalSpeedConfig,
     exact_prefill: bool,
     lm_head_exact_every: Option<usize>,
+    layer_drift_probe: bool,
     last_experimental_speed_stats: Option<RamaExperimentalSpeedStats>,
     sparse_column_cache: SparseColumnCache,
     attention_locality_caches: Vec<RamaAttentionLocalityCache>,
@@ -95,6 +97,57 @@ impl LmHeadRepeatMarginState {
 struct LmHeadPhraseNoveltyState {
     recent: [usize; Self::MAX_WINDOW],
     len: usize,
+}
+
+#[derive(Debug, Clone)]
+struct LlamaLayerDriftProbeOutput {
+    hidden: Vec<f32>,
+    token_id: usize,
+    exact_margin_milli: usize,
+}
+
+fn positive_f64_to_milli(value: f64) -> usize {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    let milli = (value * 1000.0).round();
+    if milli >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        milli as usize
+    }
+}
+
+fn hidden_l2_milli(lhs: &[f32], rhs: &[f32]) -> usize {
+    let sum_sq = lhs
+        .iter()
+        .zip(rhs)
+        .map(|(left, right)| {
+            let delta = *left as f64 - *right as f64;
+            delta * delta
+        })
+        .sum::<f64>();
+    positive_f64_to_milli(sum_sq.sqrt())
+}
+
+fn hidden_cosine_gap_milli(lhs: &[f32], rhs: &[f32]) -> usize {
+    let (dot, lhs_sq, rhs_sq) =
+        lhs.iter()
+            .zip(rhs)
+            .fold((0.0f64, 0.0f64, 0.0f64), |acc, (left, right)| {
+                let left = *left as f64;
+                let right = *right as f64;
+                (
+                    acc.0 + left * right,
+                    acc.1 + left * left,
+                    acc.2 + right * right,
+                )
+            });
+    if lhs_sq <= f64::EPSILON || rhs_sq <= f64::EPSILON {
+        return 0;
+    }
+    let cosine = (dot / (lhs_sq.sqrt() * rhs_sq.sqrt())).clamp(-1.0, 1.0);
+    positive_f64_to_milli(1.0 - cosine)
 }
 
 impl Default for LmHeadPhraseNoveltyState {
@@ -956,6 +1009,11 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                     .ok()
                     .as_deref(),
             ),
+            layer_drift_probe: parse_aip_layer_drift_probe_enabled(
+                std::env::var(RLLM_AIP_LAYER_DRIFT_PROBE_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
             last_experimental_speed_stats: None,
             sparse_column_cache: SparseColumnCache::from_env(),
             attention_locality_caches,
@@ -1013,6 +1071,179 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         self.exact_prefill = enabled;
     }
 
+    #[cfg(test)]
+    pub(crate) fn enable_layer_drift_probe_for_test(&mut self, enabled: bool) {
+        self.layer_drift_probe = enabled;
+    }
+
+    fn collect_layer_drift_probe_outputs(
+        &mut self,
+        tokens: &[usize],
+        position_offset: usize,
+        experimental_speed_config: RamaExperimentalSpeedConfig,
+        budget: &mut MemoryBudget,
+    ) -> Result<Vec<LlamaLayerDriftProbeOutput>> {
+        let seq_len = tokens.len();
+        let mut hidden = embedding_lookup(
+            &self.embedding_data,
+            self.vocab_size,
+            self.hidden_size,
+            tokens,
+        )?;
+        let mut caches = self.caches.clone();
+        let mut sparse_column_cache = SparseColumnCache::from_env();
+        let mut attention_locality_caches = self.attention_locality_caches.clone();
+        let mut shadow_speed_stats = RamaExperimentalSpeedStats::default();
+        let mut outputs = Vec::with_capacity(self.prepared.layers.len());
+        let lm_head_config = StreamingTileLinearConfig {
+            linear: StreamingLinearConfig {
+                batch: 1,
+                in_features: self.hidden_size,
+                out_features: self.vocab_size,
+            },
+            tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+        };
+
+        for (i, layer_names) in self.prepared.layers.iter().enumerate() {
+            let config = LlamaStreamingBlockConfig {
+                seq_len,
+                hidden_size: self.hidden_size,
+                q_heads: self.prepared.config.num_heads,
+                kv_heads: self.prepared.config.num_key_value_heads,
+                head_dim: self.head_dim,
+                intermediate_size: self.intermediate_size,
+                rms_norm_eps: self.prepared.config.rms_norm_eps,
+                rope_theta: self.prepared.config.rope_theta,
+                causal: self.prepared.config.causal,
+                position_offset,
+                layer_index: i,
+                total_layers: self.prepared.layers.len(),
+                experimental_speed: experimental_speed_config,
+            };
+            let experimental_stats_ref = if experimental_speed_config.enabled {
+                Some(&mut shadow_speed_stats)
+            } else {
+                None
+            };
+            let sparse_column_cache_ref = if experimental_speed_config.aip_column_cache {
+                Some(&mut sparse_column_cache)
+            } else {
+                None
+            };
+            let attention_locality_cache_ref = if experimental_speed_config
+                .attention_locality_enabled_for_layer(i, self.prepared.layers.len())
+            {
+                Some(&mut attention_locality_caches[i])
+            } else {
+                None
+            };
+
+            hidden = streaming_llama_transformer_block_with_timing(
+                self.model,
+                &hidden,
+                layer_names,
+                &self.layer_norms[i],
+                config,
+                budget,
+                Some(&mut caches[i]),
+                None,
+                experimental_stats_ref,
+                sparse_column_cache_ref,
+                attention_locality_cache_ref,
+            )?;
+
+            let normalized = rms_norm(
+                &hidden,
+                &self.prepared.final_layernorm_weight,
+                seq_len,
+                self.hidden_size,
+                self.prepared.config.rms_norm_eps,
+            )?;
+            let last_hidden_start = (seq_len - 1) * self.hidden_size;
+            let last_hidden = &normalized[last_hidden_start..last_hidden_start + self.hidden_size];
+            let logits = streaming_tile_linear_from_model(
+                self.model,
+                &self.prepared.lm_head_weight,
+                last_hidden,
+                None,
+                lm_head_config,
+                budget,
+            )?;
+            let (token_id, top_value, second) = top_two_sparse_logits(&logits)?;
+            let exact_margin_milli = second
+                .map(|(_, second_value)| gap_to_milli(top_value - second_value))
+                .unwrap_or(0);
+            let hidden_start = (seq_len - 1) * self.hidden_size;
+            outputs.push(LlamaLayerDriftProbeOutput {
+                hidden: hidden[hidden_start..hidden_start + self.hidden_size].to_vec(),
+                token_id,
+                exact_margin_milli,
+            });
+        }
+
+        Ok(outputs)
+    }
+
+    fn record_layer_drift_probe(
+        &mut self,
+        tokens: &[usize],
+        position_offset: usize,
+        experimental_speed_config: RamaExperimentalSpeedConfig,
+        budget: &MemoryBudget,
+        stats: &mut RamaExperimentalSpeedStats,
+    ) -> Result<()> {
+        let remaining_bytes = budget.limit_bytes().saturating_sub(budget.current_bytes());
+        let mut probe_budget = MemoryBudget::new(remaining_bytes);
+        let exact_outputs = self.collect_layer_drift_probe_outputs(
+            tokens,
+            position_offset,
+            RamaExperimentalSpeedConfig::disabled(),
+            &mut probe_budget,
+        )?;
+        let sparse_outputs = self.collect_layer_drift_probe_outputs(
+            tokens,
+            position_offset,
+            experimental_speed_config,
+            &mut probe_budget,
+        )?;
+        let layers = exact_outputs.len().min(sparse_outputs.len());
+        if layers == 0 {
+            return Ok(());
+        }
+
+        let mut mismatch_layers = 0usize;
+        let mut first_mismatch_layer = None;
+        let mut max_l2_milli = 0usize;
+        let mut max_cosine_gap_milli = 0usize;
+        let mut max_exact_margin_milli = 0usize;
+        for (layer_idx, (exact, sparse)) in exact_outputs
+            .iter()
+            .zip(sparse_outputs.iter())
+            .take(layers)
+            .enumerate()
+        {
+            if exact.token_id != sparse.token_id {
+                mismatch_layers = mismatch_layers.saturating_add(1);
+                first_mismatch_layer.get_or_insert(layer_idx + 1);
+            }
+            max_l2_milli = max_l2_milli.max(hidden_l2_milli(&exact.hidden, &sparse.hidden));
+            max_cosine_gap_milli =
+                max_cosine_gap_milli.max(hidden_cosine_gap_milli(&exact.hidden, &sparse.hidden));
+            max_exact_margin_milli = max_exact_margin_milli.max(exact.exact_margin_milli);
+        }
+
+        stats.record_aip_policy(experimental_speed_config.aip_policy);
+        stats.record_layer_drift_probe(
+            layers,
+            mismatch_layers,
+            first_mismatch_layer,
+            max_l2_milli,
+            max_cosine_gap_milli,
+            max_exact_margin_milli,
+        );
+        Ok(())
+    }
+
     fn append_tokens_inner(
         &mut self,
         tokens: &[usize],
@@ -1050,6 +1281,19 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
 
         let mut phase_timings = RamaSessionPhaseTimings::default();
         let mut experimental_speed_stats = RamaExperimentalSpeedStats::default();
+        if self.layer_drift_probe
+            && emit_logits
+            && is_decode_step
+            && experimental_speed_config.enabled
+        {
+            self.record_layer_drift_probe(
+                tokens,
+                position_offset,
+                experimental_speed_config,
+                budget,
+                &mut experimental_speed_stats,
+            )?;
+        }
         let phase_start = Instant::now();
         let mut hidden = embedding_lookup(
             &self.embedding_data,
@@ -2185,6 +2429,66 @@ mod tests {
 
         assert!(stats.sparse_projection_calls > 0);
         assert!(stats.max_selected_topk <= 1);
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn llama_session_layer_drift_probe_records_decode_shadow_pass() {
+        let path = temp_path("layer-drift-probe");
+        write_bf16_mlp_speed_model(&path, 8);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(1);
+        let mut budget = MemoryBudget::unbounded();
+        let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget).unwrap();
+        adapter.enable_experimental_speed_for_test(crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(1),
+            aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
+            aip_lm_head_repeat_margin_adaptive: false,
+            aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
+            aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
+            aip_column_cache: false,
+            aip_input_tiles: false,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
+        });
+        adapter.enable_layer_drift_probe_for_test(true);
+
+        let first = adapter
+            .append_tokens(&[0], &mut budget, true)
+            .unwrap()
+            .unwrap();
+        let prompt_stats = adapter.take_last_experimental_speed_stats().unwrap();
+        let _ = adapter
+            .append_tokens(&[first.token_id], &mut budget, true)
+            .unwrap();
+        let decode_stats = adapter.take_last_experimental_speed_stats().unwrap();
+
+        assert_eq!(prompt_stats.layer_drift_probe.samples, 0);
+        assert_eq!(decode_stats.layer_drift_probe.samples, 1);
+        assert_eq!(decode_stats.layer_drift_probe.layers, 1);
+        assert_eq!(
+            decode_stats.aip_policy,
+            Some(crate::RamaAipPolicyKind::Speed)
+        );
 
         std::fs::remove_file(path).ok();
     }

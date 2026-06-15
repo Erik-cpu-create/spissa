@@ -183,6 +183,20 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
         } else {
             String::new()
         };
+        let layer_drift_note = if stats.layer_drift_probe.samples > 0 {
+            format!(
+                " layer_drift_probe={} layers={} mismatch_layers={} first_mismatch_layer={} max_l2_milli={} max_cosine_gap_milli={} max_exact_margin_milli={}",
+                stats.layer_drift_probe.samples,
+                stats.layer_drift_probe.layers,
+                stats.layer_drift_probe.mismatch_layers,
+                stats.layer_drift_probe.first_mismatch_layer,
+                stats.layer_drift_probe.max_l2_milli,
+                stats.layer_drift_probe.max_cosine_gap_milli,
+                stats.layer_drift_probe.max_exact_margin_milli
+            )
+        } else {
+            String::new()
+        };
         format!(
             " | AIP: policy={} calls={} fallbacks={} max_topk={} skipped_madds={} scratch={} bytes",
             policy_str,
@@ -200,6 +214,7 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
             + &lm_head_exact_note
             + &lm_head_repeat_margin_note
             + &lm_head_phrase_novelty_note
+            + &layer_drift_note
     }
 }
 
@@ -448,6 +463,15 @@ mod tests {
             lm_head_phrase_novelty_max_gap_milli: 900,
             lm_head_phrase_novelty_soft_choices: 6,
             lm_head_phrase_novelty_retentions: 3,
+            layer_drift_probe: rllm_runtime::RamaLayerDriftProbeStats {
+                samples: 2,
+                layers: 64,
+                mismatch_layers: 3,
+                first_mismatch_layer: 2,
+                max_l2_milli: 1_250,
+                max_cosine_gap_milli: 15,
+                max_exact_margin_milli: 900,
+            },
         });
 
         assert!(suffix.contains("AIP: policy=quality"));
@@ -474,6 +498,13 @@ mod tests {
         assert!(suffix.contains("gap_skips=4 max_gap_milli=900"));
         assert!(suffix.contains("soft_choices=6"));
         assert!(suffix.contains("retentions=3"));
+        assert!(suffix.contains("layer_drift_probe=2"));
+        assert!(suffix.contains("layers=64"));
+        assert!(suffix.contains("mismatch_layers=3"));
+        assert!(suffix.contains("first_mismatch_layer=2"));
+        assert!(suffix.contains("max_l2_milli=1250"));
+        assert!(suffix.contains("max_cosine_gap_milli=15"));
+        assert!(suffix.contains("max_exact_margin_milli=900"));
     }
 
     #[test]
