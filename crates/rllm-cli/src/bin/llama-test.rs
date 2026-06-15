@@ -126,12 +126,21 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
             } else {
                 String::new()
             };
+            let soft_note = if stats.lm_head_phrase_novelty_soft_choices > 0 {
+                format!(
+                    " soft_choices={}",
+                    stats.lm_head_phrase_novelty_soft_choices
+                )
+            } else {
+                String::new()
+            };
             format!(
                 " phrase_novelty={}/{} max_ngram={}",
                 stats.lm_head_phrase_novelty_switches,
                 stats.lm_head_phrase_novelty_checks,
                 stats.lm_head_phrase_novelty_max_ngram
             ) + &gap_note
+                + &soft_note
         } else {
             String::new()
         };
@@ -377,6 +386,7 @@ mod tests {
             lm_head_phrase_novelty_max_ngram: 3,
             lm_head_phrase_novelty_gap_skips: 4,
             lm_head_phrase_novelty_max_gap_milli: 900,
+            lm_head_phrase_novelty_soft_choices: 6,
         });
 
         assert!(suffix.contains("AIP: policy=quality"));
@@ -398,6 +408,7 @@ mod tests {
         assert!(suffix.contains("adaptive_throttles=2 min_margin_milli=125"));
         assert!(suffix.contains("phrase_novelty=9/12 max_ngram=3"));
         assert!(suffix.contains("gap_skips=4 max_gap_milli=900"));
+        assert!(suffix.contains("soft_choices=6"));
     }
 
     #[test]
