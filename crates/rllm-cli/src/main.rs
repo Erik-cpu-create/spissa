@@ -176,10 +176,66 @@ enum Commands {
         input: String,
     },
 
-    /// Benchmark a .rllm file (not yet implemented)
+    /// Run an alternating control/candidate llama-test benchmark harness
     Benchmark {
         /// Path to .rllm file
         file: String,
+
+        /// Prompt sent to llama-test before exit
+        #[arg(long, default_value = "good morning")]
+        prompt: String,
+
+        /// Number of alternating control/candidate pairs
+        #[arg(long, default_value_t = 3)]
+        runs: usize,
+
+        /// Maximum context length
+        #[arg(long, default_value_t = 2048)]
+        ctx: usize,
+
+        /// Maximum assistant tokens per run
+        #[arg(long, default_value_t = 64)]
+        max_new_tokens: usize,
+
+        /// Markdown report output path
+        #[arg(long)]
+        out: String,
+
+        /// Ask llama-test to print decode phase timing details
+        #[arg(long)]
+        profile_phases: bool,
+
+        /// Lower accepted decode throughput bound
+        #[arg(long, default_value_t = 30.0)]
+        target_min_tok_s: f64,
+
+        /// Upper accepted decode throughput bound
+        #[arg(long, default_value_t = 40.0)]
+        target_max_tok_s: f64,
+
+        /// Env assignment applied to both variants, e.g. KEY=VALUE
+        #[arg(long = "common-env")]
+        common_env: Vec<String>,
+
+        /// Env assignment applied only to the control variant
+        #[arg(long = "control-env")]
+        control_env: Vec<String>,
+
+        /// Env assignment applied only to the candidate variant
+        #[arg(long = "candidate-env")]
+        candidate_env: Vec<String>,
+
+        /// Label used for the control variant in the report
+        #[arg(long, default_value = "control")]
+        control_name: String,
+
+        /// Label used for the candidate variant in the report
+        #[arg(long, default_value = "candidate")]
+        candidate_name: String,
+
+        /// Optional path to llama-test; defaults to sibling binary beside rllm
+        #[arg(long)]
+        runner: Option<String>,
     },
 
     /// Run a scripted persistent chat-session benchmark
@@ -310,7 +366,39 @@ fn main() -> Result<()> {
             &rama_integrity,
         ),
         Commands::Import { input } => commands::import::run(&input),
-        Commands::Benchmark { file } => commands::benchmark::run(&file),
+        Commands::Benchmark {
+            file,
+            prompt,
+            runs,
+            ctx,
+            max_new_tokens,
+            out,
+            profile_phases,
+            target_min_tok_s,
+            target_max_tok_s,
+            common_env,
+            control_env,
+            candidate_env,
+            control_name,
+            candidate_name,
+            runner,
+        } => commands::benchmark::run(commands::benchmark::BenchmarkOptions {
+            file,
+            prompt,
+            runs,
+            ctx,
+            max_new_tokens,
+            out,
+            profile_phases,
+            target_min_tok_s,
+            target_max_tok_s,
+            common_env,
+            control_env,
+            candidate_env,
+            control_name,
+            candidate_name,
+            runner,
+        }),
         Commands::ChatSession {
             file,
             turns,
