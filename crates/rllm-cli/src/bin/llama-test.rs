@@ -116,6 +116,16 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
         } else {
             String::new()
         };
+        let lm_head_phrase_novelty_note = if stats.lm_head_phrase_novelty_checks > 0 {
+            format!(
+                " phrase_novelty={}/{} max_ngram={}",
+                stats.lm_head_phrase_novelty_switches,
+                stats.lm_head_phrase_novelty_checks,
+                stats.lm_head_phrase_novelty_max_ngram
+            )
+        } else {
+            String::new()
+        };
         format!(
             " | AIP: policy={} calls={} fallbacks={} max_topk={} skipped_madds={} scratch={} bytes",
             policy_str,
@@ -129,6 +139,7 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
             + &input_tile_note
             + &lm_head_agreement_note
             + &lm_head_repeat_margin_note
+            + &lm_head_phrase_novelty_note
     }
 }
 
@@ -352,6 +363,9 @@ mod tests {
             lm_head_repeat_margin_max_gap_milli: 125,
             lm_head_repeat_margin_adaptive_throttles: 2,
             lm_head_repeat_margin_min_effective_milli: 125,
+            lm_head_phrase_novelty_checks: 12,
+            lm_head_phrase_novelty_switches: 9,
+            lm_head_phrase_novelty_max_ngram: 3,
         });
 
         assert!(suffix.contains("AIP: policy=quality"));
@@ -371,6 +385,7 @@ mod tests {
         );
         assert!(suffix.contains("lm_head_repeat_margin=5/7 max_gap_milli=125"));
         assert!(suffix.contains("adaptive_throttles=2 min_margin_milli=125"));
+        assert!(suffix.contains("phrase_novelty=9/12 max_ngram=3"));
     }
 
     #[test]
