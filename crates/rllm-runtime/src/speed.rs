@@ -294,6 +294,9 @@ pub struct RamaExperimentalSpeedStats {
     pub lm_head_agreement_selected_matches: usize,
     pub lm_head_agreement_exact_in_sparse_topk: usize,
     pub lm_head_agreement_max_topk: usize,
+    pub lm_head_repeat_margin_checks: usize,
+    pub lm_head_repeat_margin_switches: usize,
+    pub lm_head_repeat_margin_max_gap_milli: usize,
 }
 
 impl RamaExperimentalSpeedStats {
@@ -350,6 +353,15 @@ impl RamaExperimentalSpeedStats {
         self.lm_head_agreement_max_topk = self
             .lm_head_agreement_max_topk
             .max(other.lm_head_agreement_max_topk);
+        self.lm_head_repeat_margin_checks = self
+            .lm_head_repeat_margin_checks
+            .saturating_add(other.lm_head_repeat_margin_checks);
+        self.lm_head_repeat_margin_switches = self
+            .lm_head_repeat_margin_switches
+            .saturating_add(other.lm_head_repeat_margin_switches);
+        self.lm_head_repeat_margin_max_gap_milli = self
+            .lm_head_repeat_margin_max_gap_milli
+            .max(other.lm_head_repeat_margin_max_gap_milli);
     }
 
     pub fn record_sparse_projection(
@@ -432,6 +444,16 @@ impl RamaExperimentalSpeedStats {
         self.lm_head_agreement_max_topk = self.lm_head_agreement_max_topk.max(sparse_topk);
     }
 
+    pub fn record_lm_head_repeat_margin(&mut self, switched: bool, gap_milli: usize) {
+        self.lm_head_repeat_margin_checks = self.lm_head_repeat_margin_checks.saturating_add(1);
+        if switched {
+            self.lm_head_repeat_margin_switches =
+                self.lm_head_repeat_margin_switches.saturating_add(1);
+        }
+        self.lm_head_repeat_margin_max_gap_milli =
+            self.lm_head_repeat_margin_max_gap_milli.max(gap_milli);
+    }
+
     pub fn is_empty(self) -> bool {
         self.aip_policy.is_none()
             && self.sparse_projection_calls == 0
@@ -453,6 +475,9 @@ impl RamaExperimentalSpeedStats {
             && self.lm_head_agreement_selected_matches == 0
             && self.lm_head_agreement_exact_in_sparse_topk == 0
             && self.lm_head_agreement_max_topk == 0
+            && self.lm_head_repeat_margin_checks == 0
+            && self.lm_head_repeat_margin_switches == 0
+            && self.lm_head_repeat_margin_max_gap_milli == 0
     }
 }
 
@@ -807,6 +832,22 @@ mod tests {
         assert_eq!(stats.lm_head_agreement_selected_matches, 2);
         assert_eq!(stats.lm_head_agreement_exact_in_sparse_topk, 2);
         assert_eq!(stats.lm_head_agreement_max_topk, 8);
+        assert!(!stats.is_empty());
+    }
+
+    #[test]
+    fn stats_record_lm_head_repeat_margin_and_merge() {
+        let mut stats = RamaExperimentalSpeedStats::default();
+        stats.record_lm_head_repeat_margin(false, 25);
+        stats.record_lm_head_repeat_margin(true, 125);
+
+        let mut other = RamaExperimentalSpeedStats::default();
+        other.record_lm_head_repeat_margin(true, 75);
+        stats.add_assign(other);
+
+        assert_eq!(stats.lm_head_repeat_margin_checks, 3);
+        assert_eq!(stats.lm_head_repeat_margin_switches, 2);
+        assert_eq!(stats.lm_head_repeat_margin_max_gap_milli, 125);
         assert!(!stats.is_empty());
     }
 
