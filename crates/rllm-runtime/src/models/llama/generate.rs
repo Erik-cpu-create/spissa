@@ -37,6 +37,13 @@ pub struct LlamaStreamingBlockConfig {
     pub experimental_speed: RamaExperimentalSpeedConfig,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct LlamaStreamingBlockProbe {
+    pub attention_output: Option<Vec<f32>>,
+    pub gate_up_output: Option<Vec<f32>>,
+    pub down_output: Option<Vec<f32>>,
+}
+
 fn optional_input_tiled_sparse_linear(
     model: &mut LazyRllmModel,
     weight_name: &str,
@@ -131,7 +138,7 @@ pub fn streaming_llama_transformer_block(
     cache: Option<&mut KvCache>,
 ) -> Result<Vec<f32>> {
     streaming_llama_transformer_block_with_timing(
-        model, input, names, params, config, budget, cache, None, None, None, None,
+        model, input, names, params, config, budget, cache, None, None, None, None, None,
     )
 }
 
@@ -147,6 +154,7 @@ pub fn streaming_llama_transformer_block_with_timing(
     mut experimental_speed_stats: Option<&mut RamaExperimentalSpeedStats>,
     mut sparse_column_cache: Option<&mut SparseColumnCache>,
     mut attention_locality_cache: Option<&mut RamaAttentionLocalityCache>,
+    mut probe: Option<&mut LlamaStreamingBlockProbe>,
 ) -> Result<Vec<f32>> {
     if let Some(timing) = timing.as_deref_mut() {
         timing.profiled_layers = timing.profiled_layers.saturating_add(1);
@@ -395,6 +403,9 @@ pub fn streaming_llama_transformer_block_with_timing(
             budget,
         )?,
     };
+    if let Some(probe) = probe.as_deref_mut() {
+        probe.attention_output = Some(o.clone());
+    }
     if let Some(timing) = timing.as_deref_mut() {
         timing.o_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
@@ -574,6 +585,9 @@ pub fn streaming_llama_transformer_block_with_timing(
         }
         gate
     };
+    if let Some(probe) = probe.as_deref_mut() {
+        probe.gate_up_output = Some(gate.clone());
+    }
 
     let down_config = StreamingTileLinearConfig {
         linear: StreamingLinearConfig {
@@ -693,6 +707,9 @@ pub fn streaming_llama_transformer_block_with_timing(
             budget,
         )?
     };
+    if let Some(probe) = probe.as_deref_mut() {
+        probe.down_output = Some(down.clone());
+    }
     if let Some(timing) = timing.as_deref_mut() {
         timing.down_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }

@@ -1067,6 +1067,7 @@ mod tests {
                 lm_head_phrase_novelty_soft_choices: 0,
                 lm_head_phrase_novelty_retentions: 0,
                 layer_drift_probe: Default::default(),
+                layer_attribution_probe: Default::default(),
             });
         adapter
             .experimental_speed_stats
@@ -1113,6 +1114,7 @@ mod tests {
                 lm_head_phrase_novelty_soft_choices: 0,
                 lm_head_phrase_novelty_retentions: 0,
                 layer_drift_probe: Default::default(),
+                layer_attribution_probe: Default::default(),
             });
         let mut session = RamaChatSession::new(adapter);
         let mut budget = MemoryBudget::unbounded();

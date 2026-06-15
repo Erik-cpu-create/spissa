@@ -461,6 +461,71 @@ impl RamaLayerDriftProbeStats {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RamaLayerAttributionProbeStats {
+    pub samples: usize,
+    pub layer: usize,
+    pub attention_l2_milli: usize,
+    pub attention_cosine_gap_milli: usize,
+    pub gate_up_l2_milli: usize,
+    pub gate_up_cosine_gap_milli: usize,
+    pub down_l2_milli: usize,
+    pub down_cosine_gap_milli: usize,
+}
+
+impl RamaLayerAttributionProbeStats {
+    pub fn add_assign(&mut self, other: Self) {
+        self.samples = self.samples.saturating_add(other.samples);
+        self.layer = min_non_zero(self.layer, other.layer);
+        self.attention_l2_milli = self.attention_l2_milli.max(other.attention_l2_milli);
+        self.attention_cosine_gap_milli = self
+            .attention_cosine_gap_milli
+            .max(other.attention_cosine_gap_milli);
+        self.gate_up_l2_milli = self.gate_up_l2_milli.max(other.gate_up_l2_milli);
+        self.gate_up_cosine_gap_milli = self
+            .gate_up_cosine_gap_milli
+            .max(other.gate_up_cosine_gap_milli);
+        self.down_l2_milli = self.down_l2_milli.max(other.down_l2_milli);
+        self.down_cosine_gap_milli = self.down_cosine_gap_milli.max(other.down_cosine_gap_milli);
+    }
+
+    pub fn record(
+        &mut self,
+        layer: usize,
+        attention_l2_milli: usize,
+        attention_cosine_gap_milli: usize,
+        gate_up_l2_milli: usize,
+        gate_up_cosine_gap_milli: usize,
+        down_l2_milli: usize,
+        down_cosine_gap_milli: usize,
+    ) {
+        if layer == 0 {
+            return;
+        }
+        self.samples = self.samples.saturating_add(1);
+        self.layer = min_non_zero(self.layer, layer);
+        self.attention_l2_milli = self.attention_l2_milli.max(attention_l2_milli);
+        self.attention_cosine_gap_milli = self
+            .attention_cosine_gap_milli
+            .max(attention_cosine_gap_milli);
+        self.gate_up_l2_milli = self.gate_up_l2_milli.max(gate_up_l2_milli);
+        self.gate_up_cosine_gap_milli = self.gate_up_cosine_gap_milli.max(gate_up_cosine_gap_milli);
+        self.down_l2_milli = self.down_l2_milli.max(down_l2_milli);
+        self.down_cosine_gap_milli = self.down_cosine_gap_milli.max(down_cosine_gap_milli);
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.samples == 0
+            && self.layer == 0
+            && self.attention_l2_milli == 0
+            && self.attention_cosine_gap_milli == 0
+            && self.gate_up_l2_milli == 0
+            && self.gate_up_cosine_gap_milli == 0
+            && self.down_l2_milli == 0
+            && self.down_cosine_gap_milli == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RamaExperimentalSpeedStats {
     pub aip_policy: Option<RamaAipPolicyKind>,
     pub sparse_projection_calls: usize,
@@ -504,6 +569,7 @@ pub struct RamaExperimentalSpeedStats {
     pub lm_head_phrase_novelty_soft_choices: usize,
     pub lm_head_phrase_novelty_retentions: usize,
     pub layer_drift_probe: RamaLayerDriftProbeStats,
+    pub layer_attribution_probe: RamaLayerAttributionProbeStats,
 }
 
 impl RamaExperimentalSpeedStats {
@@ -625,6 +691,8 @@ impl RamaExperimentalSpeedStats {
             .lm_head_phrase_novelty_retentions
             .saturating_add(other.lm_head_phrase_novelty_retentions);
         self.layer_drift_probe.add_assign(other.layer_drift_probe);
+        self.layer_attribution_probe
+            .add_assign(other.layer_attribution_probe);
     }
 
     pub fn record_sparse_projection(
@@ -802,6 +870,27 @@ impl RamaExperimentalSpeedStats {
         );
     }
 
+    pub fn record_layer_attribution_probe(
+        &mut self,
+        layer: usize,
+        attention_l2_milli: usize,
+        attention_cosine_gap_milli: usize,
+        gate_up_l2_milli: usize,
+        gate_up_cosine_gap_milli: usize,
+        down_l2_milli: usize,
+        down_cosine_gap_milli: usize,
+    ) {
+        self.layer_attribution_probe.record(
+            layer,
+            attention_l2_milli,
+            attention_cosine_gap_milli,
+            gate_up_l2_milli,
+            gate_up_cosine_gap_milli,
+            down_l2_milli,
+            down_cosine_gap_milli,
+        );
+    }
+
     pub fn is_empty(self) -> bool {
         self.aip_policy.is_none()
             && self.sparse_projection_calls == 0
@@ -845,6 +934,7 @@ impl RamaExperimentalSpeedStats {
             && self.lm_head_phrase_novelty_soft_choices == 0
             && self.lm_head_phrase_novelty_retentions == 0
             && self.layer_drift_probe.is_empty()
+            && self.layer_attribution_probe.is_empty()
     }
 }
 
@@ -1711,6 +1801,26 @@ mod tests {
         assert_eq!(stats.layer_drift_probe.max_l2_milli, 1_250);
         assert_eq!(stats.layer_drift_probe.max_cosine_gap_milli, 50);
         assert_eq!(stats.layer_drift_probe.max_exact_margin_milli, 1_200);
+        assert!(!stats.is_empty());
+    }
+
+    #[test]
+    fn stats_record_layer_attribution_probe_and_merge() {
+        let mut stats = RamaExperimentalSpeedStats::default();
+        stats.record_layer_attribution_probe(2, 100, 10, 200, 20, 300, 30);
+
+        let mut other = RamaExperimentalSpeedStats::default();
+        other.record_layer_attribution_probe(3, 150, 15, 180, 25, 400, 5);
+        stats.add_assign(other);
+
+        assert_eq!(stats.layer_attribution_probe.samples, 2);
+        assert_eq!(stats.layer_attribution_probe.layer, 2);
+        assert_eq!(stats.layer_attribution_probe.attention_l2_milli, 150);
+        assert_eq!(stats.layer_attribution_probe.attention_cosine_gap_milli, 15);
+        assert_eq!(stats.layer_attribution_probe.gate_up_l2_milli, 200);
+        assert_eq!(stats.layer_attribution_probe.gate_up_cosine_gap_milli, 25);
+        assert_eq!(stats.layer_attribution_probe.down_l2_milli, 400);
+        assert_eq!(stats.layer_attribution_probe.down_cosine_gap_milli, 30);
         assert!(!stats.is_empty());
     }
 

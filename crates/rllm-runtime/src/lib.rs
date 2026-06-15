@@ -69,7 +69,7 @@ pub use speed::{
     parse_turbo_topk, select_top_abs_indices, select_top_abs_indices_with_recent,
     RamaAipPolicyKind, RamaAipProjectionDecision, RamaAipProjectionKind,
     RamaAttentionLocalityCache, RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats,
-    RamaLayerDriftProbeStats,
+    RamaLayerAttributionProbeStats, RamaLayerDriftProbeStats,
 };
 pub use streaming::{
     input_tile_sidecar_weight_name, streaming_attention_from_model,

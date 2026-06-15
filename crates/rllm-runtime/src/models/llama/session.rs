@@ -3,6 +3,7 @@ use crate::models::llama::api::{
 };
 use crate::models::llama::generate::{
     streaming_llama_transformer_block_with_timing, LlamaStreamingBlockConfig,
+    LlamaStreamingBlockProbe,
 };
 use crate::models::llama::model::{
     LayerDecodedLlamaRamaTransformer, OwnedLlamaStreamingBlockParameters,
@@ -148,6 +149,13 @@ fn hidden_cosine_gap_milli(lhs: &[f32], rhs: &[f32]) -> usize {
     }
     let cosine = (dot / (lhs_sq.sqrt() * rhs_sq.sqrt())).clamp(-1.0, 1.0);
     positive_f64_to_milli(1.0 - cosine)
+}
+
+fn optional_vector_metrics(lhs: Option<&[f32]>, rhs: Option<&[f32]>) -> (usize, usize) {
+    match (lhs, rhs) {
+        (Some(lhs), Some(rhs)) => (hidden_l2_milli(lhs, rhs), hidden_cosine_gap_milli(lhs, rhs)),
+        _ => (0, 0),
+    }
 }
 
 impl Default for LmHeadPhraseNoveltyState {
@@ -1150,6 +1158,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 experimental_stats_ref,
                 sparse_column_cache_ref,
                 attention_locality_cache_ref,
+                None,
             )?;
 
             let normalized = rms_norm(
@@ -1182,6 +1191,96 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         }
 
         Ok(outputs)
+    }
+
+    fn collect_layer_attribution_probe(
+        &mut self,
+        tokens: &[usize],
+        position_offset: usize,
+        experimental_speed_config: RamaExperimentalSpeedConfig,
+        target_layer: usize,
+        budget: &mut MemoryBudget,
+    ) -> Result<LlamaStreamingBlockProbe> {
+        let Some(target_index) = target_layer.checked_sub(1) else {
+            return Err(RuntimeError::Shape(
+                "layer attribution target must be 1-based".to_string(),
+            ));
+        };
+        let seq_len = tokens.len();
+        let mut hidden = embedding_lookup(
+            &self.embedding_data,
+            self.vocab_size,
+            self.hidden_size,
+            tokens,
+        )?;
+        let mut caches = self.caches.clone();
+        let mut sparse_column_cache = SparseColumnCache::from_env();
+        let mut attention_locality_caches = self.attention_locality_caches.clone();
+        let mut shadow_speed_stats = RamaExperimentalSpeedStats::default();
+
+        for (i, layer_names) in self.prepared.layers.iter().enumerate() {
+            let config = LlamaStreamingBlockConfig {
+                seq_len,
+                hidden_size: self.hidden_size,
+                q_heads: self.prepared.config.num_heads,
+                kv_heads: self.prepared.config.num_key_value_heads,
+                head_dim: self.head_dim,
+                intermediate_size: self.intermediate_size,
+                rms_norm_eps: self.prepared.config.rms_norm_eps,
+                rope_theta: self.prepared.config.rope_theta,
+                causal: self.prepared.config.causal,
+                position_offset,
+                layer_index: i,
+                total_layers: self.prepared.layers.len(),
+                experimental_speed: experimental_speed_config,
+            };
+            let experimental_stats_ref = if experimental_speed_config.enabled {
+                Some(&mut shadow_speed_stats)
+            } else {
+                None
+            };
+            let sparse_column_cache_ref = if experimental_speed_config.aip_column_cache {
+                Some(&mut sparse_column_cache)
+            } else {
+                None
+            };
+            let attention_locality_cache_ref = if experimental_speed_config
+                .attention_locality_enabled_for_layer(i, self.prepared.layers.len())
+            {
+                Some(&mut attention_locality_caches[i])
+            } else {
+                None
+            };
+            let mut block_probe = if i == target_index {
+                Some(LlamaStreamingBlockProbe::default())
+            } else {
+                None
+            };
+
+            hidden = streaming_llama_transformer_block_with_timing(
+                self.model,
+                &hidden,
+                layer_names,
+                &self.layer_norms[i],
+                config,
+                budget,
+                Some(&mut caches[i]),
+                None,
+                experimental_stats_ref,
+                sparse_column_cache_ref,
+                attention_locality_cache_ref,
+                block_probe.as_mut(),
+            )?;
+
+            if i == target_index {
+                return Ok(block_probe.unwrap_or_default());
+            }
+        }
+
+        Err(RuntimeError::Shape(format!(
+            "layer attribution target {target_layer} exceeds layer count {}",
+            self.prepared.layers.len()
+        )))
     }
 
     fn record_layer_drift_probe(
@@ -1241,6 +1340,43 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             max_cosine_gap_milli,
             max_exact_margin_milli,
         );
+        if let Some(layer) = first_mismatch_layer {
+            let exact_probe = self.collect_layer_attribution_probe(
+                tokens,
+                position_offset,
+                RamaExperimentalSpeedConfig::disabled(),
+                layer,
+                &mut probe_budget,
+            )?;
+            let sparse_probe = self.collect_layer_attribution_probe(
+                tokens,
+                position_offset,
+                experimental_speed_config,
+                layer,
+                &mut probe_budget,
+            )?;
+            let (attention_l2_milli, attention_cosine_gap_milli) = optional_vector_metrics(
+                exact_probe.attention_output.as_deref(),
+                sparse_probe.attention_output.as_deref(),
+            );
+            let (gate_up_l2_milli, gate_up_cosine_gap_milli) = optional_vector_metrics(
+                exact_probe.gate_up_output.as_deref(),
+                sparse_probe.gate_up_output.as_deref(),
+            );
+            let (down_l2_milli, down_cosine_gap_milli) = optional_vector_metrics(
+                exact_probe.down_output.as_deref(),
+                sparse_probe.down_output.as_deref(),
+            );
+            stats.record_layer_attribution_probe(
+                layer,
+                attention_l2_milli,
+                attention_cosine_gap_milli,
+                gate_up_l2_milli,
+                gate_up_cosine_gap_milli,
+                down_l2_milli,
+                down_cosine_gap_milli,
+            );
+        }
         Ok(())
     }
 
@@ -1355,6 +1491,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 experimental_stats_ref,
                 sparse_column_cache,
                 attention_locality_cache,
+                None,
             )?;
             if self.collect_transformer_detail_timing {
                 phase_timings
