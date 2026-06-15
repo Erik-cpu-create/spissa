@@ -17,6 +17,8 @@ pub const RLLM_AIP_LM_HEAD_NOVELTY_WINDOW_ENV: &str = "RLLM_AIP_LM_HEAD_NOVELTY_
 pub const RLLM_AIP_LM_HEAD_NOVELTY_GAP_MILLI_ENV: &str = "RLLM_AIP_LM_HEAD_NOVELTY_GAP_MILLI";
 pub const RLLM_AIP_LM_HEAD_NOVELTY_REPEAT_PENALTY_MILLI_ENV: &str =
     "RLLM_AIP_LM_HEAD_NOVELTY_REPEAT_PENALTY_MILLI";
+pub const RLLM_AIP_LM_HEAD_NOVELTY_RETENTION_MILLI_ENV: &str =
+    "RLLM_AIP_LM_HEAD_NOVELTY_RETENTION_MILLI";
 pub const RLLM_AIP_COLUMN_CACHE_ENV: &str = "RLLM_AIP_COLUMN_CACHE";
 pub const RLLM_AIP_INPUT_TILES_ENV: &str = "RLLM_AIP_INPUT_TILES";
 pub const RLLM_AIP_NO_REPEAT_LAST_ENV: &str = "RLLM_AIP_NO_REPEAT_LAST";
@@ -87,6 +89,7 @@ pub struct RamaExperimentalSpeedConfig {
     pub aip_lm_head_novelty_window: Option<usize>,
     pub aip_lm_head_novelty_gap_milli: Option<usize>,
     pub aip_lm_head_novelty_repeat_penalty_milli: Option<usize>,
+    pub aip_lm_head_novelty_retention_milli: Option<usize>,
     pub aip_column_cache: bool,
     pub aip_input_tiles: bool,
     pub aip_no_repeat_last: bool,
@@ -156,6 +159,11 @@ impl RamaExperimentalSpeedConfig {
                         .ok()
                         .as_deref(),
                 ),
+            aip_lm_head_novelty_retention_milli: parse_aip_lm_head_novelty_retention_milli(
+                std::env::var(RLLM_AIP_LM_HEAD_NOVELTY_RETENTION_MILLI_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
             aip_column_cache: parse_aip_column_cache_enabled(
                 std::env::var(RLLM_AIP_COLUMN_CACHE_ENV).ok().as_deref(),
             ),
@@ -190,6 +198,7 @@ impl RamaExperimentalSpeedConfig {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -340,6 +349,7 @@ pub struct RamaExperimentalSpeedStats {
     pub lm_head_phrase_novelty_gap_skips: usize,
     pub lm_head_phrase_novelty_max_gap_milli: usize,
     pub lm_head_phrase_novelty_soft_choices: usize,
+    pub lm_head_phrase_novelty_retentions: usize,
 }
 
 impl RamaExperimentalSpeedStats {
@@ -430,6 +440,9 @@ impl RamaExperimentalSpeedStats {
         self.lm_head_phrase_novelty_soft_choices = self
             .lm_head_phrase_novelty_soft_choices
             .saturating_add(other.lm_head_phrase_novelty_soft_choices);
+        self.lm_head_phrase_novelty_retentions = self
+            .lm_head_phrase_novelty_retentions
+            .saturating_add(other.lm_head_phrase_novelty_retentions);
     }
 
     pub fn record_sparse_projection(
@@ -557,6 +570,11 @@ impl RamaExperimentalSpeedStats {
             self.lm_head_phrase_novelty_soft_choices.saturating_add(1);
     }
 
+    pub fn record_lm_head_phrase_novelty_retention(&mut self) {
+        self.lm_head_phrase_novelty_retentions =
+            self.lm_head_phrase_novelty_retentions.saturating_add(1);
+    }
+
     pub fn is_empty(self) -> bool {
         self.aip_policy.is_none()
             && self.sparse_projection_calls == 0
@@ -589,6 +607,7 @@ impl RamaExperimentalSpeedStats {
             && self.lm_head_phrase_novelty_gap_skips == 0
             && self.lm_head_phrase_novelty_max_gap_milli == 0
             && self.lm_head_phrase_novelty_soft_choices == 0
+            && self.lm_head_phrase_novelty_retentions == 0
     }
 }
 
@@ -638,6 +657,10 @@ pub fn parse_aip_lm_head_novelty_gap_milli(value: Option<&str>) -> Option<usize>
 }
 
 pub fn parse_aip_lm_head_novelty_repeat_penalty_milli(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
+pub fn parse_aip_lm_head_novelty_retention_milli(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
 
@@ -772,6 +795,7 @@ mod tests {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -798,6 +822,7 @@ mod tests {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -987,6 +1012,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_lm_head_novelty_retention_milli_keeps_only_positive_values() {
+        assert_eq!(
+            parse_aip_lm_head_novelty_retention_milli(Some("100")),
+            Some(100)
+        );
+        assert_eq!(
+            parse_aip_lm_head_novelty_retention_milli(Some("1")),
+            Some(1)
+        );
+        assert_eq!(parse_aip_lm_head_novelty_retention_milli(Some("0")), None);
+        assert_eq!(parse_aip_lm_head_novelty_retention_milli(Some("-2")), None);
+        assert_eq!(parse_aip_lm_head_novelty_retention_milli(Some("bad")), None);
+        assert_eq!(parse_aip_lm_head_novelty_retention_milli(None), None);
+    }
+
+    #[test]
     fn parse_aip_lm_head_repeat_margin_adaptive_enabled_accepts_explicit_truthy_values() {
         assert!(parse_aip_lm_head_repeat_margin_adaptive_enabled(Some("1")));
         assert!(parse_aip_lm_head_repeat_margin_adaptive_enabled(Some(
@@ -1053,6 +1094,7 @@ mod tests {
         stats.record_lm_head_phrase_novelty(false, 2);
         stats.record_lm_head_phrase_novelty_gap_skip(500);
         stats.record_lm_head_phrase_novelty_soft_choice();
+        stats.record_lm_head_phrase_novelty_retention();
 
         let mut other = RamaExperimentalSpeedStats::default();
         other.record_lm_head_repeat_margin(true, 75);
@@ -1060,6 +1102,7 @@ mod tests {
         other.record_lm_head_phrase_novelty(true, 3);
         other.record_lm_head_phrase_novelty_gap_skip(250);
         other.record_lm_head_phrase_novelty_soft_choice();
+        other.record_lm_head_phrase_novelty_retention();
         stats.add_assign(other);
 
         assert_eq!(stats.lm_head_repeat_margin_checks, 3);
@@ -1073,6 +1116,7 @@ mod tests {
         assert_eq!(stats.lm_head_phrase_novelty_gap_skips, 2);
         assert_eq!(stats.lm_head_phrase_novelty_max_gap_milli, 500);
         assert_eq!(stats.lm_head_phrase_novelty_soft_choices, 2);
+        assert_eq!(stats.lm_head_phrase_novelty_retentions, 2);
         assert!(!stats.is_empty());
     }
 
@@ -1096,6 +1140,7 @@ mod tests {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -1123,6 +1168,7 @@ mod tests {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -1151,6 +1197,7 @@ mod tests {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -1195,6 +1242,7 @@ mod tests {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -1231,6 +1279,7 @@ mod tests {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -1267,6 +1316,7 @@ mod tests {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,
@@ -1308,6 +1358,7 @@ mod tests {
             aip_lm_head_novelty_window: None,
             aip_lm_head_novelty_gap_milli: None,
             aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
             aip_column_cache: false,
             aip_input_tiles: false,
             aip_no_repeat_last: false,

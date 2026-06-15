@@ -134,6 +134,11 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
             } else {
                 String::new()
             };
+            let retention_note = if stats.lm_head_phrase_novelty_retentions > 0 {
+                format!(" retentions={}", stats.lm_head_phrase_novelty_retentions)
+            } else {
+                String::new()
+            };
             format!(
                 " phrase_novelty={}/{} max_ngram={}",
                 stats.lm_head_phrase_novelty_switches,
@@ -141,6 +146,7 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
                 stats.lm_head_phrase_novelty_max_ngram
             ) + &gap_note
                 + &soft_note
+                + &retention_note
         } else {
             String::new()
         };
@@ -387,6 +393,7 @@ mod tests {
             lm_head_phrase_novelty_gap_skips: 4,
             lm_head_phrase_novelty_max_gap_milli: 900,
             lm_head_phrase_novelty_soft_choices: 6,
+            lm_head_phrase_novelty_retentions: 3,
         });
 
         assert!(suffix.contains("AIP: policy=quality"));
@@ -409,6 +416,7 @@ mod tests {
         assert!(suffix.contains("phrase_novelty=9/12 max_ngram=3"));
         assert!(suffix.contains("gap_skips=4 max_gap_milli=900"));
         assert!(suffix.contains("soft_choices=6"));
+        assert!(suffix.contains("retentions=3"));
     }
 
     #[test]
