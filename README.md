@@ -154,6 +154,10 @@ printf 'good morning\nexit\n' | \
 # Optional R35 adaptive repeat-margin controller:
 # RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI=50
 # RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE=1
+# Optional R36 phrase novelty controller:
+# RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI=75
+# RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE=1
+# RLLM_AIP_LM_HEAD_NOVELTY_WINDOW=4
 
 # Force the runtime worker count for CPU-only benchmarks.
 RLLM_THREADS=1 cargo run --release -p rllm-cli --bin llama-test -- \
