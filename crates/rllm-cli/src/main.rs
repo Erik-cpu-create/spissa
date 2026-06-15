@@ -181,9 +181,9 @@ enum Commands {
         /// Path to .rllm file
         file: String,
 
-        /// Prompt sent to llama-test before exit
-        #[arg(long, default_value = "good morning")]
-        prompt: String,
+        /// Prompt sent to llama-test before exit. Repeat for a prompt matrix.
+        #[arg(long = "prompt", default_value = "good morning")]
+        prompt: Vec<String>,
 
         /// Number of alternating control/candidate pairs
         #[arg(long, default_value_t = 3)]
@@ -384,7 +384,7 @@ fn main() -> Result<()> {
             runner,
         } => commands::benchmark::run(commands::benchmark::BenchmarkOptions {
             file,
-            prompt,
+            prompts: prompt,
             runs,
             ctx,
             max_new_tokens,

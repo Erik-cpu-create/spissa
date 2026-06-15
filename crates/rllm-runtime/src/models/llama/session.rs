@@ -12,6 +12,10 @@ use crate::rolling::RollingExecutor;
 #[cfg(test)]
 use crate::rolling::RollingExecutorConfig;
 use crate::rotary::KvCache;
+use crate::speed::{
+    parse_aip_exact_prefill_enabled, parse_aip_lm_head_exact_every, RLLM_AIP_EXACT_PREFILL_ENV,
+    RLLM_AIP_LM_HEAD_EXACT_EVERY_ENV,
+};
 use crate::streaming::{
     streaming_tile_linear_argmax_candidate_rows_range_from_model,
     streaming_tile_linear_argmax_prefix_from_model,
@@ -22,7 +26,7 @@ use crate::{
     streaming_input_tiled_sparse_tile_linear_from_model, streaming_tile_linear_argmax_from_model,
     streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
 };
-use crate::{RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats};
+use crate::{RamaAttentionLocalityCache, RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats};
 use crate::{
     RamaRollingStats, RamaSessionAdapter, RamaSessionPhaseTimings, RamaSessionStep,
     RamaTransformerPhaseTimings, SparseColumnCache, StreamingLinearConfig,
@@ -44,11 +48,15 @@ pub struct LlamaRamaSessionAdapter<'a> {
     rolling_executor: Option<RollingExecutor>,
     last_rolling_stats: Option<RamaRollingStats>,
     experimental_speed_config: RamaExperimentalSpeedConfig,
+    exact_prefill: bool,
+    lm_head_exact_every: Option<usize>,
     last_experimental_speed_stats: Option<RamaExperimentalSpeedStats>,
     sparse_column_cache: SparseColumnCache,
+    attention_locality_caches: Vec<RamaAttentionLocalityCache>,
     collect_transformer_detail_timing: bool,
     last_generated_token: Option<usize>,
     last_generated_token_run: usize,
+    generated_token_count_in_turn: usize,
     lm_head_repeat_margin_state: LmHeadRepeatMarginState,
     lm_head_phrase_novelty_state: LmHeadPhraseNoveltyState,
 }
@@ -237,6 +245,17 @@ fn checked_projection_rows(label: &str, heads: usize, head_dim: usize) -> Result
             "llama session {label} projection row count overflow"
         ))
     })
+}
+
+fn lm_head_exact_check_due(
+    exact_every: Option<usize>,
+    is_decode_step: bool,
+    generated_token_count_in_turn: usize,
+) -> bool {
+    is_decode_step
+        && exact_every.is_some_and(|every| {
+            every > 0 && generated_token_count_in_turn.saturating_add(1) % every == 0
+        })
 }
 
 #[cfg(test)]
@@ -671,6 +690,7 @@ fn sparse_lm_head_rescore_candidates(
     logits: &[f32],
     appended_tokens: &[usize],
     config: RamaExperimentalSpeedConfig,
+    stats: &mut RamaExperimentalSpeedStats,
 ) -> Result<Option<Vec<usize>>> {
     let Some(candidate_count) = config.aip_lm_head_rescore else {
         return Ok(None);
@@ -690,15 +710,89 @@ fn sparse_lm_head_rescore_candidates(
         if candidates.is_empty() {
             return Ok(None);
         }
-        return Ok(Some(candidates));
+        return Ok(confidence_gated_lm_head_rescore_candidates(
+            logits, candidates, config, stats,
+        ));
     }
 
     let candidates = select_top_indices_by_value(logits, candidate_count);
     if candidates.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(candidates))
+        Ok(confidence_gated_lm_head_rescore_candidates(
+            logits, candidates, config, stats,
+        ))
     }
+}
+
+fn confidence_gated_lm_head_rescore_candidates(
+    logits: &[f32],
+    candidates: Vec<usize>,
+    config: RamaExperimentalSpeedConfig,
+    stats: &mut RamaExperimentalSpeedStats,
+) -> Option<Vec<usize>> {
+    let gap_milli = rescore_candidate_gap_milli(logits, &candidates);
+    let use_rescore = config
+        .aip_lm_head_rescore_gap_milli
+        .is_none_or(|limit| gap_milli <= limit);
+    stats.record_lm_head_rescore(use_rescore, gap_milli);
+    use_rescore.then_some(candidates)
+}
+
+fn rescore_candidate_gap_milli(logits: &[f32], candidates: &[usize]) -> usize {
+    let Some((&first, rest)) = candidates.split_first() else {
+        return 0;
+    };
+    let Some(&second) = rest.first() else {
+        return 0;
+    };
+    let first_value = logits.get(first).copied().unwrap_or(f32::NEG_INFINITY);
+    let second_value = logits.get(second).copied().unwrap_or(f32::NEG_INFINITY);
+    gap_to_milli(first_value - second_value)
+}
+
+fn apply_rescored_lm_head_controllers(
+    logits: &[f32],
+    rescored_token_id: usize,
+    appended_tokens: &[usize],
+    previous_token_run: usize,
+    config: RamaExperimentalSpeedConfig,
+    stats: &mut RamaExperimentalSpeedStats,
+    repeat_margin_state: &mut LmHeadRepeatMarginState,
+    phrase_novelty_state: &mut LmHeadPhraseNoveltyState,
+) -> Result<usize> {
+    let repeats_previous = appended_tokens.len() == 1
+        && appended_tokens
+            .first()
+            .copied()
+            .is_some_and(|previous| previous == rescored_token_id);
+    let repeat_limit_reached = config
+        .aip_repeat_run_limit
+        .is_some_and(|limit| previous_token_run >= limit);
+    let repeat_controller_needed = repeats_previous
+        && (config.aip_no_repeat_last
+            || repeat_limit_reached
+            || config.aip_lm_head_repeat_margin_milli.is_some());
+    if repeat_controller_needed {
+        return sample_sparse_lm_head_argmax_with_controller_state(
+            logits,
+            appended_tokens,
+            previous_token_run,
+            config,
+            stats,
+            repeat_margin_state,
+            phrase_novelty_state,
+        );
+    }
+
+    Ok(apply_phrase_novelty_controller(
+        logits,
+        rescored_token_id,
+        None,
+        config,
+        Some(stats),
+        Some(phrase_novelty_state),
+    ))
 }
 
 fn record_sparse_lm_head_agreement_sample(
@@ -835,6 +929,8 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 max_seq_len,
             )?);
         }
+        let attention_locality_caches =
+            vec![RamaAttentionLocalityCache::default(); prepared.layers.len()];
 
         Ok(Self {
             model,
@@ -852,11 +948,21 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             ),
             last_rolling_stats: None,
             experimental_speed_config: RamaExperimentalSpeedConfig::from_env(),
+            exact_prefill: parse_aip_exact_prefill_enabled(
+                std::env::var(RLLM_AIP_EXACT_PREFILL_ENV).ok().as_deref(),
+            ),
+            lm_head_exact_every: parse_aip_lm_head_exact_every(
+                std::env::var(RLLM_AIP_LM_HEAD_EXACT_EVERY_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
             last_experimental_speed_stats: None,
             sparse_column_cache: SparseColumnCache::from_env(),
+            attention_locality_caches,
             collect_transformer_detail_timing: false,
             last_generated_token: None,
             last_generated_token_run: 0,
+            generated_token_count_in_turn: 0,
             lm_head_repeat_margin_state: LmHeadRepeatMarginState::default(),
             lm_head_phrase_novelty_state: LmHeadPhraseNoveltyState::default(),
         })
@@ -869,6 +975,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
     fn record_generated_token(&mut self, token_id: usize, reset_run: bool) {
         if reset_run {
             self.lm_head_phrase_novelty_state.reset();
+            self.generated_token_count_in_turn = 0;
         }
         if !reset_run && self.last_generated_token == Some(token_id) {
             self.last_generated_token_run = self.last_generated_token_run.saturating_add(1);
@@ -876,6 +983,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             self.last_generated_token = Some(token_id);
             self.last_generated_token_run = 1;
         }
+        self.generated_token_count_in_turn = self.generated_token_count_in_turn.saturating_add(1);
         self.lm_head_phrase_novelty_state.push(token_id);
     }
 
@@ -900,6 +1008,11 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         self.experimental_speed_config = config;
     }
 
+    #[cfg(test)]
+    pub(crate) fn enable_exact_prefill_for_test(&mut self, enabled: bool) {
+        self.exact_prefill = enabled;
+    }
+
     fn append_tokens_inner(
         &mut self,
         tokens: &[usize],
@@ -921,6 +1034,18 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 "llama session context would reach {projected_len}, max_seq_len {}",
                 self.max_seq_len()
             )));
+        }
+        let is_decode_step =
+            tokens.len() == 1 && self.last_generated_token == tokens.first().copied();
+        let experimental_speed_config = if self.exact_prefill && emit_logits && !is_decode_step {
+            RamaExperimentalSpeedConfig::disabled()
+        } else {
+            self.experimental_speed_config
+        };
+        if !is_decode_step {
+            for cache in &mut self.attention_locality_caches {
+                cache.clear();
+            }
         }
 
         let mut phase_timings = RamaSessionPhaseTimings::default();
@@ -949,7 +1074,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 position_offset,
                 layer_index: i,
                 total_layers: self.prepared.layers.len(),
-                experimental_speed: self.experimental_speed_config,
+                experimental_speed: experimental_speed_config,
             };
             let mut transformer_detail = RamaTransformerPhaseTimings::default();
             let transformer_detail_timing = if self.collect_transformer_detail_timing {
@@ -957,13 +1082,20 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             } else {
                 None
             };
-            let experimental_stats_ref = if self.experimental_speed_config.enabled {
+            let experimental_stats_ref = if experimental_speed_config.enabled {
                 Some(&mut experimental_speed_stats)
             } else {
                 None
             };
-            let sparse_column_cache = if self.experimental_speed_config.aip_column_cache {
+            let sparse_column_cache = if experimental_speed_config.aip_column_cache {
                 Some(&mut self.sparse_column_cache)
+            } else {
+                None
+            };
+            let attention_locality_cache = if experimental_speed_config
+                .attention_locality_enabled_for_layer(i, self.prepared.layers.len())
+            {
+                Some(&mut self.attention_locality_caches[i])
             } else {
                 None
             };
@@ -978,6 +1110,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 transformer_detail_timing,
                 experimental_stats_ref,
                 sparse_column_cache,
+                attention_locality_cache,
             )?;
             if self.collect_transformer_detail_timing {
                 phase_timings
@@ -1005,8 +1138,6 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
 
         let phase_start = Instant::now();
         let last_hidden = &hidden[(seq_len - 1) * self.hidden_size..];
-        let is_decode_step =
-            tokens.len() == 1 && self.last_generated_token == tokens.first().copied();
         let previous_token_run = if is_decode_step {
             self.last_generated_token_run
         } else {
@@ -1024,12 +1155,11 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         };
         let (token_id, logits) = match self.prepared.config.sampling {
             crate::StreamingSamplingConfig::Argmax => {
-                let token_id = if let Some(prefix_rows) = self
-                    .experimental_speed_config
-                    .lm_head_prefix_rows(self.vocab_size)
+                let token_id = if let Some(prefix_rows) =
+                    experimental_speed_config.lm_head_prefix_rows(self.vocab_size)
                 {
                     experimental_speed_stats
-                        .record_aip_policy(self.experimental_speed_config.aip_policy);
+                        .record_aip_policy(experimental_speed_config.aip_policy);
                     experimental_speed_stats.record_lm_head_prefix(prefix_rows, self.vocab_size);
                     streaming_tile_linear_argmax_prefix_from_model(
                         self.model,
@@ -1040,25 +1170,29 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                         prefix_rows,
                         budget,
                     )?
-                } else if self.experimental_speed_config.enabled
-                    && self.experimental_speed_config.aip_input_tiles
+                } else if experimental_speed_config.enabled
+                    && experimental_speed_config.aip_input_tiles
                 {
                     experimental_speed_stats
-                        .record_aip_policy(self.experimental_speed_config.aip_policy);
+                        .record_aip_policy(experimental_speed_config.aip_policy);
                     let sparse_config = RamaExperimentalSpeedConfig {
                         enabled: true,
-                        aip_policy: self.experimental_speed_config.aip_policy,
+                        aip_policy: experimental_speed_config.aip_policy,
                         aip_topk: Some(
-                            self.experimental_speed_config
-                                .lm_head_topk_for_input(self.hidden_size, 128),
+                            experimental_speed_config.lm_head_topk_for_input(self.hidden_size, 128),
                         ),
                         aip_attention_topk: None,
+                        aip_attention_locality_window: None,
+                        aip_attention_locality_extra: None,
                         aip_mlp_topk: None,
                         aip_down_topk: None,
                         aip_edge_layers: None,
                         aip_edge_topk: None,
+                        aip_exact_edge_layers: None,
+                        aip_exact_edge_projection: None,
                         aip_lm_head_topk: None,
                         aip_lm_head_rescore: None,
+                        aip_lm_head_rescore_gap_milli: None,
                         aip_lm_head_agreement: false,
                         aip_lm_head_rows: None,
                         aip_lm_head_repeat_margin_milli: None,
@@ -1084,11 +1218,12 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                     )? {
                         Some(logits) => {
                             let sparse_lm_head_topk = sparse_config.aip_topk.unwrap_or(0);
-                            let token_id = if let Some(candidates) =
+                            let selected_token_id = if let Some(candidates) =
                                 sparse_lm_head_rescore_candidates(
                                     &logits,
                                     tokens,
-                                    self.experimental_speed_config,
+                                    experimental_speed_config,
+                                    &mut experimental_speed_stats,
                                 )? {
                                 match streaming_tile_linear_argmax_candidate_rows_range_from_model(
                                     self.model,
@@ -1099,12 +1234,21 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                                     &candidates,
                                     budget,
                                 )? {
-                                    Some(token_id) => token_id,
+                                    Some(token_id) => apply_rescored_lm_head_controllers(
+                                        &logits,
+                                        token_id,
+                                        tokens,
+                                        previous_token_run,
+                                        experimental_speed_config,
+                                        &mut experimental_speed_stats,
+                                        &mut self.lm_head_repeat_margin_state,
+                                        &mut self.lm_head_phrase_novelty_state,
+                                    )?,
                                     None => sample_sparse_lm_head_argmax_with_controller_state(
                                         &logits,
                                         tokens,
                                         previous_token_run,
-                                        self.experimental_speed_config,
+                                        experimental_speed_config,
                                         &mut experimental_speed_stats,
                                         &mut self.lm_head_repeat_margin_state,
                                         &mut self.lm_head_phrase_novelty_state,
@@ -1115,13 +1259,18 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                                     &logits,
                                     tokens,
                                     previous_token_run,
-                                    self.experimental_speed_config,
+                                    experimental_speed_config,
                                     &mut experimental_speed_stats,
                                     &mut self.lm_head_repeat_margin_state,
                                     &mut self.lm_head_phrase_novelty_state,
                                 )?
                             };
-                            if self.experimental_speed_config.aip_lm_head_agreement {
+                            let exact_check_due = lm_head_exact_check_due(
+                                self.lm_head_exact_every,
+                                is_decode_step,
+                                self.generated_token_count_in_turn,
+                            );
+                            if exact_check_due || experimental_speed_config.aip_lm_head_agreement {
                                 let exact_token_id = streaming_tile_linear_argmax_from_model(
                                     self.model,
                                     &self.prepared.lm_head_weight,
@@ -1130,15 +1279,33 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                                     lm_head_config,
                                     budget,
                                 )?;
-                                record_sparse_lm_head_agreement_sample(
-                                    &mut experimental_speed_stats,
-                                    &logits,
-                                    token_id,
-                                    exact_token_id,
-                                    sparse_lm_head_topk,
-                                )?;
+                                if exact_check_due {
+                                    experimental_speed_stats.record_lm_head_exact_check(
+                                        selected_token_id != exact_token_id,
+                                    );
+                                    if experimental_speed_config.aip_lm_head_agreement {
+                                        record_sparse_lm_head_agreement_sample(
+                                            &mut experimental_speed_stats,
+                                            &logits,
+                                            selected_token_id,
+                                            exact_token_id,
+                                            sparse_lm_head_topk,
+                                        )?;
+                                    }
+                                    exact_token_id
+                                } else {
+                                    record_sparse_lm_head_agreement_sample(
+                                        &mut experimental_speed_stats,
+                                        &logits,
+                                        selected_token_id,
+                                        exact_token_id,
+                                        sparse_lm_head_topk,
+                                    )?;
+                                    selected_token_id
+                                }
+                            } else {
+                                selected_token_id
                             }
-                            token_id
                         }
                         None => {
                             if let Some(executor) = self.rolling_executor.as_mut() {
@@ -1242,6 +1409,7 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
         let old_lens: Vec<usize> = self.caches.iter().map(KvCache::len).collect();
         let old_last_generated_token = self.last_generated_token;
         let old_last_generated_token_run = self.last_generated_token_run;
+        let old_generated_token_count_in_turn = self.generated_token_count_in_turn;
         match self.append_tokens_inner(tokens, budget, emit_logits) {
             Ok(step) => Ok(step),
             Err(error) => {
@@ -1252,6 +1420,7 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
                 self.last_experimental_speed_stats = None;
                 self.last_generated_token = old_last_generated_token;
                 self.last_generated_token_run = old_last_generated_token_run;
+                self.generated_token_count_in_turn = old_generated_token_count_in_turn;
                 Err(error)
             }
         }
@@ -1986,12 +2155,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(1),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2016,18 +2190,197 @@ mod tests {
     }
 
     #[test]
+    fn llama_session_exact_prefill_keeps_decode_aip_enabled() {
+        let path = temp_path("exact-prefill-speed-decode");
+        write_bf16_mlp_speed_model(&path, 8);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let prepared = prepared_with_layers(1);
+        let mut budget = MemoryBudget::unbounded();
+        let mut adapter = LlamaRamaSessionAdapter::new(&mut model, &prepared, &mut budget).unwrap();
+        adapter.enable_experimental_speed_for_test(crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(1),
+            aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
+            aip_lm_head_repeat_margin_adaptive: false,
+            aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
+            aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
+            aip_column_cache: false,
+            aip_input_tiles: false,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
+        });
+        adapter.enable_exact_prefill_for_test(true);
+
+        let first_step = adapter
+            .append_tokens(&[0, 1], &mut budget, true)
+            .unwrap()
+            .unwrap();
+        let prompt_stats = adapter.take_last_experimental_speed_stats().unwrap();
+        assert_eq!(prompt_stats.sparse_projection_calls, 0);
+
+        adapter
+            .append_tokens(&[first_step.token_id], &mut budget, true)
+            .unwrap();
+        let decode_stats = adapter.take_last_experimental_speed_stats().unwrap();
+        assert!(decode_stats.sparse_projection_calls > 0);
+        assert_eq!(
+            decode_stats.aip_policy,
+            Some(crate::RamaAipPolicyKind::Speed)
+        );
+
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn lm_head_exact_periodic_check_targets_decode_token_indices() {
+        assert!(!lm_head_exact_check_due(None, true, 3));
+        assert!(!lm_head_exact_check_due(Some(4), false, 3));
+        assert!(!lm_head_exact_check_due(Some(4), true, 2));
+        assert!(lm_head_exact_check_due(Some(4), true, 3));
+        assert!(lm_head_exact_check_due(Some(1), true, 0));
+    }
+
+    #[test]
+    fn sparse_lm_head_rescore_candidates_respects_confidence_gap() {
+        let mut config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: Some(2),
+            aip_lm_head_rescore_gap_milli: Some(250),
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
+            aip_lm_head_repeat_margin_adaptive: false,
+            aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
+            aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
+            aip_column_cache: false,
+            aip_input_tiles: true,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
+        };
+        let mut stats = RamaExperimentalSpeedStats::default();
+        assert_eq!(
+            sparse_lm_head_rescore_candidates(&[0.0, 5.0, 4.8, 1.0], &[], config, &mut stats)
+                .unwrap(),
+            Some(vec![1, 2])
+        );
+        assert_eq!(stats.lm_head_rescore_checks, 1);
+        assert_eq!(stats.lm_head_rescore_uses, 1);
+        assert_eq!(stats.lm_head_rescore_gap_skips, 0);
+        assert_eq!(stats.lm_head_rescore_max_gap_milli, 200);
+
+        config.aip_lm_head_rescore_gap_milli = Some(100);
+        let mut stats = RamaExperimentalSpeedStats::default();
+        assert_eq!(
+            sparse_lm_head_rescore_candidates(&[0.0, 5.0, 4.8, 1.0], &[], config, &mut stats)
+                .unwrap(),
+            None
+        );
+        assert_eq!(stats.lm_head_rescore_checks, 1);
+        assert_eq!(stats.lm_head_rescore_uses, 0);
+        assert_eq!(stats.lm_head_rescore_gap_skips, 1);
+        assert_eq!(stats.lm_head_rescore_max_gap_milli, 200);
+    }
+
+    #[test]
+    fn rescored_lm_head_token_still_respects_repeat_run_limit() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: Some(2),
+            aip_lm_head_rescore_gap_milli: Some(250),
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
+            aip_lm_head_repeat_margin_adaptive: false,
+            aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
+            aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
+            aip_column_cache: false,
+            aip_input_tiles: true,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: Some(2),
+        };
+        let mut stats = RamaExperimentalSpeedStats::default();
+        let mut repeat_state = LmHeadRepeatMarginState::default();
+        let mut novelty_state = LmHeadPhraseNoveltyState::default();
+
+        assert_eq!(
+            apply_rescored_lm_head_controllers(
+                &[0.1, 3.0, 2.0],
+                1,
+                &[1],
+                2,
+                config,
+                &mut stats,
+                &mut repeat_state,
+                &mut novelty_state,
+            )
+            .unwrap(),
+            2
+        );
+    }
+
+    #[test]
     fn sparse_lm_head_argmax_no_repeat_last_only_skips_decode_token() {
         let config = crate::RamaExperimentalSpeedConfig {
             enabled: true,
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2059,12 +2412,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2096,12 +2454,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: Some(250),
@@ -2141,12 +2504,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: Some(250),
@@ -2179,12 +2547,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: Some(500),
@@ -2241,12 +2614,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2292,12 +2670,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2344,12 +2727,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2395,12 +2783,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2446,12 +2839,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2497,12 +2895,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: Some(3),
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2517,16 +2920,18 @@ mod tests {
             aip_repeat_run_limit: None,
         };
 
+        let mut stats = RamaExperimentalSpeedStats::default();
         assert_eq!(
-            sparse_lm_head_rescore_candidates(&[0.1, 3.0, 2.0], &[1], config).unwrap(),
+            sparse_lm_head_rescore_candidates(&[0.1, 3.0, 2.0], &[1], config, &mut stats).unwrap(),
             Some(vec![2, 0])
         );
         assert_eq!(
-            sparse_lm_head_rescore_candidates(&[0.1, 3.0, 2.0], &[0], config).unwrap(),
+            sparse_lm_head_rescore_candidates(&[0.1, 3.0, 2.0], &[0], config, &mut stats).unwrap(),
             None
         );
         assert_eq!(
-            sparse_lm_head_rescore_candidates(&[0.1, 3.0, 2.0], &[7, 1], config).unwrap(),
+            sparse_lm_head_rescore_candidates(&[0.1, 3.0, 2.0], &[7, 1], config, &mut stats)
+                .unwrap(),
             None
         );
     }
@@ -2564,12 +2969,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Quality,
             aip_topk: Some(1),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -2601,12 +3011,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(1),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,

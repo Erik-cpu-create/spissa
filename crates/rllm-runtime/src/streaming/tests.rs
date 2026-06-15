@@ -1490,12 +1490,17 @@ mod tests {
                 aip_policy: crate::RamaAipPolicyKind::Speed,
                 aip_topk: Some(2),
                 aip_attention_topk: None,
+                aip_attention_locality_window: None,
+                aip_attention_locality_extra: None,
                 aip_mlp_topk: None,
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1577,12 +1582,17 @@ mod tests {
                 aip_policy: crate::RamaAipPolicyKind::Speed,
                 aip_topk: Some(2),
                 aip_attention_topk: None,
+                aip_attention_locality_window: None,
+                aip_attention_locality_extra: None,
                 aip_mlp_topk: None,
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1681,12 +1691,17 @@ mod tests {
                 aip_policy: crate::RamaAipPolicyKind::Speed,
                 aip_topk: Some(2),
                 aip_attention_topk: None,
+                aip_attention_locality_window: None,
+                aip_attention_locality_extra: None,
                 aip_mlp_topk: None,
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1710,6 +1725,71 @@ mod tests {
         assert!((output[0] - 12.0).abs() < 1e-4);
         assert!((output[1] + 12.0).abs() < 1e-4);
         assert!((output[2] - 13.0).abs() < 1e-4);
+        assert_eq!(stats.sparse_projection_calls, 1);
+        assert_eq!(stats.input_tile_range_reads, 2);
+        assert_eq!(stats.input_tile_range_bytes, 12);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn input_tiled_sparse_linear_uses_explicit_selected_indices() {
+        let path = temp_path("input-tiled-sparse-linear-selected-bf16");
+        let weight_bf16 = vec![
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
+            0x4000, 0x4040,
+        ];
+        let input = vec![1.0, -8.0, 2.0, 7.0];
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        add_bf16_tensor(
+            &mut writer,
+            0,
+            "linear.input-tile.selected.bf16.weight",
+            vec![3, 4],
+            &weight_bf16,
+            14,
+        );
+        add_bf16_input_tile_sidecar_tensor(
+            &mut writer,
+            1,
+            "linear.input-tile.selected.bf16.weight",
+            3,
+            4,
+            &weight_bf16,
+            2,
+        );
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        model.set_rama_integrity_mode(crate::RamaIntegrityMode::VerifyOnce);
+        let mut budget = MemoryBudget::new(128);
+        let mut stats = crate::RamaExperimentalSpeedStats::default();
+        let output = streaming_input_tiled_sparse_tile_linear_selected_from_model(
+            &mut model,
+            "linear.input-tile.selected.bf16.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 4,
+                    out_features: 3,
+                },
+                tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+            },
+            &[0, 3],
+            &mut stats,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(output.len(), 3);
+        assert!((output[0] - 29.0).abs() < 1e-4);
+        assert!((output[1] + 29.0).abs() < 1e-4);
+        assert!((output[2] - 21.5).abs() < 1e-4);
         assert_eq!(stats.sparse_projection_calls, 1);
         assert_eq!(stats.input_tile_range_reads, 2);
         assert_eq!(stats.input_tile_range_bytes, 12);
@@ -1788,12 +1868,17 @@ mod tests {
                 aip_policy: crate::RamaAipPolicyKind::Speed,
                 aip_topk: Some(2),
                 aip_attention_topk: None,
+                aip_attention_locality_window: None,
+                aip_attention_locality_extra: None,
                 aip_mlp_topk: None,
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1871,12 +1956,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(2),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -1982,12 +2072,17 @@ mod tests {
             aip_policy: crate::RamaAipPolicyKind::Speed,
             aip_topk: Some(2),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,

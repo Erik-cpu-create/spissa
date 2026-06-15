@@ -258,6 +258,17 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
         } else {
             String::new()
         };
+        let lm_head_rescore_note = if stats.lm_head_rescore_checks > 0 {
+            format!(
+                " aip_lm_head_rescore={}/{} aip_lm_head_rescore_gap_skips={} aip_lm_head_rescore_max_gap_milli={}",
+                stats.lm_head_rescore_uses,
+                stats.lm_head_rescore_checks,
+                stats.lm_head_rescore_gap_skips,
+                stats.lm_head_rescore_max_gap_milli
+            )
+        } else {
+            String::new()
+        };
         let column_cache_note = if stats.column_cache_hits > 0 || stats.column_cache_misses > 0 {
             format!(
                 " aip_column_cache_hits={} aip_column_cache_misses={} aip_column_cache_resident={}/{}",
@@ -277,6 +288,16 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
         } else {
             String::new()
         };
+        let attention_locality_note = if stats.attention_locality_uses > 0 {
+            format!(
+                " aip_attention_locality_added={}/{} aip_attention_locality_max_selected={}",
+                stats.attention_locality_added_indices,
+                stats.attention_locality_uses,
+                stats.attention_locality_max_selected
+            )
+        } else {
+            String::new()
+        };
         let lm_head_agreement_note = if stats.lm_head_agreement_samples > 0 {
             format!(
                 " aip_lm_head_agreement_selected={}/{} aip_lm_head_agreement_raw={}/{} aip_lm_head_agreement_exact_in_topk={}/{} aip_lm_head_agreement_topk={}",
@@ -287,6 +308,14 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
                 stats.lm_head_agreement_exact_in_sparse_topk,
                 stats.lm_head_agreement_samples,
                 stats.lm_head_agreement_max_topk
+            )
+        } else {
+            String::new()
+        };
+        let lm_head_exact_note = if stats.lm_head_exact_checks > 0 {
+            format!(
+                " aip_lm_head_exact={}/{}",
+                stats.lm_head_exact_switches, stats.lm_head_exact_checks
             )
         } else {
             String::new()
@@ -357,9 +386,12 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
             stats.peak_scratch_bytes
         )
         + &lm_head_note
+            + &lm_head_rescore_note
             + &column_cache_note
             + &input_tile_note
+            + &attention_locality_note
             + &lm_head_agreement_note
+            + &lm_head_exact_note
             + &lm_head_repeat_margin_note
             + &lm_head_phrase_novelty_note
     }
@@ -701,8 +733,15 @@ mod tests {
             max_selected_topk: 128,
             estimated_skipped_madds: 2048,
             peak_scratch_bytes: 512,
+            attention_locality_uses: 6,
+            attention_locality_added_indices: 18,
+            attention_locality_max_selected: 8,
             lm_head_prefix_rows: 512,
             lm_head_vocab_rows: 128_256,
+            lm_head_rescore_checks: 9,
+            lm_head_rescore_uses: 6,
+            lm_head_rescore_gap_skips: 3,
+            lm_head_rescore_max_gap_milli: 450,
             column_cache_hits: 8,
             column_cache_misses: 4,
             column_cache_resident_columns: 12,
@@ -714,6 +753,8 @@ mod tests {
             lm_head_agreement_selected_matches: 4,
             lm_head_agreement_exact_in_sparse_topk: 6,
             lm_head_agreement_max_topk: 8,
+            lm_head_exact_checks: 5,
+            lm_head_exact_switches: 2,
             lm_head_repeat_margin_checks: 7,
             lm_head_repeat_margin_switches: 5,
             lm_head_repeat_margin_max_gap_milli: 125,
@@ -733,15 +774,21 @@ mod tests {
         assert!(note.contains("aip_fallbacks=1"));
         assert!(note.contains("aip_max_topk=128"));
         assert!(note.contains("aip_lm_head_rows=512/128256"));
+        assert!(note.contains("aip_lm_head_rescore=6/9"));
+        assert!(note.contains("aip_lm_head_rescore_gap_skips=3"));
+        assert!(note.contains("aip_lm_head_rescore_max_gap_milli=450"));
         assert!(note.contains("aip_column_cache_hits=8"));
         assert!(note.contains("aip_column_cache_misses=4"));
         assert!(note.contains("aip_column_cache_resident=12/49152"));
         assert!(note.contains("aip_input_tile_reads=5"));
         assert!(note.contains("aip_input_tile_bytes=256"));
+        assert!(note.contains("aip_attention_locality_added=18/6"));
+        assert!(note.contains("aip_attention_locality_max_selected=8"));
         assert!(note.contains("aip_lm_head_agreement_selected=4/10"));
         assert!(note.contains("aip_lm_head_agreement_raw=3/10"));
         assert!(note.contains("aip_lm_head_agreement_exact_in_topk=6/10"));
         assert!(note.contains("aip_lm_head_agreement_topk=8"));
+        assert!(note.contains("aip_lm_head_exact=2/5"));
         assert!(note.contains("aip_lm_head_repeat_margin=5/7"));
         assert!(note.contains("aip_lm_head_repeat_margin_max_gap_milli=125"));
         assert!(note.contains("aip_lm_head_repeat_margin_adaptive_throttles=2"));

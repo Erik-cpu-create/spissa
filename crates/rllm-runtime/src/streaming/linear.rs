@@ -1052,6 +1052,67 @@ pub fn streaming_input_tiled_sparse_tile_linear_from_model(
         return Ok(None);
     }
 
+    let selected = crate::select_top_abs_indices(
+        input,
+        speed_config.topk_for_input(config.linear.in_features, 256),
+    );
+    streaming_input_tiled_sparse_tile_linear_selected_inner(
+        model,
+        weight_name,
+        input,
+        bias,
+        config,
+        &selected,
+        stats,
+        budget,
+    )
+}
+
+pub fn streaming_input_tiled_sparse_tile_linear_selected_from_model(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    bias: Option<&[f32]>,
+    config: StreamingTileLinearConfig,
+    selected: &[usize],
+    stats: &mut RamaExperimentalSpeedStats,
+    budget: &mut MemoryBudget,
+) -> Result<Option<Vec<f32>>> {
+    validate_tile_linear_config(config)?;
+    validate_linear_shapes(input, bias, config.linear)?;
+    if config.linear.batch != 1 || config.linear.in_features == 0 {
+        return Ok(None);
+    }
+    streaming_input_tiled_sparse_tile_linear_selected_inner(
+        model,
+        weight_name,
+        input,
+        bias,
+        config,
+        selected,
+        stats,
+        budget,
+    )
+}
+
+fn streaming_input_tiled_sparse_tile_linear_selected_inner(
+    model: &mut LazyRllmModel,
+    weight_name: &str,
+    input: &[f32],
+    bias: Option<&[f32]>,
+    config: StreamingTileLinearConfig,
+    selected: &[usize],
+    stats: &mut RamaExperimentalSpeedStats,
+    budget: &mut MemoryBudget,
+) -> Result<Option<Vec<f32>>> {
+    if selected.is_empty()
+        || selected
+            .iter()
+            .any(|in_feature| *in_feature >= config.linear.in_features)
+    {
+        return Ok(None);
+    }
+
     let tensor = model.tensor(weight_name)?.clone();
     validate_weight_tensor(&tensor, config.linear)?;
     if !matches!(
@@ -1070,14 +1131,6 @@ pub fn streaming_input_tiled_sparse_tile_linear_from_model(
         return Ok(None);
     }
 
-    let selected = crate::select_top_abs_indices(
-        input,
-        speed_config.topk_for_input(config.linear.in_features, 256),
-    );
-    if selected.is_empty() {
-        return Ok(None);
-    }
-
     let chunks: Vec<ChunkMeta> = model.chunks_for_tensor(sidecar_tensor.tensor_id).to_vec();
     if chunks.is_empty() {
         return Ok(None);
@@ -1091,7 +1144,7 @@ pub fn streaming_input_tiled_sparse_tile_linear_from_model(
     let dtype_size = tensor.dtype.size_bytes();
     let mut range_reads = 0usize;
     let mut range_bytes = 0usize;
-    for &in_feature in &selected {
+    for &in_feature in selected {
         let Some(range) =
             input_tile_column_range(&chunks, in_feature, config.linear, dtype_size)?
         else {
