@@ -89,6 +89,7 @@ Implemented:
   - Phase 7.10B RAMA prefill homeostasis: broader post-7.10A matrix reaches 9.756 tok/s for 1-token prompt + 16 generated at 20.33 MiB RSS; measured prefill chunk sweep chooses 32 real input tokens as the default CLI prefill window. Best swept long-prompt rows: 512-token + 16 at 2.3495 tok/s / 32.77 MiB RSS and 1024-token + 16 at 1.1653 tok/s / 44.91 MiB RSS.
   - Phase 7.12A generic shape/budget-aware prefill policy: `rllm run` now defaults to auto low-RAM prefill selection from GPT-NeoX/Pythia shape and explicit transient budget, preserving Pythia-70M-like 32-token defaults while selecting 64 for Pythia-160M-like low-RAM runs; `--rama-prefill-policy speed` selects the speed-biased larger window when budget allows.
   - Phase 7.12B generic eight-row projection reuse: the shared tiled-linear hot loop now reuses each decoded weight row fragment across 8 prompt-token rows before falling back to the existing 4-row/scalar tails, improving the measured Pythia-160M 512-token speed-policy row from 13.21s to 12.34s wall time while keeping tracked transient memory unchanged at 3.79 MiB.
+  - R57 edge attention locality cache for the Llama experimental-speed path: optional per-layer recent-index caches can reuse a tiny number of previous edge-attention input features for sparse Q/K/V. The retained `window=8, extra=1` preset preserved the 30 tok/s floor on Llama 3.2 1B Instruct and slightly improved cheap quality counters, while the wider `window=16, extra=4` probe was rejected.
 
 
 Not yet implemented:
@@ -116,14 +117,16 @@ cargo run --release -p rllm-cli --bin llama-test -- \
   --ctx 2048 \
   --max-new-tokens 64
 
+# Llama exact/raw baseline. This is intentionally slow on CPU-only and is used
+# as the quality/reference path, not the 30-40 tok/s experimental speed path.
 cargo run --release -p rllm-cli --bin llama-test -- \
   --model models/Llama-3.2-1B-Instruct-raw.rllm \
   --ctx 2048 \
   --max-new-tokens 64
 
-# Experimental R30 speed artifact for Llama 3.2 1B.
-# This reaches the 30-40 tok/s speed range in sparse research mode. The
-# repeat-run guard reduces long collapse, but output is still not chat-ready.
+# Experimental speed artifact for Llama 3.2 1B. Use this artifact and the env
+# flags below when testing the sparse research path; running the raw artifact
+# without these flags will stay on the slow exact path.
 cargo build --release -p rllm-cli --bin rllm --bin llama-test
 target/release/rllm pack \
   models/downloads/llama-3.2-1b-instruct-unsloth/model.safetensors \
@@ -139,6 +142,24 @@ target/release/rllm pack \
 printf 'good morning\nexit\n' | \
   RLLM_AIP_INPUT_TILES=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed \
   RLLM_AIP_TOPK=4 RLLM_AIP_REPEAT_RUN_LIMIT=2 \
+  target/release/llama-test \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --ctx 2048 \
+    --max-new-tokens 64
+
+# Current R57 experimental speed-floor preset. This builds on the R43 sparse
+# path with a tiny edge-attention locality cache. It is still a research path:
+# output quality remains a limitation and should not be treated as chat-ready.
+printf 'good morning\nexit\n' | \
+  RLLM_AIP_INPUT_TILES=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed \
+  RLLM_AIP_TOPK=4 RLLM_AIP_REPEAT_RUN_LIMIT=2 \
+  RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI=75 \
+  RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE=1 \
+  RLLM_AIP_LM_HEAD_NOVELTY_WINDOW=4 \
+  RLLM_AIP_LM_HEAD_NOVELTY_GAP_MILLI=100 \
+  RLLM_AIP_LM_HEAD_NOVELTY_RETENTION_MILLI=100 \
+  RLLM_AIP_ATTENTION_LOCALITY_WINDOW=8 \
+  RLLM_AIP_ATTENTION_LOCALITY_EXTRA=1 \
   target/release/llama-test \
     --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
     --ctx 2048 \
@@ -160,6 +181,29 @@ printf 'good morning\nexit\n' | \
 # RLLM_AIP_LM_HEAD_NOVELTY_WINDOW=4
 # Optional R37 confidence-gated novelty:
 # RLLM_AIP_LM_HEAD_NOVELTY_GAP_MILLI=100
+# Optional R48 exact prompt prefill probe:
+# RLLM_AIP_EXACT_PREFILL=1
+# Optional R50 periodic exact LM-head diagnostic probe. This is expensive and
+# rejected as a speed preset; use only when measuring sparse-vs-exact token
+# selection drift.
+# RLLM_AIP_LM_HEAD_EXACT_EVERY=8
+# Optional R53/R54 confidence-gated candidate rescore probes. R54 preserves
+# repeat/novelty controllers, but this path is still rejected as chat-ready.
+# RLLM_AIP_LM_HEAD_RESCORE=2
+# RLLM_AIP_LM_HEAD_RESCORE_GAP_MILLI=250
+# Optional R55 exact edge-layer hidden-state calibration probe. It improves
+# diversity/repetition but is rejected as a speed preset.
+# RLLM_AIP_EXACT_EDGE_LAYERS=1
+# Optional R56 projection-filtered exact edge probe:
+# RLLM_AIP_EXACT_EDGE_PROJECTION=attention
+# Accepted values: all, attention, attn, mlp-gate-up, gate-up, gateup,
+# mlp-down, down.
+# Optional R57 edge attention locality cache. Retained preset:
+# RLLM_AIP_ATTENTION_LOCALITY_WINDOW=8
+# RLLM_AIP_ATTENTION_LOCALITY_EXTRA=1
+# Rejected wide probe:
+# RLLM_AIP_ATTENTION_LOCALITY_WINDOW=16
+# RLLM_AIP_ATTENTION_LOCALITY_EXTRA=4
 
 # Force the runtime worker count for CPU-only benchmarks.
 RLLM_THREADS=1 cargo run --release -p rllm-cli --bin llama-test -- \

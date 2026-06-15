@@ -1,14 +1,22 @@
+use std::cmp::Ordering;
+
 pub const RLLM_EXPERIMENTAL_SPEED_ENV: &str = "RLLM_EXPERIMENTAL_SPEED";
 pub const RLLM_AIP_POLICY_ENV: &str = "RLLM_AIP_POLICY";
 pub const RLLM_AIP_TOPK_ENV: &str = "RLLM_AIP_TOPK";
 pub const RLLM_AIP_ATTENTION_TOPK_ENV: &str = "RLLM_AIP_ATTENTION_TOPK";
+pub const RLLM_AIP_ATTENTION_LOCALITY_WINDOW_ENV: &str = "RLLM_AIP_ATTENTION_LOCALITY_WINDOW";
+pub const RLLM_AIP_ATTENTION_LOCALITY_EXTRA_ENV: &str = "RLLM_AIP_ATTENTION_LOCALITY_EXTRA";
 pub const RLLM_AIP_MLP_TOPK_ENV: &str = "RLLM_AIP_MLP_TOPK";
 pub const RLLM_AIP_DOWN_TOPK_ENV: &str = "RLLM_AIP_DOWN_TOPK";
 pub const RLLM_AIP_EDGE_LAYERS_ENV: &str = "RLLM_AIP_EDGE_LAYERS";
 pub const RLLM_AIP_EDGE_TOPK_ENV: &str = "RLLM_AIP_EDGE_TOPK";
+pub const RLLM_AIP_EXACT_EDGE_LAYERS_ENV: &str = "RLLM_AIP_EXACT_EDGE_LAYERS";
+pub const RLLM_AIP_EXACT_EDGE_PROJECTION_ENV: &str = "RLLM_AIP_EXACT_EDGE_PROJECTION";
 pub const RLLM_AIP_LM_HEAD_TOPK_ENV: &str = "RLLM_AIP_LM_HEAD_TOPK";
 pub const RLLM_AIP_LM_HEAD_RESCORE_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE";
+pub const RLLM_AIP_LM_HEAD_RESCORE_GAP_MILLI_ENV: &str = "RLLM_AIP_LM_HEAD_RESCORE_GAP_MILLI";
 pub const RLLM_AIP_LM_HEAD_AGREEMENT_ENV: &str = "RLLM_AIP_LM_HEAD_AGREEMENT";
+pub const RLLM_AIP_LM_HEAD_EXACT_EVERY_ENV: &str = "RLLM_AIP_LM_HEAD_EXACT_EVERY";
 pub const RLLM_AIP_LM_HEAD_ROWS_ENV: &str = "RLLM_AIP_LM_HEAD_ROWS";
 pub const RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI_ENV: &str = "RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI";
 pub const RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE_ENV: &str =
@@ -21,6 +29,7 @@ pub const RLLM_AIP_LM_HEAD_NOVELTY_RETENTION_MILLI_ENV: &str =
     "RLLM_AIP_LM_HEAD_NOVELTY_RETENTION_MILLI";
 pub const RLLM_AIP_COLUMN_CACHE_ENV: &str = "RLLM_AIP_COLUMN_CACHE";
 pub const RLLM_AIP_INPUT_TILES_ENV: &str = "RLLM_AIP_INPUT_TILES";
+pub const RLLM_AIP_EXACT_PREFILL_ENV: &str = "RLLM_AIP_EXACT_PREFILL";
 pub const RLLM_AIP_NO_REPEAT_LAST_ENV: &str = "RLLM_AIP_NO_REPEAT_LAST";
 pub const RLLM_AIP_REPEAT_RUN_LIMIT_ENV: &str = "RLLM_AIP_REPEAT_RUN_LIMIT";
 pub const RLLM_TURBO_TOPK_ENV: &str = "RLLM_TURBO_TOPK";
@@ -76,12 +85,17 @@ pub struct RamaExperimentalSpeedConfig {
     pub aip_policy: RamaAipPolicyKind,
     pub aip_topk: Option<usize>,
     pub aip_attention_topk: Option<usize>,
+    pub aip_attention_locality_window: Option<usize>,
+    pub aip_attention_locality_extra: Option<usize>,
     pub aip_mlp_topk: Option<usize>,
     pub aip_down_topk: Option<usize>,
     pub aip_edge_layers: Option<usize>,
     pub aip_edge_topk: Option<usize>,
+    pub aip_exact_edge_layers: Option<usize>,
+    pub aip_exact_edge_projection: Option<RamaAipProjectionKind>,
     pub aip_lm_head_topk: Option<usize>,
     pub aip_lm_head_rescore: Option<usize>,
+    pub aip_lm_head_rescore_gap_milli: Option<usize>,
     pub aip_lm_head_agreement: bool,
     pub aip_lm_head_rows: Option<usize>,
     pub aip_lm_head_repeat_margin_milli: Option<usize>,
@@ -111,6 +125,16 @@ impl RamaExperimentalSpeedConfig {
             aip_attention_topk: parse_aip_topk(
                 std::env::var(RLLM_AIP_ATTENTION_TOPK_ENV).ok().as_deref(),
             ),
+            aip_attention_locality_window: parse_aip_attention_locality_window(
+                std::env::var(RLLM_AIP_ATTENTION_LOCALITY_WINDOW_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
+            aip_attention_locality_extra: parse_aip_attention_locality_extra(
+                std::env::var(RLLM_AIP_ATTENTION_LOCALITY_EXTRA_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
             aip_mlp_topk: parse_aip_topk(std::env::var(RLLM_AIP_MLP_TOPK_ENV).ok().as_deref()),
             aip_down_topk: parse_aip_topk(std::env::var(RLLM_AIP_DOWN_TOPK_ENV).ok().as_deref()),
             aip_edge_layers: parse_aip_edge_layers(
@@ -119,11 +143,26 @@ impl RamaExperimentalSpeedConfig {
             aip_edge_topk: parse_aip_edge_topk(
                 std::env::var(RLLM_AIP_EDGE_TOPK_ENV).ok().as_deref(),
             ),
+            aip_exact_edge_layers: parse_aip_exact_edge_layers(
+                std::env::var(RLLM_AIP_EXACT_EDGE_LAYERS_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
+            aip_exact_edge_projection: parse_aip_exact_edge_projection(
+                std::env::var(RLLM_AIP_EXACT_EDGE_PROJECTION_ENV)
+                    .ok()
+                    .as_deref(),
+            ),
             aip_lm_head_topk: parse_aip_topk(
                 std::env::var(RLLM_AIP_LM_HEAD_TOPK_ENV).ok().as_deref(),
             ),
             aip_lm_head_rescore: parse_aip_lm_head_rescore(
                 std::env::var(RLLM_AIP_LM_HEAD_RESCORE_ENV).ok().as_deref(),
+            ),
+            aip_lm_head_rescore_gap_milli: parse_aip_lm_head_rescore_gap_milli(
+                std::env::var(RLLM_AIP_LM_HEAD_RESCORE_GAP_MILLI_ENV)
+                    .ok()
+                    .as_deref(),
             ),
             aip_lm_head_agreement: parse_aip_lm_head_agreement_enabled(
                 std::env::var(RLLM_AIP_LM_HEAD_AGREEMENT_ENV)
@@ -185,12 +224,17 @@ impl RamaExperimentalSpeedConfig {
             aip_policy: RamaAipPolicyKind::Quality,
             aip_topk: None,
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -258,6 +302,43 @@ impl RamaExperimentalSpeedConfig {
         }
     }
 
+    pub fn attention_locality_enabled_for_layer(
+        self,
+        layer_index: usize,
+        total_layers: usize,
+    ) -> bool {
+        if !self.enabled
+            || self.aip_attention_locality_window.is_none()
+            || self.aip_attention_locality_extra.is_none()
+            || layer_index >= total_layers
+        {
+            return false;
+        }
+        let edge_layers = self.aip_edge_layers.unwrap_or(1).min(total_layers);
+        layer_index < edge_layers || layer_index >= total_layers.saturating_sub(edge_layers)
+    }
+
+    fn exact_edge_projection(
+        self,
+        layer_index: usize,
+        total_layers: usize,
+        projection: RamaAipProjectionKind,
+    ) -> bool {
+        if layer_index >= total_layers {
+            return false;
+        }
+        let Some(edge_layers) = self.aip_exact_edge_layers else {
+            return false;
+        };
+        let edge_layers = edge_layers.min(total_layers);
+        if layer_index >= edge_layers && layer_index < total_layers.saturating_sub(edge_layers) {
+            return false;
+        }
+        self.aip_exact_edge_projection
+            .map(|exact_projection| exact_projection == projection)
+            .unwrap_or(true)
+    }
+
     pub fn aip_decision_for_projection(
         self,
         layer_index: usize,
@@ -267,6 +348,9 @@ impl RamaExperimentalSpeedConfig {
         default_topk: usize,
     ) -> RamaAipProjectionDecision {
         if !self.enabled || input_len == 0 || layer_index >= total_layers {
+            return RamaAipProjectionDecision::exact();
+        }
+        if self.exact_edge_projection(layer_index, total_layers, projection) {
             return RamaAipProjectionDecision::exact();
         }
 
@@ -325,8 +409,15 @@ pub struct RamaExperimentalSpeedStats {
     pub max_selected_topk: usize,
     pub estimated_skipped_madds: usize,
     pub peak_scratch_bytes: usize,
+    pub attention_locality_uses: usize,
+    pub attention_locality_added_indices: usize,
+    pub attention_locality_max_selected: usize,
     pub lm_head_prefix_rows: usize,
     pub lm_head_vocab_rows: usize,
+    pub lm_head_rescore_checks: usize,
+    pub lm_head_rescore_uses: usize,
+    pub lm_head_rescore_gap_skips: usize,
+    pub lm_head_rescore_max_gap_milli: usize,
     pub column_cache_hits: usize,
     pub column_cache_misses: usize,
     pub column_cache_resident_columns: usize,
@@ -338,6 +429,8 @@ pub struct RamaExperimentalSpeedStats {
     pub lm_head_agreement_selected_matches: usize,
     pub lm_head_agreement_exact_in_sparse_topk: usize,
     pub lm_head_agreement_max_topk: usize,
+    pub lm_head_exact_checks: usize,
+    pub lm_head_exact_switches: usize,
     pub lm_head_repeat_margin_checks: usize,
     pub lm_head_repeat_margin_switches: usize,
     pub lm_head_repeat_margin_max_gap_milli: usize,
@@ -369,10 +462,31 @@ impl RamaExperimentalSpeedStats {
             .estimated_skipped_madds
             .saturating_add(other.estimated_skipped_madds);
         self.peak_scratch_bytes = self.peak_scratch_bytes.max(other.peak_scratch_bytes);
+        self.attention_locality_uses = self
+            .attention_locality_uses
+            .saturating_add(other.attention_locality_uses);
+        self.attention_locality_added_indices = self
+            .attention_locality_added_indices
+            .saturating_add(other.attention_locality_added_indices);
+        self.attention_locality_max_selected = self
+            .attention_locality_max_selected
+            .max(other.attention_locality_max_selected);
         if self.lm_head_prefix_rows == 0 {
             self.lm_head_prefix_rows = other.lm_head_prefix_rows;
             self.lm_head_vocab_rows = other.lm_head_vocab_rows;
         }
+        self.lm_head_rescore_checks = self
+            .lm_head_rescore_checks
+            .saturating_add(other.lm_head_rescore_checks);
+        self.lm_head_rescore_uses = self
+            .lm_head_rescore_uses
+            .saturating_add(other.lm_head_rescore_uses);
+        self.lm_head_rescore_gap_skips = self
+            .lm_head_rescore_gap_skips
+            .saturating_add(other.lm_head_rescore_gap_skips);
+        self.lm_head_rescore_max_gap_milli = self
+            .lm_head_rescore_max_gap_milli
+            .max(other.lm_head_rescore_max_gap_milli);
         self.column_cache_hits = self
             .column_cache_hits
             .saturating_add(other.column_cache_hits);
@@ -406,6 +520,12 @@ impl RamaExperimentalSpeedStats {
         self.lm_head_agreement_max_topk = self
             .lm_head_agreement_max_topk
             .max(other.lm_head_agreement_max_topk);
+        self.lm_head_exact_checks = self
+            .lm_head_exact_checks
+            .saturating_add(other.lm_head_exact_checks);
+        self.lm_head_exact_switches = self
+            .lm_head_exact_switches
+            .saturating_add(other.lm_head_exact_switches);
         self.lm_head_repeat_margin_checks = self
             .lm_head_repeat_margin_checks
             .saturating_add(other.lm_head_repeat_margin_checks);
@@ -481,6 +601,16 @@ impl RamaExperimentalSpeedStats {
         }
     }
 
+    pub fn record_lm_head_rescore(&mut self, used: bool, gap_milli: usize) {
+        self.lm_head_rescore_checks = self.lm_head_rescore_checks.saturating_add(1);
+        if used {
+            self.lm_head_rescore_uses = self.lm_head_rescore_uses.saturating_add(1);
+        } else {
+            self.lm_head_rescore_gap_skips = self.lm_head_rescore_gap_skips.saturating_add(1);
+        }
+        self.lm_head_rescore_max_gap_milli = self.lm_head_rescore_max_gap_milli.max(gap_milli);
+    }
+
     pub fn record_column_cache(
         &mut self,
         hits: usize,
@@ -498,6 +628,15 @@ impl RamaExperimentalSpeedStats {
     pub fn record_input_tile_ranges(&mut self, reads: usize, bytes: usize) {
         self.input_tile_range_reads = self.input_tile_range_reads.saturating_add(reads);
         self.input_tile_range_bytes = self.input_tile_range_bytes.saturating_add(bytes);
+    }
+
+    pub fn record_attention_locality(&mut self, selected_topk: usize, base_topk: usize) {
+        self.attention_locality_uses = self.attention_locality_uses.saturating_add(1);
+        self.attention_locality_added_indices = self
+            .attention_locality_added_indices
+            .saturating_add(selected_topk.saturating_sub(base_topk));
+        self.attention_locality_max_selected =
+            self.attention_locality_max_selected.max(selected_topk);
     }
 
     pub fn record_lm_head_agreement(
@@ -523,6 +662,13 @@ impl RamaExperimentalSpeedStats {
                 .saturating_add(1);
         }
         self.lm_head_agreement_max_topk = self.lm_head_agreement_max_topk.max(sparse_topk);
+    }
+
+    pub fn record_lm_head_exact_check(&mut self, switched: bool) {
+        self.lm_head_exact_checks = self.lm_head_exact_checks.saturating_add(1);
+        if switched {
+            self.lm_head_exact_switches = self.lm_head_exact_switches.saturating_add(1);
+        }
     }
 
     pub fn record_lm_head_repeat_margin(&mut self, switched: bool, gap_milli: usize) {
@@ -583,8 +729,15 @@ impl RamaExperimentalSpeedStats {
             && self.max_selected_topk == 0
             && self.estimated_skipped_madds == 0
             && self.peak_scratch_bytes == 0
+            && self.attention_locality_uses == 0
+            && self.attention_locality_added_indices == 0
+            && self.attention_locality_max_selected == 0
             && self.lm_head_prefix_rows == 0
             && self.lm_head_vocab_rows == 0
+            && self.lm_head_rescore_checks == 0
+            && self.lm_head_rescore_uses == 0
+            && self.lm_head_rescore_gap_skips == 0
+            && self.lm_head_rescore_max_gap_milli == 0
             && self.column_cache_hits == 0
             && self.column_cache_misses == 0
             && self.column_cache_resident_columns == 0
@@ -596,6 +749,8 @@ impl RamaExperimentalSpeedStats {
             && self.lm_head_agreement_selected_matches == 0
             && self.lm_head_agreement_exact_in_sparse_topk == 0
             && self.lm_head_agreement_max_topk == 0
+            && self.lm_head_exact_checks == 0
+            && self.lm_head_exact_switches == 0
             && self.lm_head_repeat_margin_checks == 0
             && self.lm_head_repeat_margin_switches == 0
             && self.lm_head_repeat_margin_max_gap_milli == 0
@@ -644,6 +799,14 @@ pub fn parse_aip_lm_head_rows(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
 
+pub fn parse_aip_attention_locality_window(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
+pub fn parse_aip_attention_locality_extra(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
 pub fn parse_aip_lm_head_repeat_margin_milli(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
@@ -675,6 +838,14 @@ pub fn parse_aip_lm_head_rescore(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
 
+pub fn parse_aip_lm_head_rescore_gap_milli(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
+pub fn parse_aip_lm_head_exact_every(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
 pub fn parse_aip_lm_head_agreement_enabled(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
@@ -690,6 +861,13 @@ pub fn parse_aip_column_cache_enabled(value: Option<&str>) -> bool {
 }
 
 pub fn parse_aip_input_tiles_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+pub fn parse_aip_exact_prefill_enabled(value: Option<&str>) -> bool {
     matches!(
         value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("1" | "true" | "yes" | "on")
@@ -715,6 +893,21 @@ pub fn parse_aip_edge_topk(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
 
+pub fn parse_aip_exact_edge_layers(value: Option<&str>) -> Option<usize> {
+    parse_aip_topk(value)
+}
+
+pub fn parse_aip_exact_edge_projection(value: Option<&str>) -> Option<RamaAipProjectionKind> {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("attention" | "attn") => Some(RamaAipProjectionKind::Attention),
+        Some("mlp-gate-up" | "mlp_gate_up" | "gate-up" | "gateup") => {
+            Some(RamaAipProjectionKind::MlpGateUp)
+        }
+        Some("mlp-down" | "mlp_down" | "down") => Some(RamaAipProjectionKind::MlpDown),
+        _ => None,
+    }
+}
+
 pub fn parse_turbo_topk(value: Option<&str>) -> Option<usize> {
     parse_aip_topk(value)
 }
@@ -723,6 +916,9 @@ pub fn select_top_abs_indices(input: &[f32], topk: usize) -> Vec<usize> {
     let limit = topk.min(input.len());
     if limit == 0 {
         return Vec::new();
+    }
+    if limit <= 16 {
+        return select_top_abs_indices_small(input, limit);
     }
 
     let mut scored: Vec<(usize, f32)> = input
@@ -739,6 +935,95 @@ pub fn select_top_abs_indices(input: &[f32], topk: usize) -> Vec<usize> {
     let mut indices: Vec<usize> = scored.into_iter().take(limit).map(|(idx, _)| idx).collect();
     indices.sort_unstable();
     indices
+}
+
+pub fn select_top_abs_indices_with_recent(
+    input: &[f32],
+    topk: usize,
+    recent: &[usize],
+    extra: usize,
+) -> Vec<usize> {
+    let mut selected = select_top_abs_indices(input, topk);
+    let mut added = 0usize;
+    for &index in recent {
+        if index >= input.len() || selected.contains(&index) {
+            continue;
+        }
+        selected.push(index);
+        added = added.saturating_add(1);
+        if added >= extra {
+            break;
+        }
+    }
+    selected.sort_unstable();
+    selected
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RamaAttentionLocalityCache {
+    recent: Vec<usize>,
+}
+
+impl RamaAttentionLocalityCache {
+    pub fn recent(&self) -> &[usize] {
+        &self.recent
+    }
+
+    pub fn clear(&mut self) {
+        self.recent.clear();
+    }
+
+    pub fn record(&mut self, selected: &[usize], window: usize) {
+        if window == 0 {
+            self.recent.clear();
+            return;
+        }
+        let mut next = Vec::with_capacity(window.min(selected.len() + self.recent.len()));
+        for &index in selected {
+            push_unique_bounded(&mut next, index, window);
+        }
+        for &index in &self.recent {
+            push_unique_bounded(&mut next, index, window);
+        }
+        self.recent = next;
+    }
+}
+
+fn push_unique_bounded(values: &mut Vec<usize>, value: usize, limit: usize) {
+    if values.len() < limit && !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn select_top_abs_indices_small(input: &[f32], limit: usize) -> Vec<usize> {
+    let mut winners: Vec<(usize, f32)> = Vec::with_capacity(limit);
+    for (idx, value) in input.iter().enumerate() {
+        let candidate = (idx, value.abs());
+        if winners.len() < limit {
+            winners.push(candidate);
+            continue;
+        }
+
+        let Some((worst_idx, worst)) = winners
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| compare_top_abs_candidates(left, right))
+        else {
+            continue;
+        };
+        if compare_top_abs_candidates(&candidate, worst) == Ordering::Less {
+            winners[worst_idx] = candidate;
+        }
+    }
+    winners.sort_unstable_by_key(|(idx, _)| *idx);
+    winners.into_iter().map(|(idx, _)| idx).collect()
+}
+
+fn compare_top_abs_candidates(left: &(usize, f32), right: &(usize, f32)) -> Ordering {
+    right
+        .1
+        .total_cmp(&left.1)
+        .then_with(|| left.0.cmp(&right.0))
 }
 
 #[cfg(test)]
@@ -776,18 +1061,62 @@ mod tests {
     }
 
     #[test]
+    fn small_top_abs_selector_matches_full_sort_ranking() {
+        let input: [f32; 18] = [
+            0.1, -9.0, 4.0, -2.0, 7.0, -7.0, 0.0, 3.5, -4.0, 1.0, 6.0, -8.0, 8.0, -0.5, 2.5, -6.0,
+            5.0, -3.0,
+        ];
+
+        let mut scored: Vec<(usize, f32)> = input
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| (idx, (*value).abs()))
+            .collect();
+        scored.sort_by(compare_top_abs_candidates);
+        let mut expected: Vec<usize> = scored.into_iter().take(8).map(|(idx, _)| idx).collect();
+        expected.sort_unstable();
+
+        assert_eq!(select_top_abs_indices(&input, 8), expected);
+    }
+
+    #[test]
+    fn attention_locality_selection_adds_recent_indices_with_bounds() {
+        let input = [0.1, -9.0, 8.0, 0.2, 0.3, 0.4];
+        let selected = select_top_abs_indices_with_recent(&input, 2, &[4, 1, 99, 5], 2);
+
+        assert_eq!(selected, vec![1, 2, 4, 5]);
+    }
+
+    #[test]
+    fn attention_locality_cache_keeps_recent_unique_indices() {
+        let mut cache = RamaAttentionLocalityCache::default();
+
+        cache.record(&[1, 2, 3], 4);
+        cache.record(&[2, 5], 4);
+
+        assert_eq!(cache.recent(), &[2, 5, 1, 3]);
+        cache.clear();
+        assert!(cache.recent().is_empty());
+    }
+
+    #[test]
     fn config_chooses_bounded_topk() {
         let config = RamaExperimentalSpeedConfig {
             enabled: true,
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: Some(512),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -809,12 +1138,17 @@ mod tests {
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: None,
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -915,6 +1249,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_exact_prefill_enabled_accepts_explicit_truthy_values() {
+        assert!(parse_aip_exact_prefill_enabled(Some("1")));
+        assert!(parse_aip_exact_prefill_enabled(Some("true")));
+        assert!(parse_aip_exact_prefill_enabled(Some("yes")));
+        assert!(parse_aip_exact_prefill_enabled(Some("on")));
+        assert!(!parse_aip_exact_prefill_enabled(Some("0")));
+        assert!(!parse_aip_exact_prefill_enabled(Some("false")));
+        assert!(!parse_aip_exact_prefill_enabled(Some("")));
+        assert!(!parse_aip_exact_prefill_enabled(None));
+    }
+
+    #[test]
     fn parse_aip_no_repeat_last_enabled_accepts_explicit_truthy_values() {
         assert!(parse_aip_no_repeat_last_enabled(Some("1")));
         assert!(parse_aip_no_repeat_last_enabled(Some("true")));
@@ -951,6 +1297,149 @@ mod tests {
         assert_eq!(parse_aip_edge_topk(Some("-2")), None);
         assert_eq!(parse_aip_edge_topk(Some("bad")), None);
         assert_eq!(parse_aip_edge_topk(None), None);
+    }
+
+    #[test]
+    fn parse_aip_exact_edge_layers_keeps_only_positive_values() {
+        assert_eq!(parse_aip_exact_edge_layers(Some("2")), Some(2));
+        assert_eq!(parse_aip_exact_edge_layers(Some("1")), Some(1));
+        assert_eq!(parse_aip_exact_edge_layers(Some("0")), None);
+        assert_eq!(parse_aip_exact_edge_layers(Some("-2")), None);
+        assert_eq!(parse_aip_exact_edge_layers(Some("bad")), None);
+        assert_eq!(parse_aip_exact_edge_layers(None), None);
+    }
+
+    #[test]
+    fn parse_aip_attention_locality_controls_keep_only_positive_values() {
+        assert_eq!(parse_aip_attention_locality_window(Some("16")), Some(16));
+        assert_eq!(parse_aip_attention_locality_window(Some("0")), None);
+        assert_eq!(parse_aip_attention_locality_window(Some("bad")), None);
+        assert_eq!(parse_aip_attention_locality_extra(Some("4")), Some(4));
+        assert_eq!(parse_aip_attention_locality_extra(Some("-1")), None);
+        assert_eq!(parse_aip_attention_locality_extra(None), None);
+    }
+
+    #[test]
+    fn parse_aip_exact_edge_projection_accepts_known_projection_names() {
+        assert_eq!(parse_aip_exact_edge_projection(Some("all")), None);
+        assert_eq!(
+            parse_aip_exact_edge_projection(Some("attention")),
+            Some(RamaAipProjectionKind::Attention)
+        );
+        assert_eq!(
+            parse_aip_exact_edge_projection(Some("attn")),
+            Some(RamaAipProjectionKind::Attention)
+        );
+        assert_eq!(
+            parse_aip_exact_edge_projection(Some("mlp-gate-up")),
+            Some(RamaAipProjectionKind::MlpGateUp)
+        );
+        assert_eq!(
+            parse_aip_exact_edge_projection(Some("gateup")),
+            Some(RamaAipProjectionKind::MlpGateUp)
+        );
+        assert_eq!(
+            parse_aip_exact_edge_projection(Some("mlp-down")),
+            Some(RamaAipProjectionKind::MlpDown)
+        );
+        assert_eq!(
+            parse_aip_exact_edge_projection(Some("down")),
+            Some(RamaAipProjectionKind::MlpDown)
+        );
+        assert_eq!(parse_aip_exact_edge_projection(Some("bad")), None);
+        assert_eq!(parse_aip_exact_edge_projection(None), None);
+    }
+
+    #[test]
+    fn speed_policy_exact_edge_layers_override_sparse_projection() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: Some(128),
+            aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
+            aip_exact_edge_layers: Some(1),
+            aip_exact_edge_projection: None,
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
+            aip_lm_head_repeat_margin_adaptive: false,
+            aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
+            aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
+            aip_column_cache: false,
+            aip_input_tiles: false,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
+        };
+
+        assert_eq!(
+            config.aip_decision_for_projection(0, 4, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::exact()
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(3, 4, RamaAipProjectionKind::MlpDown, 8192, 128),
+            RamaAipProjectionDecision::exact()
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(1, 4, RamaAipProjectionKind::MlpGateUp, 2048, 128),
+            RamaAipProjectionDecision::aip(128)
+        );
+    }
+
+    #[test]
+    fn speed_policy_exact_edge_projection_filter_only_overrides_matching_projection() {
+        let config = RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
+            aip_exact_edge_layers: Some(1),
+            aip_exact_edge_projection: Some(RamaAipProjectionKind::MlpDown),
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: None,
+            aip_lm_head_repeat_margin_adaptive: false,
+            aip_lm_head_novelty_window: None,
+            aip_lm_head_novelty_gap_milli: None,
+            aip_lm_head_novelty_repeat_penalty_milli: None,
+            aip_lm_head_novelty_retention_milli: None,
+            aip_column_cache: false,
+            aip_input_tiles: false,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: None,
+        };
+
+        assert_eq!(
+            config.aip_decision_for_projection(0, 4, RamaAipProjectionKind::MlpDown, 2048, 128),
+            RamaAipProjectionDecision::exact()
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(0, 4, RamaAipProjectionKind::Attention, 2048, 128),
+            RamaAipProjectionDecision::aip(4)
+        );
+        assert_eq!(
+            config.aip_decision_for_projection(1, 4, RamaAipProjectionKind::MlpDown, 2048, 128),
+            RamaAipProjectionDecision::aip(4)
+        );
     }
 
     #[test]
@@ -1056,6 +1545,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_aip_lm_head_rescore_gap_milli_keeps_only_positive_values() {
+        assert_eq!(parse_aip_lm_head_rescore_gap_milli(Some("250")), Some(250));
+        assert_eq!(parse_aip_lm_head_rescore_gap_milli(Some("1")), Some(1));
+        assert_eq!(parse_aip_lm_head_rescore_gap_milli(Some("0")), None);
+        assert_eq!(parse_aip_lm_head_rescore_gap_milli(Some("-2")), None);
+        assert_eq!(parse_aip_lm_head_rescore_gap_milli(Some("bad")), None);
+        assert_eq!(parse_aip_lm_head_rescore_gap_milli(None), None);
+    }
+
+    #[test]
     fn parse_aip_lm_head_agreement_enabled_accepts_explicit_truthy_values() {
         assert!(parse_aip_lm_head_agreement_enabled(Some("1")));
         assert!(parse_aip_lm_head_agreement_enabled(Some("true")));
@@ -1065,6 +1564,16 @@ mod tests {
         assert!(!parse_aip_lm_head_agreement_enabled(Some("false")));
         assert!(!parse_aip_lm_head_agreement_enabled(Some("")));
         assert!(!parse_aip_lm_head_agreement_enabled(None));
+    }
+
+    #[test]
+    fn parse_aip_lm_head_exact_every_keeps_only_positive_values() {
+        assert_eq!(parse_aip_lm_head_exact_every(Some("4")), Some(4));
+        assert_eq!(parse_aip_lm_head_exact_every(Some("1")), Some(1));
+        assert_eq!(parse_aip_lm_head_exact_every(Some("0")), None);
+        assert_eq!(parse_aip_lm_head_exact_every(Some("-2")), None);
+        assert_eq!(parse_aip_lm_head_exact_every(Some("bad")), None);
+        assert_eq!(parse_aip_lm_head_exact_every(None), None);
     }
 
     #[test]
@@ -1082,6 +1591,53 @@ mod tests {
         assert_eq!(stats.lm_head_agreement_selected_matches, 2);
         assert_eq!(stats.lm_head_agreement_exact_in_sparse_topk, 2);
         assert_eq!(stats.lm_head_agreement_max_topk, 8);
+        assert!(!stats.is_empty());
+    }
+
+    #[test]
+    fn stats_record_attention_locality_and_merge() {
+        let mut stats = RamaExperimentalSpeedStats::default();
+        stats.record_attention_locality(8, 4);
+
+        let mut other = RamaExperimentalSpeedStats::default();
+        other.record_attention_locality(6, 4);
+        stats.add_assign(other);
+
+        assert_eq!(stats.attention_locality_uses, 2);
+        assert_eq!(stats.attention_locality_added_indices, 6);
+        assert_eq!(stats.attention_locality_max_selected, 8);
+        assert!(!stats.is_empty());
+    }
+
+    #[test]
+    fn stats_record_lm_head_exact_checks_and_switches() {
+        let mut stats = RamaExperimentalSpeedStats::default();
+        stats.record_lm_head_exact_check(false);
+        stats.record_lm_head_exact_check(true);
+
+        let mut other = RamaExperimentalSpeedStats::default();
+        other.record_lm_head_exact_check(true);
+        stats.add_assign(other);
+
+        assert_eq!(stats.lm_head_exact_checks, 3);
+        assert_eq!(stats.lm_head_exact_switches, 2);
+        assert!(!stats.is_empty());
+    }
+
+    #[test]
+    fn stats_record_lm_head_rescore_checks_uses_and_skips() {
+        let mut stats = RamaExperimentalSpeedStats::default();
+        stats.record_lm_head_rescore(false, 900);
+        stats.record_lm_head_rescore(true, 125);
+
+        let mut other = RamaExperimentalSpeedStats::default();
+        other.record_lm_head_rescore(true, 250);
+        stats.add_assign(other);
+
+        assert_eq!(stats.lm_head_rescore_checks, 3);
+        assert_eq!(stats.lm_head_rescore_uses, 2);
+        assert_eq!(stats.lm_head_rescore_gap_skips, 1);
+        assert_eq!(stats.lm_head_rescore_max_gap_milli, 900);
         assert!(!stats.is_empty());
     }
 
@@ -1127,12 +1683,17 @@ mod tests {
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: None,
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: Some(512),
             aip_lm_head_repeat_margin_milli: None,
@@ -1155,12 +1716,17 @@ mod tests {
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: None,
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: Some(512),
             aip_lm_head_repeat_margin_milli: None,
@@ -1184,12 +1750,17 @@ mod tests {
             aip_policy: RamaAipPolicyKind::Quality,
             aip_topk: Some(96),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -1229,12 +1800,17 @@ mod tests {
             aip_policy: RamaAipPolicyKind::Quality,
             aip_topk: Some(64),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -1266,12 +1842,17 @@ mod tests {
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: Some(128),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: None,
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -1303,12 +1884,17 @@ mod tests {
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: Some(8),
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: Some(2),
             aip_edge_layers: None,
             aip_edge_topk: None,
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: Some(16),
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,
@@ -1345,12 +1931,17 @@ mod tests {
             aip_policy: RamaAipPolicyKind::Speed,
             aip_topk: Some(4),
             aip_attention_topk: None,
+            aip_attention_locality_window: None,
+            aip_attention_locality_extra: None,
             aip_mlp_topk: None,
             aip_down_topk: Some(6),
             aip_edge_layers: Some(1),
             aip_edge_topk: Some(8),
+            aip_exact_edge_layers: None,
+            aip_exact_edge_projection: None,
             aip_lm_head_topk: None,
             aip_lm_head_rescore: None,
+            aip_lm_head_rescore_gap_milli: None,
             aip_lm_head_agreement: false,
             aip_lm_head_rows: None,
             aip_lm_head_repeat_margin_milli: None,

@@ -10,10 +10,12 @@ use crate::{
     streaming_column_cached_sparse_silu_gate_up_from_model,
     streaming_column_cached_sparse_tile_linear_from_model,
     streaming_input_tiled_sparse_silu_gate_up_from_model,
-    streaming_input_tiled_sparse_tile_linear_from_model, streaming_silu_gate_up_from_model,
-    streaming_sparse_silu_gate_up_from_model, streaming_sparse_tile_linear_from_model,
-    streaming_tile_linear_from_model, streaming_tile_linear_multiply_into_from_model,
-    LazyRllmModel, MemoryBudget, RamaAipProjectionKind, RamaExperimentalSpeedConfig,
+    streaming_input_tiled_sparse_tile_linear_from_model,
+    streaming_input_tiled_sparse_tile_linear_selected_from_model,
+    streaming_silu_gate_up_from_model, streaming_sparse_silu_gate_up_from_model,
+    streaming_sparse_tile_linear_from_model, streaming_tile_linear_from_model,
+    streaming_tile_linear_multiply_into_from_model, LazyRllmModel, MemoryBudget,
+    RamaAipProjectionKind, RamaAttentionLocalityCache, RamaExperimentalSpeedConfig,
     RamaExperimentalSpeedStats, RamaTransformerPhaseTimings, Result, SparseColumnCache,
     StreamingLinearConfig, StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
@@ -45,6 +47,7 @@ fn optional_input_tiled_sparse_linear(
     layer_index: usize,
     total_layers: usize,
     default_topk: usize,
+    selected_override: Option<&[usize]>,
     stats: Option<&mut RamaExperimentalSpeedStats>,
     budget: &mut MemoryBudget,
 ) -> Result<Option<Vec<f32>>> {
@@ -65,17 +68,34 @@ fn optional_input_tiled_sparse_linear(
         return Ok(None);
     }
     stats.record_aip_policy(speed_config.aip_policy);
+    if let Some(selected) = selected_override {
+        return streaming_input_tiled_sparse_tile_linear_selected_from_model(
+            model,
+            weight_name,
+            input,
+            None,
+            linear_config,
+            selected,
+            stats,
+            budget,
+        );
+    }
     let sparse_config = RamaExperimentalSpeedConfig {
         enabled: true,
         aip_policy: speed_config.aip_policy,
         aip_topk: Some(decision.topk),
         aip_attention_topk: None,
+        aip_attention_locality_window: None,
+        aip_attention_locality_extra: None,
         aip_mlp_topk: None,
         aip_down_topk: None,
         aip_edge_layers: None,
         aip_edge_topk: None,
+        aip_exact_edge_layers: None,
+        aip_exact_edge_projection: None,
         aip_lm_head_topk: None,
         aip_lm_head_rescore: None,
+        aip_lm_head_rescore_gap_milli: None,
         aip_lm_head_agreement: false,
         aip_lm_head_rows: None,
         aip_lm_head_repeat_margin_milli: None,
@@ -111,7 +131,7 @@ pub fn streaming_llama_transformer_block(
     cache: Option<&mut KvCache>,
 ) -> Result<Vec<f32>> {
     streaming_llama_transformer_block_with_timing(
-        model, input, names, params, config, budget, cache, None, None, None,
+        model, input, names, params, config, budget, cache, None, None, None, None,
     )
 }
 
@@ -126,6 +146,7 @@ pub fn streaming_llama_transformer_block_with_timing(
     mut timing: Option<&mut RamaTransformerPhaseTimings>,
     mut experimental_speed_stats: Option<&mut RamaExperimentalSpeedStats>,
     mut sparse_column_cache: Option<&mut SparseColumnCache>,
+    mut attention_locality_cache: Option<&mut RamaAttentionLocalityCache>,
 ) -> Result<Vec<f32>> {
     if let Some(timing) = timing.as_deref_mut() {
         timing.profiled_layers = timing.profiled_layers.saturating_add(1);
@@ -160,9 +181,46 @@ pub fn streaming_llama_transformer_block_with_timing(
         },
         tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
     };
+    let attention_locality_selection = if config.seq_len == 1
+        && config
+            .experimental_speed
+            .attention_locality_enabled_for_layer(config.layer_index, config.total_layers)
+    {
+        let decision = config.experimental_speed.aip_decision_for_projection(
+            config.layer_index,
+            config.total_layers,
+            RamaAipProjectionKind::Attention,
+            config.hidden_size,
+            128,
+        );
+        if decision.enabled {
+            attention_locality_cache.as_deref().map(|cache| {
+                (
+                    crate::select_top_abs_indices_with_recent(
+                        &attention_input,
+                        decision.topk,
+                        cache.recent(),
+                        config
+                            .experimental_speed
+                            .aip_attention_locality_extra
+                            .unwrap_or(0),
+                    ),
+                    decision.topk,
+                )
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let attention_locality_selected = attention_locality_selection
+        .as_ref()
+        .map(|(selected, _)| selected.as_slice());
+    let mut attention_locality_used = false;
 
     let started = Instant::now();
-    let mut q = match optional_input_tiled_sparse_linear(
+    let sparse_q = optional_input_tiled_sparse_linear(
         model,
         &names.q_weight,
         &attention_input,
@@ -172,9 +230,12 @@ pub fn streaming_llama_transformer_block_with_timing(
         config.layer_index,
         config.total_layers,
         128,
+        attention_locality_selected,
         experimental_speed_stats.as_deref_mut(),
         budget,
-    )? {
+    )?;
+    attention_locality_used |= sparse_q.is_some() && attention_locality_selected.is_some();
+    let mut q = match sparse_q {
         Some(output) => output,
         None => streaming_tile_linear_from_model(
             model,
@@ -190,7 +251,7 @@ pub fn streaming_llama_transformer_block_with_timing(
     }
 
     let started = Instant::now();
-    let mut k = match optional_input_tiled_sparse_linear(
+    let sparse_k = optional_input_tiled_sparse_linear(
         model,
         &names.k_weight,
         &attention_input,
@@ -200,9 +261,12 @@ pub fn streaming_llama_transformer_block_with_timing(
         config.layer_index,
         config.total_layers,
         128,
+        attention_locality_selected,
         experimental_speed_stats.as_deref_mut(),
         budget,
-    )? {
+    )?;
+    attention_locality_used |= sparse_k.is_some() && attention_locality_selected.is_some();
+    let mut k = match sparse_k {
         Some(output) => output,
         None => streaming_tile_linear_from_model(
             model,
@@ -218,7 +282,7 @@ pub fn streaming_llama_transformer_block_with_timing(
     }
 
     let started = Instant::now();
-    let v = match optional_input_tiled_sparse_linear(
+    let sparse_v = optional_input_tiled_sparse_linear(
         model,
         &names.v_weight,
         &attention_input,
@@ -228,9 +292,12 @@ pub fn streaming_llama_transformer_block_with_timing(
         config.layer_index,
         config.total_layers,
         128,
+        attention_locality_selected,
         experimental_speed_stats.as_deref_mut(),
         budget,
-    )? {
+    )?;
+    attention_locality_used |= sparse_v.is_some() && attention_locality_selected.is_some();
+    let v = match sparse_v {
         Some(output) => output,
         None => streaming_tile_linear_from_model(
             model,
@@ -243,6 +310,19 @@ pub fn streaming_llama_transformer_block_with_timing(
     };
     if let Some(timing) = timing.as_deref_mut() {
         timing.v_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
+    }
+    if attention_locality_used {
+        if let (Some((selected, base_topk)), Some(window)) = (
+            attention_locality_selection.as_ref(),
+            config.experimental_speed.aip_attention_locality_window,
+        ) {
+            if let Some(stats) = experimental_speed_stats.as_deref_mut() {
+                stats.record_attention_locality(selected.len(), *base_topk);
+            }
+            if let Some(cache) = attention_locality_cache.as_deref_mut() {
+                cache.record(selected, window);
+            }
+        }
     }
 
     let rope_config = RotaryEmbeddingConfig {
@@ -301,6 +381,7 @@ pub fn streaming_llama_transformer_block_with_timing(
         config.layer_index,
         config.total_layers,
         128,
+        None,
         experimental_speed_stats.as_deref_mut(),
         budget,
     )? {
@@ -360,12 +441,17 @@ pub fn streaming_llama_transformer_block_with_timing(
                 aip_policy: config.experimental_speed.aip_policy,
                 aip_topk: Some(gate_up_aip_decision.topk),
                 aip_attention_topk: None,
+                aip_attention_locality_window: None,
+                aip_attention_locality_extra: None,
                 aip_mlp_topk: None,
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
+                aip_exact_edge_layers: None,
+                aip_exact_edge_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -513,12 +599,17 @@ pub fn streaming_llama_transformer_block_with_timing(
                 aip_policy: config.experimental_speed.aip_policy,
                 aip_topk: Some(down_aip_decision.topk),
                 aip_attention_topk: None,
+                aip_attention_locality_window: None,
+                aip_attention_locality_extra: None,
                 aip_mlp_topk: None,
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
+                aip_exact_edge_layers: None,
+                aip_exact_edge_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
