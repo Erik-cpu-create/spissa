@@ -117,11 +117,38 @@ fn checked_projection_rows(label: &str, heads: usize, head_dim: usize) -> Result
     })
 }
 
+#[cfg(test)]
 fn sample_sparse_lm_head_argmax(
     logits: &[f32],
     appended_tokens: &[usize],
     previous_token_run: usize,
     config: RamaExperimentalSpeedConfig,
+) -> Result<usize> {
+    sample_sparse_lm_head_argmax_inner(logits, appended_tokens, previous_token_run, config, None)
+}
+
+fn sample_sparse_lm_head_argmax_with_stats(
+    logits: &[f32],
+    appended_tokens: &[usize],
+    previous_token_run: usize,
+    config: RamaExperimentalSpeedConfig,
+    stats: &mut RamaExperimentalSpeedStats,
+) -> Result<usize> {
+    sample_sparse_lm_head_argmax_inner(
+        logits,
+        appended_tokens,
+        previous_token_run,
+        config,
+        Some(stats),
+    )
+}
+
+fn sample_sparse_lm_head_argmax_inner(
+    logits: &[f32],
+    appended_tokens: &[usize],
+    previous_token_run: usize,
+    config: RamaExperimentalSpeedConfig,
+    mut stats: Option<&mut RamaExperimentalSpeedStats>,
 ) -> Result<usize> {
     let excluded_token = if appended_tokens.len() == 1 {
         let previous = appended_tokens.first().copied();
@@ -149,7 +176,13 @@ fn sample_sparse_lm_head_argmax(
                     let margin = margin_milli as f32 / 1000.0;
                     let gap = best_value - second_value;
                     if gap.is_finite() && gap <= margin {
+                        if let Some(stats) = stats.as_deref_mut() {
+                            stats.record_lm_head_repeat_margin(true, gap_to_milli(gap));
+                        }
                         return Ok(second_idx);
+                    }
+                    if let Some(stats) = stats.as_deref_mut() {
+                        stats.record_lm_head_repeat_margin(false, gap_to_milli(gap));
                     }
                 }
             }
@@ -157,6 +190,14 @@ fn sample_sparse_lm_head_argmax(
     }
 
     sample_argmax_excluding(logits, excluded_token)
+}
+
+fn gap_to_milli(gap: f32) -> usize {
+    if !gap.is_finite() || gap <= 0.0 {
+        0
+    } else {
+        (gap * 1000.0).round() as usize
+    }
 }
 
 fn top_two_sparse_logits(logits: &[f32]) -> Result<(usize, f32, Option<(usize, f32)>)> {
@@ -602,19 +643,21 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                                     budget,
                                 )? {
                                     Some(token_id) => token_id,
-                                    None => sample_sparse_lm_head_argmax(
+                                    None => sample_sparse_lm_head_argmax_with_stats(
                                         &logits,
                                         tokens,
                                         previous_token_run,
                                         self.experimental_speed_config,
+                                        &mut experimental_speed_stats,
                                     )?,
                                 }
                             } else {
-                                sample_sparse_lm_head_argmax(
+                                sample_sparse_lm_head_argmax_with_stats(
                                     &logits,
                                     tokens,
                                     previous_token_run,
                                     self.experimental_speed_config,
+                                    &mut experimental_speed_stats,
                                 )?
                             };
                             if self.experimental_speed_config.aip_lm_head_agreement {
@@ -1608,6 +1651,39 @@ mod tests {
             sample_sparse_lm_head_argmax(&[0.1, 3.0, 2.9], &[1], 0, config).unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn sparse_lm_head_argmax_repeat_margin_records_controller_stats() {
+        let config = crate::RamaExperimentalSpeedConfig {
+            enabled: true,
+            aip_policy: crate::RamaAipPolicyKind::Speed,
+            aip_topk: Some(4),
+            aip_attention_topk: None,
+            aip_mlp_topk: None,
+            aip_down_topk: None,
+            aip_edge_layers: None,
+            aip_edge_topk: None,
+            aip_lm_head_topk: None,
+            aip_lm_head_rescore: None,
+            aip_lm_head_agreement: false,
+            aip_lm_head_rows: None,
+            aip_lm_head_repeat_margin_milli: Some(250),
+            aip_column_cache: false,
+            aip_input_tiles: true,
+            aip_no_repeat_last: false,
+            aip_repeat_run_limit: Some(2),
+        };
+        let mut stats = RamaExperimentalSpeedStats::default();
+
+        assert_eq!(
+            sample_sparse_lm_head_argmax_with_stats(&[0.1, 3.0, 2.9], &[1], 1, config, &mut stats)
+                .unwrap(),
+            2
+        );
+        assert_eq!(stats.lm_head_repeat_margin_checks, 1);
+        assert_eq!(stats.lm_head_repeat_margin_switches, 1);
+        assert_eq!(stats.lm_head_repeat_margin_max_gap_milli, 100);
     }
 
     #[test]
