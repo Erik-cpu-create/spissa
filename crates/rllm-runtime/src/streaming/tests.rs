@@ -591,6 +591,64 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[test]
+    fn q8_0_batch1_row_fast_path_accumulates_complete_rows() {
+        let mut row0 = [0i8; 32];
+        let mut row1 = [0i8; 32];
+        row0.fill(1);
+        row1.fill(2);
+        let mut q8 = q8_0_block_bytes(1.0, &row0);
+        q8.extend_from_slice(&q8_0_block_bytes(1.0, &row1));
+
+        let input = vec![1.0f32; 32];
+        let mut output = vec![0.5f32, 1.5];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 32,
+            out_features: 2,
+        };
+
+        let used_fast_path = accumulate_q8_0_chunk_batch1_complete_rows(
+            &input,
+            &mut output,
+            &q8,
+            0,
+            config,
+            "linear.q8.rows.weight",
+        )
+        .unwrap();
+
+        assert!(used_fast_path);
+        assert_eq!(output, vec![32.5, 65.5]);
+    }
+
+    #[test]
+    fn q8_0_batch1_row_fast_path_declines_partial_rows() {
+        let mut q = [0i8; 32];
+        q.fill(1);
+        let q8 = q8_0_block_bytes(1.0, &q);
+        let input = vec![1.0f32; 48];
+        let mut output = vec![0.0f32; 2];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 48,
+            out_features: 2,
+        };
+
+        let used_fast_path = accumulate_q8_0_chunk_batch1_complete_rows(
+            &input,
+            &mut output,
+            &q8,
+            0,
+            config,
+            "linear.q8.partial.weight",
+        )
+        .unwrap();
+
+        assert!(!used_fast_path);
+        assert_eq!(output, vec![0.0, 0.0]);
+    }
+
     fn add_f32_tensor(
         writer: &mut RllmWriter,
         tensor_id: u64,
