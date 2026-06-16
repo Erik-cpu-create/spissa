@@ -15,6 +15,8 @@ pub enum RamaIntegrityMode {
     Strict,
     /// Verify each chunk checksum once per process, then trust the already-verified chunk.
     VerifyOnce,
+    /// Trust local artifact bytes without runtime checksum verification.
+    Unchecked,
 }
 
 #[derive(Debug, Clone)]
@@ -211,6 +213,9 @@ impl LazyRllmModel {
         chunk: &ChunkMeta,
         compressed: &[u8],
     ) -> Result<bool> {
+        if self.integrity_mode == RamaIntegrityMode::Unchecked {
+            return Ok(false);
+        }
         if self.integrity_mode == RamaIntegrityMode::VerifyOnce
             && self.verified_compressed_chunks.contains(&chunk.chunk_id)
         {
@@ -230,6 +235,9 @@ impl LazyRllmModel {
         byte_len: u64,
         compressed_range: &[u8],
     ) -> Result<bool> {
+        if self.integrity_mode == RamaIntegrityMode::Unchecked {
+            return Ok(false);
+        }
         let range = chunk_range_for_original_bytes(chunk, byte_offset, byte_len)?;
         let key = (
             chunk.chunk_id,
@@ -253,6 +261,9 @@ impl LazyRllmModel {
         chunk: &ChunkMeta,
         decoded: &[u8],
     ) -> Result<bool> {
+        if self.integrity_mode == RamaIntegrityMode::Unchecked {
+            return Ok(false);
+        }
         if self.integrity_mode == RamaIntegrityMode::VerifyOnce
             && self.verified_original_chunks.contains(&chunk.chunk_id)
         {
@@ -1215,6 +1226,46 @@ mod tests {
         assert_eq!(compressed_checksum_events, 1);
         assert_eq!(original_checksum_events, 1);
         assert_eq!(read_events, 2);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn unchecked_integrity_records_no_checksum_events() {
+        let path = temp_path("chunk-unchecked");
+        let data: Vec<u8> = (0..16).collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "tiny.weight".to_string(),
+            shape: vec![16],
+            dtype: DType::U8,
+            original_size_bytes: data.len() as u64,
+            compressed_size_bytes: data.len() as u64,
+            original_sha256: sha256_array(&data),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &data, &data, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        model.set_rama_integrity_mode(RamaIntegrityMode::Unchecked);
+        model.enable_rama_trace();
+        let mut budget = MemoryBudget::new(64);
+        model
+            .with_decoded_chunk(0, &mut budget, |bytes, _budget| Ok(bytes.len()))
+            .unwrap();
+
+        let trace = model.take_rama_trace().expect("trace should be enabled");
+        assert!(trace
+            .events
+            .iter()
+            .all(|event| event.phase != "chunk_compressed_checksum"
+                && event.phase != "chunk_original_checksum"));
         assert_eq!(budget.current_bytes(), 0);
 
         std::fs::remove_file(&path).ok();
