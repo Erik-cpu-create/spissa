@@ -44,6 +44,7 @@ pub fn tokenizer_metadata_from_json_str(json: &str) -> Result<TokenizerMetadata>
     }
 
     let id_to_token = contiguous_id_to_token(by_id)?;
+    let bpe_merges = bpe_merges_from_model(model)?;
     let tokenizer_type = Some(format!("hf-{}", model_type.to_ascii_lowercase()));
     let unk_token_id = special_token_id(
         model.get("unk_token").or_else(|| value.get("unk_token")),
@@ -55,10 +56,51 @@ pub fn tokenizer_metadata_from_json_str(json: &str) -> Result<TokenizerMetadata>
     Ok(TokenizerMetadata {
         tokenizer_type,
         id_to_token,
+        bpe_merges,
         unk_token_id,
         bos_token_id,
         eos_token_id,
     })
+}
+
+fn bpe_merges_from_model(model: &Value) -> Result<Vec<(String, String)>> {
+    let Some(merges) = model.get("merges").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let mut parsed = Vec::with_capacity(merges.len());
+    for merge in merges {
+        match merge {
+            Value::String(raw) => {
+                let mut parts = raw.splitn(2, ' ');
+                let left = parts.next().unwrap_or_default();
+                let right = parts.next().ok_or_else(|| {
+                    SafetensorsError::InvalidTokenizer(format!(
+                        "BPE merge {raw:?} must contain two tokens"
+                    ))
+                })?;
+                parsed.push((left.to_string(), right.to_string()));
+            }
+            Value::Array(parts) if parts.len() == 2 => {
+                let left = parts[0].as_str().ok_or_else(|| {
+                    SafetensorsError::InvalidTokenizer(
+                        "BPE merge array left value must be a string".to_string(),
+                    )
+                })?;
+                let right = parts[1].as_str().ok_or_else(|| {
+                    SafetensorsError::InvalidTokenizer(
+                        "BPE merge array right value must be a string".to_string(),
+                    )
+                })?;
+                parsed.push((left.to_string(), right.to_string()));
+            }
+            other => {
+                return Err(SafetensorsError::InvalidTokenizer(format!(
+                    "unsupported BPE merge entry {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(parsed)
 }
 
 fn contiguous_id_to_token(by_id: BTreeMap<u64, String>) -> Result<Vec<String>> {

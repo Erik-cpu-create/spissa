@@ -312,6 +312,7 @@ mod tests {
         RllmTokenizer::from_metadata(&TokenizerMetadata {
             tokenizer_type: Some("test".to_string()),
             id_to_token: tokens.iter().map(|token| (*token).to_string()).collect(),
+            bpe_merges: Vec::new(),
             unk_token_id: None,
             bos_token_id: None,
             eos_token_id: None,
