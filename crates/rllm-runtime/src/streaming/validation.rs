@@ -270,11 +270,11 @@ fn validate_weight_tensor(tensor: &TensorMeta, config: StreamingLinearConfig) ->
         )));
     }
 
-    let expected_bytes = config
+    let expected_elements = config
         .out_features
         .checked_mul(config.in_features)
-        .and_then(|elements| elements.checked_mul(tensor.dtype.size_bytes()))
-        .ok_or_else(|| RuntimeError::Shape("weight byte size overflow".to_string()))?;
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
+    let expected_bytes = tensor.dtype.byte_size_for_elements(expected_elements);
     if tensor.original_size_bytes != expected_bytes as u64 {
         return Err(RuntimeError::InvalidTensorData(format!(
             "weight tensor {} original_size_bytes={} does not match shape/dtype bytes {}",
@@ -283,4 +283,3 @@ fn validate_weight_tensor(tensor: &TensorMeta, config: StreamingLinearConfig) ->
     }
     Ok(())
 }
-

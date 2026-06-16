@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 
 #[path = "../chat_template.rs"]
 mod chat_template;
@@ -12,7 +16,7 @@ use rllm_runtime::{
         LlamaRamaSessionAdapter,
     },
     LazyRllmModel, MemoryBudget, RamaChatSession, RamaIntegrityMode, RamaSessionPhaseTimings,
-    RllmTokenizer, StreamingSamplingConfig,
+    RamaTrace, RllmTokenizer, StreamingSamplingConfig,
 };
 
 #[derive(Parser)]
@@ -32,13 +36,127 @@ struct Args {
     #[arg(long, default_value_t = false)]
     profile_phases: bool,
 
-    /// Chat template used to format interactive turns: raw or llama3.
+    /// Chat template used to format interactive turns: raw, llama3, or chatml.
     #[arg(long, default_value = "raw")]
     chat_template: String,
 
     /// Optional system prompt for chat-template modes.
     #[arg(long)]
     system_prompt: Option<String>,
+
+    /// Optional path for RAMA chunk trace JSON output.
+    #[arg(long)]
+    rama_trace: Option<String>,
+
+    /// Runtime chunk integrity mode: strict, verify-once, or unchecked.
+    #[arg(long, default_value = "verify-once")]
+    rama_integrity: String,
+}
+
+fn parse_rama_integrity_mode(raw: &str) -> Result<RamaIntegrityMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "strict" => Ok(RamaIntegrityMode::Strict),
+        "verify-once" | "verify_once" | "once" => Ok(RamaIntegrityMode::VerifyOnce),
+        "unchecked" | "none" | "trusted" => Ok(RamaIntegrityMode::Unchecked),
+        other => {
+            anyhow::bail!(
+                "unsupported --rama-integrity {other:?}; expected strict, verify-once, or unchecked"
+            )
+        }
+    }
+}
+
+fn tensor_bucket(tensor_name: Option<&str>) -> &'static str {
+    let Some(name) = tensor_name else {
+        return "other";
+    };
+
+    if name.contains(".mlp.gate_proj.weight") {
+        "mlp.gate_proj"
+    } else if name.contains(".mlp.up_proj.weight") {
+        "mlp.up_proj"
+    } else if name.contains(".mlp.down_proj.weight") {
+        "mlp.down_proj"
+    } else if name.contains(".self_attn.q_proj.weight") {
+        "attention.q_proj"
+    } else if name.contains(".self_attn.k_proj.weight") {
+        "attention.k_proj"
+    } else if name.contains(".self_attn.v_proj.weight") {
+        "attention.v_proj"
+    } else if name.contains(".self_attn.o_proj.weight") {
+        "attention.o_proj"
+    } else if name.contains("lm_head.weight") {
+        "lm_head"
+    } else {
+        "other"
+    }
+}
+
+fn write_rama_trace_json(path: &str, trace: &RamaTrace) -> Result<()> {
+    let output = Path::new(path);
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create RAMA trace output directory {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let mut phase_totals: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
+    let mut tensor_bucket_totals: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
+    for event in &trace.events {
+        let phase_entry = phase_totals.entry(event.phase.as_str()).or_insert((0, 0));
+        phase_entry.0 += 1;
+        phase_entry.1 = phase_entry.1.saturating_add(event.duration_ns);
+
+        if event.phase == "chunk_compute" || event.phase == "chunk_compute_closure" {
+            let bucket = tensor_bucket(event.tensor_name.as_deref());
+            let bucket_entry = tensor_bucket_totals.entry(bucket).or_insert((0, 0));
+            bucket_entry.0 += 1;
+            bucket_entry.1 = bucket_entry.1.saturating_add(event.duration_ns);
+        }
+    }
+
+    let duration_by_phase: Vec<_> = phase_totals
+        .into_iter()
+        .map(|(phase, (event_count, total_ns))| {
+            json!({
+                "phase": phase,
+                "event_count": event_count,
+                "total_ns": total_ns,
+                "total_ms": (total_ns as f64) / 1_000_000.0,
+            })
+        })
+        .collect();
+    let duration_by_tensor_bucket: Vec<_> = tensor_bucket_totals
+        .into_iter()
+        .map(|(bucket, (event_count, total_ns))| {
+            json!({
+                "bucket": bucket,
+                "event_count": event_count,
+                "total_ns": total_ns,
+                "total_ms": (total_ns as f64) / 1_000_000.0,
+            })
+        })
+        .collect();
+    let total_ns = trace
+        .events
+        .iter()
+        .fold(0u64, |acc, event| acc.saturating_add(event.duration_ns));
+    let payload = json!({
+        "trace": trace,
+        "summary": {
+            "event_count": trace.events.len(),
+            "total_recorded_ns": total_ns,
+            "total_recorded_ms": (total_ns as f64) / 1_000_000.0,
+            "duration_by_phase": duration_by_phase,
+            "duration_by_tensor_bucket": duration_by_tensor_bucket,
+        }
+    });
+    fs::write(output, serde_json::to_vec_pretty(&payload)?)
+        .with_context(|| format!("failed to write RAMA trace JSON to {}", output.display()))?;
+    Ok(())
 }
 
 fn format_rolling_suffix(stats: rllm_runtime::RamaRollingStats) -> String {
@@ -250,17 +368,40 @@ fn format_repetition_suffix(stats: rllm_runtime::RamaRepetitionStats) -> String 
     }
 }
 
-fn format_phase_profile_suffix(timings: RamaSessionPhaseTimings, decode_wall_ms: f64) -> String {
-    if timings.total_ms() == 0.0 {
+fn format_phase_profile_suffix(
+    prefill_timings: RamaSessionPhaseTimings,
+    prefill_wall_ms: f64,
+    decode_timings: RamaSessionPhaseTimings,
+    decode_wall_ms: f64,
+) -> String {
+    if prefill_timings.total_ms() == 0.0 && decode_timings.total_ms() == 0.0 {
         return String::new();
     }
 
+    format!(
+        "{}{}",
+        format_phase_profile_segment(
+            "PrefillProfile",
+            "prefill",
+            prefill_timings,
+            prefill_wall_ms
+        ),
+        format_phase_profile_segment("DecodeProfile", "decode", decode_timings, decode_wall_ms)
+    )
+}
+
+fn format_phase_profile_segment(
+    label: &str,
+    total_label: &str,
+    timings: RamaSessionPhaseTimings,
+    wall_ms: f64,
+) -> String {
     let detail = timings.transformer_detail;
     let profiled_total_ms = timings.total_ms();
-    let overhead_ms = (decode_wall_ms - profiled_total_ms).max(0.0);
+    let overhead_ms = (wall_ms - profiled_total_ms).max(0.0);
     format!(
-        " | Profile: decode_total={:.2}ms profiled={:.2}ms overhead={:.2}ms embedding={:.2}ms transformer={:.2}ms attention_total={:.2}ms mlp_total={:.2}ms final_norm={:.2}ms lm_head={:.2}ms layers={} q={:.2}ms k={:.2}ms v={:.2}ms attn={:.2}ms gate={:.2}ms up={:.2}ms down={:.2}ms",
-        decode_wall_ms,
+        " | {label}: {total_label}_total={:.2}ms profiled={:.2}ms overhead={:.2}ms embedding={:.2}ms transformer={:.2}ms attention_total={:.2}ms mlp_total={:.2}ms final_norm={:.2}ms lm_head={:.2}ms layers={} q={:.2}ms k={:.2}ms v={:.2}ms attn={:.2}ms gate={:.2}ms up={:.2}ms down={:.2}ms",
+        wall_ms,
         profiled_total_ms,
         overhead_ms,
         timings.embedding_ms,
@@ -289,6 +430,10 @@ fn main() -> Result<()> {
         anyhow::bail!("--max-new-tokens must be greater than zero");
     }
     let mut model = LazyRllmModel::open(&args.model)?;
+    if args.rama_trace.is_some() {
+        model.enable_rama_trace();
+    }
+    let rama_integrity = parse_rama_integrity_mode(&args.rama_integrity)?;
 
     let tokenizer_meta = model
         .metadata()
@@ -307,9 +452,7 @@ fn main() -> Result<()> {
         sampling: StreamingSamplingConfig::Argmax,
     };
 
-    // VerifyOnce: verify each chunk SHA-256 only on first access, then trust it.
-    // This eliminates ~420 redundant SHA-256 computations per generated token.
-    model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
+    model.set_rama_integrity_mode(rama_integrity);
 
     let prepared = prepare_llama_rama_layer_decode_transformer_from_metadata(&mut model, config)?;
     let mut budget = MemoryBudget::unbounded();
@@ -378,6 +521,8 @@ fn main() -> Result<()> {
         let repetition_suffix = format_repetition_suffix(result.metrics.repetition_stats);
         let phase_profile_suffix = if args.profile_phases {
             format_phase_profile_suffix(
+                result.metrics.prefill_phase_timings,
+                result.metrics.prefill_ms,
                 result.metrics.decode_phase_timings,
                 result.metrics.decode_ms,
             )
@@ -399,6 +544,15 @@ fn main() -> Result<()> {
         );
         has_context = true;
         previous_assistant_ended = assistant_ended;
+    }
+
+    drop(session);
+    if let Some(rama_trace_out) = args.rama_trace.as_deref() {
+        let trace = model
+            .take_rama_trace()
+            .context("RAMA trace was requested but was not enabled")?;
+        write_rama_trace_json(rama_trace_out, &trace)?;
+        println!("RAMA trace JSON: {}", rama_trace_out);
     }
 
     Ok(())
@@ -627,29 +781,158 @@ mod tests {
     }
 
     #[test]
-    fn phase_profile_suffix_reports_decode_subphases_and_overhead() {
-        let suffix = format_phase_profile_suffix(
-            rllm_runtime::RamaSessionPhaseTimings {
-                embedding_ms: 1.0,
-                transformer_ms: 20.0,
-                transformer_detail: rllm_runtime::RamaTransformerPhaseTimings {
-                    q_projection_ms: 2.0,
-                    k_projection_ms: 3.0,
-                    v_projection_ms: 4.0,
-                    attention_ms: 5.0,
-                    gate_projection_ms: 6.0,
-                    up_projection_ms: 7.0,
-                    down_projection_ms: 8.0,
-                    profiled_layers: 16,
-                    ..Default::default()
-                },
-                final_norm_ms: 9.0,
-                lm_head_ms: 10.0,
-            },
-            44.0,
-        );
+    fn args_default_to_no_rama_trace_and_accept_path() {
+        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        assert_eq!(default_args.rama_trace, None);
 
-        assert!(suffix.contains("Profile: decode_total=44.00ms"));
+        let traced_args = Args::parse_from([
+            "llama-test",
+            "--model",
+            "model.rllm",
+            "--rama-trace",
+            "/tmp/rama-trace.json",
+        ]);
+        assert_eq!(
+            traced_args.rama_trace.as_deref(),
+            Some("/tmp/rama-trace.json")
+        );
+    }
+
+    #[test]
+    fn args_default_to_verify_once_integrity_and_accept_unchecked() {
+        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        assert_eq!(default_args.rama_integrity, "verify-once");
+
+        let unchecked_args = Args::parse_from([
+            "llama-test",
+            "--model",
+            "model.rllm",
+            "--rama-integrity",
+            "unchecked",
+        ]);
+        assert_eq!(unchecked_args.rama_integrity, "unchecked");
+    }
+
+    #[test]
+    fn tensor_bucket_groups_llama_projection_names() {
+        assert_eq!(
+            tensor_bucket(Some("model.layers.0.mlp.gate_proj.weight")),
+            "mlp.gate_proj"
+        );
+        assert_eq!(
+            tensor_bucket(Some("model.layers.0.mlp.up_proj.weight")),
+            "mlp.up_proj"
+        );
+        assert_eq!(
+            tensor_bucket(Some("model.layers.0.mlp.down_proj.weight")),
+            "mlp.down_proj"
+        );
+        assert_eq!(
+            tensor_bucket(Some("model.layers.0.self_attn.q_proj.weight")),
+            "attention.q_proj"
+        );
+        assert_eq!(tensor_bucket(Some("lm_head.weight")), "lm_head");
+        assert_eq!(tensor_bucket(None), "other");
+    }
+
+    #[test]
+    fn rama_trace_json_reports_phase_and_tensor_bucket_totals() {
+        let mut trace = RamaTrace::new("test-model", "llama");
+        trace.record(rllm_runtime::RamaTraceEventInput {
+            phase: "chunk_read".to_string(),
+            label: "read".to_string(),
+            tensor_name: Some("model.layers.0.mlp.gate_proj.weight".to_string()),
+            tensor_id: Some(1),
+            chunk_id: Some(0),
+            codec_id: Some("q8_0".to_string()),
+            compressed_bytes: Some(10),
+            decoded_bytes: Some(20),
+            start_ns: 0,
+            duration_ns: 1_000,
+            budget_current_bytes: 20,
+            budget_peak_bytes: 20,
+        });
+        trace.record(rllm_runtime::RamaTraceEventInput {
+            phase: "chunk_compute_closure".to_string(),
+            label: "compute".to_string(),
+            tensor_name: Some("model.layers.0.mlp.gate_proj.weight".to_string()),
+            tensor_id: Some(1),
+            chunk_id: Some(0),
+            codec_id: Some("q8_0".to_string()),
+            compressed_bytes: Some(10),
+            decoded_bytes: Some(20),
+            start_ns: 1_000,
+            duration_ns: 2_000,
+            budget_current_bytes: 20,
+            budget_peak_bytes: 20,
+        });
+
+        let path =
+            std::env::temp_dir().join(format!("rllm-llama-test-trace-{}.json", std::process::id()));
+        write_rama_trace_json(path.to_str().unwrap(), &trace).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(payload["summary"]["event_count"], 2);
+        assert_eq!(
+            payload["summary"]["duration_by_tensor_bucket"][0]["bucket"],
+            "mlp.gate_proj"
+        );
+        assert_eq!(
+            payload["summary"]["duration_by_tensor_bucket"][0]["total_ns"],
+            2_000
+        );
+        assert!(payload["summary"]["duration_by_phase"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|phase| phase["phase"] == "chunk_read" && phase["total_ns"] == 1_000));
+    }
+
+    #[test]
+    fn phase_profile_suffix_reports_prefill_and_decode_subphases() {
+        let prefill = rllm_runtime::RamaSessionPhaseTimings {
+            embedding_ms: 2.0,
+            transformer_ms: 50.0,
+            transformer_detail: rllm_runtime::RamaTransformerPhaseTimings {
+                q_projection_ms: 10.0,
+                k_projection_ms: 11.0,
+                v_projection_ms: 12.0,
+                attention_ms: 13.0,
+                gate_projection_ms: 14.0,
+                up_projection_ms: 15.0,
+                down_projection_ms: 16.0,
+                profiled_layers: 16,
+                ..Default::default()
+            },
+            final_norm_ms: 17.0,
+            lm_head_ms: 18.0,
+        };
+        let decode = rllm_runtime::RamaSessionPhaseTimings {
+            embedding_ms: 1.0,
+            transformer_ms: 20.0,
+            transformer_detail: rllm_runtime::RamaTransformerPhaseTimings {
+                q_projection_ms: 2.0,
+                k_projection_ms: 3.0,
+                v_projection_ms: 4.0,
+                attention_ms: 5.0,
+                gate_projection_ms: 6.0,
+                up_projection_ms: 7.0,
+                down_projection_ms: 8.0,
+                profiled_layers: 16,
+                ..Default::default()
+            },
+            final_norm_ms: 9.0,
+            lm_head_ms: 10.0,
+        };
+        let suffix = format_phase_profile_suffix(prefill, 60.0, decode, 44.0);
+
+        assert!(suffix.contains("PrefillProfile: prefill_total=60.00ms"));
+        assert!(suffix.contains("profiled=87.00ms"));
+        assert!(suffix.contains("attention_total=46.00ms"));
+        assert!(suffix.contains("mlp_total=45.00ms"));
+        assert!(suffix.contains("lm_head=18.00ms"));
+        assert!(suffix.contains("DecodeProfile: decode_total=44.00ms"));
         assert!(suffix.contains("profiled=40.00ms"));
         assert!(suffix.contains("overhead=4.00ms"));
         assert!(suffix.contains("attention_total=14.00ms"));

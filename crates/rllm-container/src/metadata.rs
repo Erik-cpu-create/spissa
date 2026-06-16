@@ -30,6 +30,10 @@ pub enum DType {
     U32,
     /// 64-bit unsigned integer
     U64,
+    /// 4-bit block-quantized type (32 elements per block)
+    Q4_0,
+    /// 8-bit block-quantized type (32 elements per block)
+    Q8_0,
 }
 
 impl DType {
@@ -39,7 +43,27 @@ impl DType {
             DType::Fp16 | DType::Bf16 | DType::I16 | DType::U16 => 2,
             DType::Fp32 | DType::I32 | DType::U32 => 4,
             DType::Fp64 | DType::I64 | DType::U64 => 8,
-            DType::I8 | DType::U8 => 1,
+            DType::I8 | DType::U8 | DType::Q4_0 | DType::Q8_0 => 1,
+        }
+    }
+
+    /// Whether this dtype is quantized
+    pub fn is_quantized(&self) -> bool {
+        matches!(self, DType::Q4_0 | DType::Q8_0)
+    }
+
+    /// Calculate total bytes for a given number of elements of this dtype
+    pub fn byte_size_for_elements(&self, count: usize) -> usize {
+        match self {
+            DType::Q4_0 => {
+                let blocks = (count + 31) / 32;
+                blocks * 18
+            }
+            DType::Q8_0 => {
+                let blocks = (count + 31) / 32;
+                blocks * 34
+            }
+            _ => count * self.size_bytes(),
         }
     }
 }
@@ -172,6 +196,9 @@ pub struct TokenizerMetadata {
     /// Token strings indexed by token ID.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub id_to_token: Vec<String>,
+    /// Optional HuggingFace BPE merge rules, in rank order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bpe_merges: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unk_token_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +264,24 @@ mod tests {
         assert_eq!(DType::Fp64.size_bytes(), 8);
         assert_eq!(DType::I8.size_bytes(), 1);
         assert_eq!(DType::U32.size_bytes(), 4);
+    }
+
+    #[test]
+    fn q4_0_dtype_uses_block_byte_size() {
+        assert!(DType::Q4_0.is_quantized());
+        assert_eq!(DType::Q4_0.byte_size_for_elements(0), 0);
+        assert_eq!(DType::Q4_0.byte_size_for_elements(1), 18);
+        assert_eq!(DType::Q4_0.byte_size_for_elements(32), 18);
+        assert_eq!(DType::Q4_0.byte_size_for_elements(33), 36);
+    }
+
+    #[test]
+    fn q8_0_dtype_uses_block_byte_size() {
+        assert!(DType::Q8_0.is_quantized());
+        assert_eq!(DType::Q8_0.byte_size_for_elements(0), 0);
+        assert_eq!(DType::Q8_0.byte_size_for_elements(1), 34);
+        assert_eq!(DType::Q8_0.byte_size_for_elements(32), 34);
+        assert_eq!(DType::Q8_0.byte_size_for_elements(33), 68);
     }
 
     #[test]
@@ -372,6 +417,7 @@ mod tests {
         meta.tokenizer = Some(TokenizerMetadata {
             tokenizer_type: Some("hf-wordlevel".to_string()),
             id_to_token: vec!["A".to_string(), " B".to_string(), "<unk>".to_string()],
+            bpe_merges: Vec::new(),
             unk_token_id: Some(2),
             bos_token_id: None,
             eos_token_id: None,
