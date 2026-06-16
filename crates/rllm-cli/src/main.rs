@@ -78,6 +78,10 @@ enum Commands {
         /// Do not auto-embed sibling tokenizer.json metadata.
         #[arg(long)]
         no_tokenizer: bool,
+
+        /// Optional quantization scheme: raw, q4_0, q4_0_keep_io, q4_0_mlp_only, q4_0_attention_only, q4_attn_q8_mlp_keep_io, or q8_transformer_keep_io. Keep raw/unquantized if omitted.
+        #[arg(long)]
+        quantize: Option<String>,
     },
 
     /// Inspect a .rllm file
@@ -311,6 +315,7 @@ fn main() -> Result<()> {
             config,
             tokenizer,
             no_tokenizer,
+            quantize,
         } => commands::pack::run(
             &input,
             &out,
@@ -325,6 +330,7 @@ fn main() -> Result<()> {
             config.as_deref(),
             tokenizer.as_deref(),
             no_tokenizer,
+            quantize.as_deref(),
         ),
         Commands::Inspect { file } => commands::inspect::run(&file),
         Commands::Verify {

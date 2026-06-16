@@ -30,6 +30,26 @@ mod tests {
         fp16_bytes(values)
     }
 
+    fn q4_0_block_bytes(scale: f32, values: &[i8; 32]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 18];
+        bytes[0..2].copy_from_slice(&crate::tensor::f32_to_fp16(scale).to_le_bytes());
+        for i in 0..16 {
+            let q0 = (values[i * 2] + 8) as u8;
+            let q1 = (values[i * 2 + 1] + 8) as u8;
+            bytes[2 + i] = (q0 & 0x0f) | ((q1 & 0x0f) << 4);
+        }
+        bytes
+    }
+
+    fn q8_0_block_bytes(scale: f32, values: &[i8; 32]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 34];
+        bytes[0..2].copy_from_slice(&crate::tensor::f32_to_fp16(scale).to_le_bytes());
+        for (idx, value) in values.iter().enumerate() {
+            bytes[2 + idx] = *value as u8;
+        }
+        bytes
+    }
+
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("rllm-streaming-{name}-{}.rllm", std::process::id()))
     }
@@ -304,6 +324,457 @@ mod tests {
         assert_eq!(budget.current_bytes(), 0);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_dequantizes_q4_0_weight_block() {
+        let path = temp_path("tile-linear-q4-0");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q4_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q4.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q4_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut budget = MemoryBudget::new(512);
+
+        let actual = streaming_tile_linear_from_model(
+            &mut model,
+            "linear.q4.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, vec![16.0, 32.0]);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_argmax_dequantizes_q4_0_weight_block() {
+        let path = temp_path("tile-linear-argmax-q4-0");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q4_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q4.argmax.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q4_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut budget = MemoryBudget::new(512);
+
+        let actual = streaming_tile_linear_argmax_from_model(
+            &mut model,
+            "linear.q4.argmax.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, 1);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_accumulates_q8_0_without_f32_chunk_scratch() {
+        let path = temp_path("tile-linear-q8-0-direct");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q8_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q8.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q8_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut budget = MemoryBudget::new(96);
+
+        let actual = streaming_tile_linear_from_model(
+            &mut model,
+            "linear.q8.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, vec![16.0, 32.0]);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(budget.peak_bytes() <= 96);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_multiply_into_accumulates_q8_0_without_f32_chunk_scratch() {
+        let path = temp_path("tile-linear-q8-0-multiply-direct");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q8_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q8.multiply.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q8_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut target = vec![2.0f32, 3.0];
+        let mut budget = MemoryBudget::new(96);
+
+        streaming_tile_linear_multiply_into_from_model(
+            &mut model,
+            "linear.q8.multiply.weight",
+            &input,
+            None,
+            &mut target,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(target, vec![32.0, 96.0]);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(budget.peak_bytes() <= 96);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_argmax_accumulates_q8_0_without_f32_chunk_scratch() {
+        let path = temp_path("tile-linear-q8-0-argmax-direct");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q8_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q8.argmax.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q8_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut budget = MemoryBudget::new(96);
+
+        let actual = streaming_tile_linear_argmax_from_model(
+            &mut model,
+            "linear.q8.argmax.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, 1);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(budget.peak_bytes() <= 96);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn q8_0_batch1_row_fast_path_accumulates_complete_rows() {
+        let mut row0 = [0i8; 32];
+        let mut row1 = [0i8; 32];
+        row0.fill(1);
+        row1.fill(2);
+        let mut q8 = q8_0_block_bytes(1.0, &row0);
+        q8.extend_from_slice(&q8_0_block_bytes(1.0, &row1));
+
+        let input = vec![1.0f32; 32];
+        let mut output = vec![0.5f32, 1.5];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 32,
+            out_features: 2,
+        };
+
+        let used_fast_path = accumulate_q8_0_chunk_batch1_complete_rows(
+            &input,
+            &mut output,
+            &q8,
+            0,
+            config,
+            "linear.q8.rows.weight",
+        )
+        .unwrap();
+
+        assert!(used_fast_path);
+        assert_eq!(output, vec![32.5, 65.5]);
+    }
+
+    #[test]
+    fn q8_0_batch1_row_fast_path_declines_partial_rows() {
+        let mut q = [0i8; 32];
+        q.fill(1);
+        let q8 = q8_0_block_bytes(1.0, &q);
+        let input = vec![1.0f32; 48];
+        let mut output = vec![0.0f32; 2];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 48,
+            out_features: 2,
+        };
+
+        let used_fast_path = accumulate_q8_0_chunk_batch1_complete_rows(
+            &input,
+            &mut output,
+            &q8,
+            0,
+            config,
+            "linear.q8.partial.weight",
+        )
+        .unwrap();
+
+        assert!(!used_fast_path);
+        assert_eq!(output, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn q8_0_scaled_block_applies_scale_once() {
+        let mut q = [0i8; 32];
+        for (idx, value) in q.iter_mut().enumerate() {
+            *value = idx as i8 - 16;
+        }
+        let q8 = q8_0_block_bytes(0.5, &q);
+
+        let scaled = q8_0_scaled_block(&q8[2..34], 0.5);
+
+        assert_eq!(scaled[0], -8.0);
+        assert_eq!(scaled[16], 0.0);
+        assert_eq!(scaled[31], 7.5);
+    }
+
+    #[test]
+    fn f32_dot_32_batch4_accumulates_four_outputs() {
+        let mut weights = [0.0f32; 32];
+        weights[0] = 1.0;
+        weights[1] = 2.0;
+
+        let mut input = vec![0.0f32; 4 * 32];
+        input[0] = 1.0;
+        input[1] = 10.0;
+        input[32] = 2.0;
+        input[33] = 20.0;
+        input[64] = 3.0;
+        input[65] = 30.0;
+        input[96] = 4.0;
+        input[97] = 40.0;
+
+        let mut output = vec![0.5f32, 1.5, 2.5, 3.5];
+
+        accumulate_f32_dot_32_batch4(&weights, &input, 32, &mut output, 1, 0);
+
+        assert_eq!(output, vec![21.5, 43.5, 65.5, 87.5]);
+    }
+
+    #[test]
+    fn f32_dot_32_batch4_into_accumulates_existing_values() {
+        let mut weights = [0.0f32; 32];
+        weights[0] = 1.0;
+        weights[1] = 2.0;
+
+        let mut input = vec![0.0f32; 4 * 32];
+        input[0] = 1.0;
+        input[1] = 10.0;
+        input[32] = 2.0;
+        input[33] = 20.0;
+        input[64] = 3.0;
+        input[65] = 30.0;
+        input[96] = 4.0;
+        input[97] = 40.0;
+
+        let mut accumulators = vec![0.5f32, 1.5, 2.5, 3.5];
+
+        accumulate_f32_dot_32_batch4_into(&weights, &input, 32, &mut accumulators, 0);
+
+        assert_eq!(accumulators, vec![21.5, 43.5, 65.5, 87.5]);
+    }
+
+    #[test]
+    fn q8_0_batch1_multiply_row_fast_path_accumulates_complete_rows() {
+        let mut row0 = [0i8; 32];
+        let mut row1 = [0i8; 32];
+        row0.fill(1);
+        row1.fill(2);
+        let mut q8 = q8_0_block_bytes(1.0, &row0);
+        q8.extend_from_slice(&q8_0_block_bytes(1.0, &row1));
+
+        let input = vec![1.0f32; 32];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 32,
+            out_features: 2,
+        };
+        let mut target = vec![2.0f32, 3.0];
+        let mut state = StreamingLinearMultiplyIntoState::new(&mut target, None, config);
+
+        let used_fast_path = accumulate_q8_0_chunk_multiply_into_batch1_complete_rows(
+            &input,
+            &q8,
+            0,
+            config,
+            &mut state,
+            "linear.q8.multiply.rows.weight",
+        )
+        .unwrap();
+        state
+            .finish(config, "linear.q8.multiply.rows.weight")
+            .unwrap();
+
+        assert!(used_fast_path);
+        assert_eq!(target, vec![64.0, 192.0]);
+    }
+
+    #[test]
+    fn q8_0_batch1_argmax_row_fast_path_accumulates_complete_rows() {
+        let mut row0 = [0i8; 32];
+        let mut row1 = [0i8; 32];
+        row0.fill(1);
+        row1.fill(2);
+        let mut q8 = q8_0_block_bytes(1.0, &row0);
+        q8.extend_from_slice(&q8_0_block_bytes(1.0, &row1));
+
+        let input = vec![1.0f32; 32];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 32,
+            out_features: 2,
+        };
+        let mut state = StreamingLinearArgmaxState::new(None);
+
+        let used_fast_path = accumulate_q8_0_chunk_argmax_batch1_complete_rows(
+            &input,
+            &q8,
+            0,
+            config,
+            &mut state,
+            "linear.q8.argmax.rows.weight",
+        )
+        .unwrap();
+        let best = state.finish(config, "linear.q8.argmax.rows.weight").unwrap();
+
+        assert!(used_fast_path);
+        assert_eq!(best, 1);
     }
 
     fn add_f32_tensor(
@@ -603,8 +1074,8 @@ mod tests {
     fn streaming_tile_linear_argmax_candidate_rows_scores_only_candidates() {
         let path = temp_path("tile-linear-argmax-candidates-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0x4040,
-            0x0000, 0x3f80,
+            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0x4040, 0x0000,
+            0x3f80,
         ];
         let weight_f32: Vec<f32> = weight_bf16
             .iter()
@@ -656,8 +1127,8 @@ mod tests {
     fn streaming_tile_linear_argmax_candidate_rows_range_scores_only_candidates() {
         let path = temp_path("tile-linear-argmax-candidate-ranges-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0x4040,
-            0x0000, 0x3f80,
+            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0x4040, 0x0000,
+            0x3f80,
         ];
         let weight_f32: Vec<f32> = weight_bf16
             .iter()
@@ -766,9 +1237,9 @@ mod tests {
     fn streaming_tile_linear_argmax_with_rolling_records_stats() {
         let path = temp_path("tile-linear-argmax-bf16-rolling");
         let weight_bf16 = vec![
-            0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000,
-            0xbf00, 0x3f40, 0x3f80, 0x4000, 0x4040, 0xc040, 0x3f00, 0x3e80, 0x3f00,
-            0x3f80, 0x4000, 0x4040, 0x4080, 0x40a0,
+            0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000, 0xbf00,
+            0x3f40, 0x3f80, 0x4000, 0x4040, 0xc040, 0x3f00, 0x3e80, 0x3f00, 0x3f80, 0x4000, 0x4040,
+            0x4080, 0x40a0,
         ];
         let weight_f32: Vec<f32> = weight_bf16
             .iter()
@@ -1451,8 +1922,8 @@ mod tests {
     fn sparse_raw_bf16_linear_matches_manual_topk_projection() {
         let path = temp_path("sparse-linear-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
-            0x4000, 0x4040,
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80, 0x4000,
+            0x4040,
         ];
         let input = vec![1.0, -8.0, 2.0, 7.0];
         let selected = crate::select_top_abs_indices(&input, 2);
@@ -1496,16 +1967,16 @@ mod tests {
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
-            aip_exact_edge_layers: None,
-            aip_exact_prefix_layers: None,
-            aip_exact_periodic_layers: None,
-            aip_layer_topk_overrides: [0; 128],
-            aip_exact_edge_projection: None,
-            aip_exact_layer: None,
-            aip_exact_layer_projection: None,
+                aip_exact_edge_layers: None,
+                aip_exact_prefix_layers: None,
+                aip_exact_periodic_layers: None,
+                aip_layer_topk_overrides: [0; 128],
+                aip_exact_edge_projection: None,
+                aip_exact_layer: None,
+                aip_exact_layer_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
-            aip_lm_head_rescore_gap_milli: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1593,16 +2064,16 @@ mod tests {
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
-            aip_exact_edge_layers: None,
-            aip_exact_prefix_layers: None,
-            aip_exact_periodic_layers: None,
-            aip_layer_topk_overrides: [0; 128],
-            aip_exact_edge_projection: None,
-            aip_exact_layer: None,
-            aip_exact_layer_projection: None,
+                aip_exact_edge_layers: None,
+                aip_exact_prefix_layers: None,
+                aip_exact_periodic_layers: None,
+                aip_layer_topk_overrides: [0; 128],
+                aip_exact_edge_projection: None,
+                aip_exact_layer: None,
+                aip_exact_layer_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
-            aip_lm_head_rescore_gap_milli: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1654,8 +2125,8 @@ mod tests {
     fn input_tiled_sparse_raw_bf16_linear_matches_manual_topk_projection() {
         let path = temp_path("input-tiled-sparse-linear-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
-            0x4000, 0x4040,
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80, 0x4000,
+            0x4040,
         ];
         let input = vec![1.0, -8.0, 2.0, 7.0];
 
@@ -1707,16 +2178,16 @@ mod tests {
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
-            aip_exact_edge_layers: None,
-            aip_exact_prefix_layers: None,
-            aip_exact_periodic_layers: None,
-            aip_layer_topk_overrides: [0; 128],
-            aip_exact_edge_projection: None,
-            aip_exact_layer: None,
-            aip_exact_layer_projection: None,
+                aip_exact_edge_layers: None,
+                aip_exact_prefix_layers: None,
+                aip_exact_periodic_layers: None,
+                aip_layer_topk_overrides: [0; 128],
+                aip_exact_edge_projection: None,
+                aip_exact_layer: None,
+                aip_exact_layer_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
-            aip_lm_head_rescore_gap_milli: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1752,8 +2223,8 @@ mod tests {
     fn input_tiled_sparse_linear_uses_explicit_selected_indices() {
         let path = temp_path("input-tiled-sparse-linear-selected-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
-            0x4000, 0x4040,
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80, 0x4000,
+            0x4040,
         ];
         let input = vec![1.0, -8.0, 2.0, 7.0];
 
@@ -1889,16 +2360,16 @@ mod tests {
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
-            aip_exact_edge_layers: None,
-            aip_exact_prefix_layers: None,
-            aip_exact_periodic_layers: None,
-            aip_layer_topk_overrides: [0; 128],
-            aip_exact_edge_projection: None,
-            aip_exact_layer: None,
-            aip_exact_layer_projection: None,
+                aip_exact_edge_layers: None,
+                aip_exact_prefix_layers: None,
+                aip_exact_periodic_layers: None,
+                aip_layer_topk_overrides: [0; 128],
+                aip_exact_edge_projection: None,
+                aip_exact_layer: None,
+                aip_exact_layer_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
-            aip_lm_head_rescore_gap_milli: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1951,8 +2422,8 @@ mod tests {
     fn column_cached_sparse_raw_bf16_linear_matches_manual_topk_and_reuses_columns() {
         let path = temp_path("column-cache-sparse-linear-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
-            0x4000, 0x4040,
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80, 0x4000,
+            0x4040,
         ];
         let input = vec![1.0, -8.0, 2.0, 7.0];
 
@@ -2185,14 +2656,7 @@ mod tests {
             out_features: 8,
         };
         let weight_bf16: Vec<u16> = (0..config.out_features)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4040,
-                    0x4080 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x4000 + row as u16, 0x4040, 0x4080 + row as u16])
             .collect();
         let raw_bytes = bf16_bytes(&weight_bf16);
         let mut sequential = vec![0.0; config.out_features];
@@ -2235,24 +2699,10 @@ mod tests {
             out_features: 8,
         };
         let gate_bf16: Vec<u16> = (0..config.out_features)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4040,
-                    0x4080 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x4000 + row as u16, 0x4040, 0x4080 + row as u16])
             .collect();
         let up_bf16: Vec<u16> = (0..config.out_features)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4000 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x3f80, 0x4000 + row as u16, 0x4000 + row as u16])
             .collect();
         let gate_bytes = bf16_bytes(&gate_bf16);
         let up_bytes = bf16_bytes(&up_bf16);
@@ -2305,24 +2755,10 @@ mod tests {
             out_features: 8,
         };
         let gate_bf16: Vec<u16> = (4..8)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4040,
-                    0x4080 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x4000 + row as u16, 0x4040, 0x4080 + row as u16])
             .collect();
         let up_bf16: Vec<u16> = (4..8)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4000 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x3f80, 0x4000 + row as u16, 0x4000 + row as u16])
             .collect();
         let gate_bytes = bf16_bytes(&gate_bf16);
         let up_bytes = bf16_bytes(&up_bf16);

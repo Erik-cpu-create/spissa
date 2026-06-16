@@ -2590,6 +2590,7 @@ mod tests {
         let tokenizer = RllmTokenizer::from_metadata(&TokenizerMetadata {
             tokenizer_type: Some("hf-wordlevel".to_string()),
             id_to_token: vec!["A".to_string(), " B".to_string(), " C".to_string()],
+            bpe_merges: Vec::new(),
             unk_token_id: None,
             bos_token_id: None,
             eos_token_id: None,

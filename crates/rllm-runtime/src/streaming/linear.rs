@@ -78,7 +78,12 @@ impl SparseColumnCache {
         self.columns.len().saturating_add(count) <= self.max_columns
     }
 
-    fn has_column(&self, weight_name: &str, in_feature: usize, config: StreamingLinearConfig) -> bool {
+    fn has_column(
+        &self,
+        weight_name: &str,
+        in_feature: usize,
+        config: StreamingLinearConfig,
+    ) -> bool {
         let key = Self::key(weight_name, in_feature, config);
         self.columns.contains_key(&key)
     }
@@ -112,6 +117,90 @@ impl SparseColumnCache {
 
 pub fn input_tile_sidecar_weight_name(weight_name: &str) -> String {
     format!("{INPUT_TILE_SIDECAR_PREFIX}{weight_name}")
+}
+
+fn linear_weight_elements(config: StreamingLinearConfig) -> Result<usize> {
+    config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))
+}
+
+fn linear_weight_storage_bytes(
+    dtype: rllm_container::DType,
+    config: StreamingLinearConfig,
+) -> Result<usize> {
+    Ok(dtype.byte_size_for_elements(linear_weight_elements(config)?))
+}
+
+fn chunk_element_start_for_dtype(
+    dtype: rllm_container::DType,
+    byte_offset: usize,
+    weight_name: &str,
+) -> Result<usize> {
+    if let Some(block_bytes) = quantized_block_bytes(dtype) {
+        if !byte_offset.is_multiple_of(block_bytes) {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} {:?} chunk stream reached unaligned byte offset {byte_offset}",
+                dtype
+            )));
+        }
+        Ok((byte_offset / block_bytes) * 32)
+    } else {
+        let dtype_size = dtype.size_bytes();
+        if !byte_offset.is_multiple_of(dtype_size) {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
+            )));
+        }
+        Ok(byte_offset / dtype_size)
+    }
+}
+
+fn quantized_block_bytes(dtype: rllm_container::DType) -> Option<usize> {
+    match dtype {
+        rllm_container::DType::Q4_0 => Some(18),
+        rllm_container::DType::Q8_0 => Some(34),
+        _ => None,
+    }
+}
+
+fn quantized_elements_for_bytes(dtype: rllm_container::DType, bytes_len: usize) -> Result<usize> {
+    let block_bytes = quantized_block_bytes(dtype).ok_or_else(|| {
+        RuntimeError::InvalidTensorData(format!("{:?} is not a quantized block dtype", dtype))
+    })?;
+    if !bytes_len.is_multiple_of(block_bytes) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "{:?} byte len {} is not aligned to block size {}",
+            dtype, bytes_len, block_bytes
+        )));
+    }
+    Ok((bytes_len / block_bytes) * 32)
+}
+
+fn dequantize_quantized_chunk(
+    dtype: rllm_container::DType,
+    chunk_id: u64,
+    bytes: &[u8],
+) -> Result<Vec<f32>> {
+    let elements = quantized_elements_for_bytes(dtype, bytes.len()).map_err(|err| {
+        RuntimeError::InvalidTensorData(format!(
+            "quantized chunk {chunk_id} invalid {:?} data: {err}",
+            dtype
+        ))
+    })?;
+    let mut weights = vec![0.0f32; elements];
+    match dtype {
+        rllm_container::DType::Q4_0 => crate::dequantize::dequantize_q4_0(bytes, &mut weights),
+        rllm_container::DType::Q8_0 => crate::dequantize::dequantize_q8_0(bytes, &mut weights),
+        _ => {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "{:?} is not a quantized block dtype",
+                dtype
+            )));
+        }
+    }
+    Ok(weights)
 }
 
 /// Low-RAM PyTorch-style linear layer over a chunked `.rllm` weight tensor.
@@ -150,12 +239,7 @@ pub fn streaming_linear_from_model(
     let dtype_size = tensor.dtype.size_bytes();
     let mut byte_offset = 0usize;
     for chunk in chunks {
-        if !byte_offset.is_multiple_of(dtype_size) {
-            return Err(RuntimeError::InvalidTensorData(format!(
-                "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
-            )));
-        }
-        let element_start = byte_offset / dtype_size;
+        let element_start = chunk_element_start_for_dtype(tensor.dtype, byte_offset, weight_name)?;
         let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
             RuntimeError::InvalidTensorData(format!(
                 "chunk {} uncompressed size does not fit usize",
@@ -163,47 +247,110 @@ pub fn streaming_linear_from_model(
             ))
         })?;
 
-        model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
-            if bytes.len() != expected_chunk_bytes {
-                return Err(RuntimeError::InvalidTensorData(format!(
-                    "chunk {} decoded byte len {} does not match metadata {}",
-                    chunk.chunk_id,
-                    bytes.len(),
-                    expected_chunk_bytes
-                )));
-            }
-            if bytes.len() % dtype_size != 0 {
-                return Err(RuntimeError::InvalidTensorData(format!(
-                    "chunk {} byte len {} is not aligned to dtype size {}",
-                    chunk.chunk_id,
-                    bytes.len(),
-                    dtype_size
-                )));
-            }
-
-            let scratch_bytes = (bytes.len() / dtype_size) * std::mem::size_of::<f32>();
-            let scratch_label = format!("streaming f32 scratch chunk {}", chunk.chunk_id);
-            budget.reserve(scratch_bytes, scratch_label.clone())?;
-            let weights = match decode_to_f32(tensor.dtype, bytes) {
-                Ok(values) => values,
-                Err(err) => {
-                    budget.release(scratch_bytes, scratch_label)?;
-                    return Err(err);
+        if tensor.dtype == rllm_container::DType::Q8_0 {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
                 }
-            };
+                accumulate_q8_0_chunk(
+                    input,
+                    &mut output,
+                    bytes,
+                    element_start,
+                    config,
+                    weight_name,
+                )
+            })?;
+        } else if tensor.dtype.is_quantized() {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
 
-            let result = accumulate_weight_chunk(
-                input,
-                &mut output,
-                &weights,
-                element_start,
-                config,
-                weight_name,
-            );
-            drop(weights);
-            budget.release(scratch_bytes, scratch_label)?;
-            result
-        })?;
+                let scratch_bytes = quantized_elements_for_bytes(tensor.dtype, bytes.len())?
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        RuntimeError::Shape("quantized f32 scratch overflow".to_string())
+                    })?;
+                let scratch_label = format!(
+                    "streaming {:?} f32 scratch chunk {}",
+                    tensor.dtype, chunk.chunk_id
+                );
+                budget.reserve(scratch_bytes, scratch_label.clone())?;
+                let weights = match dequantize_quantized_chunk(tensor.dtype, chunk.chunk_id, bytes)
+                {
+                    Ok(values) => values,
+                    Err(err) => {
+                        budget.release(scratch_bytes, scratch_label)?;
+                        return Err(err);
+                    }
+                };
+
+                let result = accumulate_weight_chunk(
+                    input,
+                    &mut output,
+                    &weights,
+                    element_start,
+                    config,
+                    weight_name,
+                );
+                drop(weights);
+                budget.release(scratch_bytes, scratch_label)?;
+                result
+            })?;
+        } else {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                if bytes.len() % dtype_size != 0 {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} byte len {} is not aligned to dtype size {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        dtype_size
+                    )));
+                }
+
+                let scratch_bytes = (bytes.len() / dtype_size) * std::mem::size_of::<f32>();
+                let scratch_label = format!("streaming f32 scratch chunk {}", chunk.chunk_id);
+                budget.reserve(scratch_bytes, scratch_label.clone())?;
+                let weights = match decode_to_f32(tensor.dtype, bytes) {
+                    Ok(values) => values,
+                    Err(err) => {
+                        budget.release(scratch_bytes, scratch_label)?;
+                        return Err(err);
+                    }
+                };
+
+                let result = accumulate_weight_chunk(
+                    input,
+                    &mut output,
+                    &weights,
+                    element_start,
+                    config,
+                    weight_name,
+                );
+                drop(weights);
+                budget.release(scratch_bytes, scratch_label)?;
+                result
+            })?;
+        }
 
         byte_offset = byte_offset
             .checked_add(expected_chunk_bytes)
@@ -212,11 +359,7 @@ pub fn streaming_linear_from_model(
             })?;
     }
 
-    let expected_weight_bytes = config
-        .out_features
-        .checked_mul(config.in_features)
-        .and_then(|elements| elements.checked_mul(dtype_size))
-        .ok_or_else(|| RuntimeError::Shape("weight byte size overflow".to_string()))?;
+    let expected_weight_bytes = linear_weight_storage_bytes(tensor.dtype, config)?;
     if byte_offset != expected_weight_bytes {
         return Err(RuntimeError::InvalidTensorData(format!(
             "weight tensor {weight_name} streamed {byte_offset} bytes, expected {expected_weight_bytes}"
@@ -265,12 +408,7 @@ pub fn streaming_tile_linear_from_model(
     let dtype_size = tensor.dtype.size_bytes();
     let mut byte_offset = 0usize;
     for chunk in chunks {
-        if !byte_offset.is_multiple_of(dtype_size) {
-            return Err(RuntimeError::InvalidTensorData(format!(
-                "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
-            )));
-        }
-        let element_start = byte_offset / dtype_size;
+        let element_start = chunk_element_start_for_dtype(tensor.dtype, byte_offset, weight_name)?;
         let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
             RuntimeError::InvalidTensorData(format!(
                 "chunk {} uncompressed size does not fit usize",
@@ -329,6 +467,67 @@ pub fn streaming_tile_linear_from_model(
                     config.linear,
                     weight_name,
                 )
+            })?;
+        } else if tensor.dtype == rllm_container::DType::Q8_0 {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |quantized_bytes, _budget| {
+                if quantized_bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        quantized_bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_q8_0_chunk(
+                    input,
+                    &mut output,
+                    quantized_bytes,
+                    element_start,
+                    config.linear,
+                    weight_name,
+                )
+            })?;
+        } else if tensor.dtype.is_quantized() {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |quantized_bytes, budget| {
+                if quantized_bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        quantized_bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                let scratch_bytes =
+                    quantized_elements_for_bytes(tensor.dtype, quantized_bytes.len())?
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or_else(|| {
+                            RuntimeError::Shape("quantized f32 scratch overflow".to_string())
+                        })?;
+                let scratch_label =
+                    format!("streaming dequantized f32 scratch chunk {}", chunk.chunk_id);
+
+                budget.reserve(scratch_bytes, scratch_label.clone())?;
+                let weights =
+                    match dequantize_quantized_chunk(tensor.dtype, chunk.chunk_id, quantized_bytes)
+                    {
+                        Ok(values) => values,
+                        Err(err) => {
+                            budget.release(scratch_bytes, scratch_label)?;
+                            return Err(err);
+                        }
+                    };
+
+                let result = accumulate_weight_chunk(
+                    input,
+                    &mut output,
+                    &weights,
+                    element_start,
+                    config.linear,
+                    weight_name,
+                );
+                drop(weights);
+                budget.release(scratch_bytes, scratch_label)?;
+                result
             })?;
         } else {
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
@@ -410,12 +609,7 @@ pub fn streaming_tile_linear_from_model(
             })?;
     }
 
-    let expected_weight_bytes = config
-        .linear
-        .out_features
-        .checked_mul(config.linear.in_features)
-        .and_then(|elements| elements.checked_mul(dtype_size))
-        .ok_or_else(|| RuntimeError::Shape("weight byte size overflow".to_string()))?;
+    let expected_weight_bytes = linear_weight_storage_bytes(tensor.dtype, config.linear)?;
     if byte_offset != expected_weight_bytes {
         return Err(RuntimeError::InvalidTensorData(format!(
             "weight tensor {weight_name} streamed {byte_offset} bytes, expected {expected_weight_bytes}"
@@ -469,12 +663,7 @@ pub fn streaming_tile_linear_multiply_into_from_model(
     let mut byte_offset = 0usize;
     let mut state = StreamingLinearMultiplyIntoState::new(target, bias, config.linear);
     for chunk in chunks {
-        if !byte_offset.is_multiple_of(dtype_size) {
-            return Err(RuntimeError::InvalidTensorData(format!(
-                "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
-            )));
-        }
-        let element_start = byte_offset / dtype_size;
+        let element_start = chunk_element_start_for_dtype(tensor.dtype, byte_offset, weight_name)?;
         let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
             RuntimeError::InvalidTensorData(format!(
                 "chunk {} uncompressed size does not fit usize",
@@ -500,6 +689,66 @@ pub fn streaming_tile_linear_multiply_into_from_model(
                     &mut state,
                     weight_name,
                 )
+            })?;
+        } else if tensor.dtype == rllm_container::DType::Q8_0 {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_q8_0_chunk_multiply_into(
+                    input,
+                    bytes,
+                    element_start,
+                    config.linear,
+                    &mut state,
+                    weight_name,
+                )
+            })?;
+        } else if tensor.dtype.is_quantized() {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+
+                let scratch_bytes = quantized_elements_for_bytes(tensor.dtype, bytes.len())?
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        RuntimeError::Shape("quantized f32 scratch overflow".to_string())
+                    })?;
+                let scratch_label = format!(
+                    "streaming multiply {:?} f32 scratch chunk {}",
+                    tensor.dtype, chunk.chunk_id
+                );
+                budget.reserve(scratch_bytes, scratch_label.clone())?;
+                let weights = match dequantize_quantized_chunk(tensor.dtype, chunk.chunk_id, bytes)
+                {
+                    Ok(values) => values,
+                    Err(err) => {
+                        budget.release(scratch_bytes, scratch_label)?;
+                        return Err(err);
+                    }
+                };
+                let result = accumulate_weight_chunk_multiply_into(
+                    input,
+                    &weights,
+                    element_start,
+                    config.linear,
+                    &mut state,
+                    weight_name,
+                );
+                drop(weights);
+                budget.release(scratch_bytes, scratch_label)?;
+                result
             })?;
         } else {
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
@@ -581,12 +830,7 @@ pub fn streaming_tile_linear_multiply_into_from_model(
             })?;
     }
 
-    let expected_weight_bytes = config
-        .linear
-        .out_features
-        .checked_mul(config.linear.in_features)
-        .and_then(|elements| elements.checked_mul(dtype_size))
-        .ok_or_else(|| RuntimeError::Shape("weight byte size overflow".to_string()))?;
+    let expected_weight_bytes = linear_weight_storage_bytes(tensor.dtype, config.linear)?;
     if byte_offset != expected_weight_bytes {
         return Err(RuntimeError::InvalidTensorData(format!(
             "weight tensor {weight_name} streamed {byte_offset} bytes, expected {expected_weight_bytes}"
@@ -828,9 +1072,11 @@ pub fn streaming_sparse_tile_linear_from_model(
             }
         })?;
 
-        byte_offset = byte_offset.checked_add(expected_chunk_bytes).ok_or_else(|| {
-            RuntimeError::InvalidTensorData("sparse chunk byte offset overflow".to_string())
-        })?;
+        byte_offset = byte_offset
+            .checked_add(expected_chunk_bytes)
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData("sparse chunk byte offset overflow".to_string())
+            })?;
     }
 
     stats.record_sparse_projection(
@@ -994,7 +1240,8 @@ pub fn streaming_column_cached_sparse_silu_gate_up_from_model(
     let mut gate_acc = vec![0.0f32; config.linear.out_features];
     let mut up_acc = vec![0.0f32; config.linear.out_features];
     for &in_feature in &selected {
-        let Some(gate_column) = cache.column_ref(gate_weight_name, in_feature, config.linear) else {
+        let Some(gate_column) = cache.column_ref(gate_weight_name, in_feature, config.linear)
+        else {
             return Ok(None);
         };
         let Some(up_column) = cache.column_ref(up_weight_name, in_feature, config.linear) else {
@@ -1145,8 +1392,7 @@ fn streaming_input_tiled_sparse_tile_linear_selected_inner(
     let mut range_reads = 0usize;
     let mut range_bytes = 0usize;
     for &in_feature in selected {
-        let Some(range) =
-            input_tile_column_range(&chunks, in_feature, config.linear, dtype_size)?
+        let Some(range) = input_tile_column_range(&chunks, in_feature, config.linear, dtype_size)?
         else {
             return Ok(None);
         };
@@ -1168,7 +1414,8 @@ fn streaming_input_tiled_sparse_tile_linear_selected_inner(
             },
         )?;
         range_reads = range_reads.saturating_add(1);
-        range_bytes = range_bytes.saturating_add(usize::try_from(range.byte_len).unwrap_or(usize::MAX));
+        range_bytes =
+            range_bytes.saturating_add(usize::try_from(range.byte_len).unwrap_or(usize::MAX));
     }
 
     stats.record_sparse_projection(
@@ -1367,7 +1614,8 @@ fn input_tile_column_range(
         .ok_or_else(|| RuntimeError::Shape("input-tile column byte len overflow".to_string()))?;
 
     for chunk in chunks {
-        if chunk.codec_id != "rtc-raw-v1" || !chunk.uncompressed_size.is_multiple_of(dtype_size as u64)
+        if chunk.codec_id != "rtc-raw-v1"
+            || !chunk.uncompressed_size.is_multiple_of(dtype_size as u64)
         {
             return Ok(None);
         }
@@ -1377,14 +1625,12 @@ fn input_tile_column_range(
                 chunk.chunk_id
             ))
         })?;
-        let chunk_elements = usize::try_from(chunk.uncompressed_size)
-            .map_err(|_| {
-                RuntimeError::InvalidTensorData(format!(
-                    "input-tile chunk {} size overflows usize",
-                    chunk.chunk_id
-                ))
-            })?
-            / dtype_size;
+        let chunk_elements = usize::try_from(chunk.uncompressed_size).map_err(|_| {
+            RuntimeError::InvalidTensorData(format!(
+                "input-tile chunk {} size overflows usize",
+                chunk.chunk_id
+            ))
+        })? / dtype_size;
         let chunk_end = chunk_start.checked_add(chunk_elements).ok_or_else(|| {
             RuntimeError::InvalidTensorData("input-tile chunk element end overflow".to_string())
         })?;
@@ -1512,9 +1758,11 @@ fn ensure_sparse_columns(
             )
         })?;
 
-        byte_offset = byte_offset.checked_add(expected_chunk_bytes).ok_or_else(|| {
-            RuntimeError::InvalidTensorData("column cache byte offset overflow".to_string())
-        })?;
+        byte_offset = byte_offset
+            .checked_add(expected_chunk_bytes)
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData("column cache byte offset overflow".to_string())
+            })?;
     }
 
     for (in_feature, column) in new_columns {
@@ -1543,7 +1791,9 @@ fn fill_sparse_column_cache_chunk(
     let expected = config
         .out_features
         .checked_mul(config.in_features)
-        .ok_or_else(|| RuntimeError::Shape("column cache weight element count overflow".to_string()))?;
+        .ok_or_else(|| {
+            RuntimeError::Shape("column cache weight element count overflow".to_string())
+        })?;
     if element_end > expected {
         return Err(RuntimeError::InvalidTensorData(format!(
             "weight tensor {weight_name} column cache chunk elements {element_start}..{element_end} exceed expected {expected}"
@@ -1633,8 +1883,8 @@ pub fn streaming_sparse_silu_gate_up_from_model(
     let mut output = vec![0.0f32; config.linear.out_features];
     let dtype_size = gate_tensor.dtype.size_bytes();
     let worker_count = sparse_runtime_thread_count();
-    let use_parallel_rows =
-        worker_count > 1 && sparse_chunks_are_complete_rows(&gate_chunks, config.linear.in_features, dtype_size)?;
+    let use_parallel_rows = worker_count > 1
+        && sparse_chunks_are_complete_rows(&gate_chunks, config.linear.in_features, dtype_size)?;
     if use_parallel_rows {
         let mut byte_offset = 0usize;
         for (gate_chunk, up_chunk) in gate_chunks.iter().zip(up_chunks.iter()) {
@@ -1675,9 +1925,13 @@ pub fn streaming_sparse_silu_gate_up_from_model(
                 },
             )?;
 
-            byte_offset = byte_offset.checked_add(expected_chunk_bytes).ok_or_else(|| {
-                RuntimeError::InvalidTensorData("sparse gate/up byte offset overflow".to_string())
-            })?;
+            byte_offset = byte_offset
+                .checked_add(expected_chunk_bytes)
+                .ok_or_else(|| {
+                    RuntimeError::InvalidTensorData(
+                        "sparse gate/up byte offset overflow".to_string(),
+                    )
+                })?;
         }
     } else {
         let mut state = SiluGateUpState::new(&mut output);
@@ -1724,9 +1978,13 @@ pub fn streaming_sparse_silu_gate_up_from_model(
                 },
             )?;
 
-            byte_offset = byte_offset.checked_add(expected_chunk_bytes).ok_or_else(|| {
-                RuntimeError::InvalidTensorData("sparse gate/up byte offset overflow".to_string())
-            })?;
+            byte_offset = byte_offset
+                .checked_add(expected_chunk_bytes)
+                .ok_or_else(|| {
+                    RuntimeError::InvalidTensorData(
+                        "sparse gate/up byte offset overflow".to_string(),
+                    )
+                })?;
         }
         state.finish(config.linear, gate_weight_name)?;
     }
@@ -1967,10 +2225,14 @@ pub fn streaming_tile_linear_argmax_prefix_from_model(
 
         streamed_prefix_bytes = streamed_prefix_bytes
             .checked_add(bytes_to_stream)
-            .ok_or_else(|| RuntimeError::InvalidTensorData("prefix byte stream overflow".to_string()))?;
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData("prefix byte stream overflow".to_string())
+            })?;
         byte_offset = byte_offset
             .checked_add(expected_chunk_bytes)
-            .ok_or_else(|| RuntimeError::InvalidTensorData("chunk byte offset overflow".to_string()))?;
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData("chunk byte offset overflow".to_string())
+            })?;
     }
 
     if streamed_prefix_bytes != prefix_weight_bytes {
@@ -2026,7 +2288,10 @@ pub fn streaming_tile_linear_argmax_candidate_rows_from_model(
     let mut scores: Vec<(usize, f32)> = rows
         .iter()
         .map(|&row| {
-            let initial = bias.and_then(|values| values.get(row)).copied().unwrap_or(0.0);
+            let initial = bias
+                .and_then(|values| values.get(row))
+                .copied()
+                .unwrap_or(0.0);
             (row, initial)
         })
         .collect();
@@ -2036,7 +2301,9 @@ pub fn streaming_tile_linear_argmax_candidate_rows_from_model(
         .out_features
         .checked_mul(config.linear.in_features)
         .and_then(|elements| elements.checked_mul(dtype_size))
-        .ok_or_else(|| RuntimeError::Shape("candidate row weight byte size overflow".to_string()))?;
+        .ok_or_else(|| {
+            RuntimeError::Shape("candidate row weight byte size overflow".to_string())
+        })?;
 
     let mut byte_offset = 0usize;
     for chunk in chunks {
@@ -2078,9 +2345,13 @@ pub fn streaming_tile_linear_argmax_candidate_rows_from_model(
             )
         })?;
 
-        byte_offset = byte_offset.checked_add(expected_chunk_bytes).ok_or_else(|| {
-            RuntimeError::InvalidTensorData("candidate row chunk byte offset overflow".to_string())
-        })?;
+        byte_offset = byte_offset
+            .checked_add(expected_chunk_bytes)
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData(
+                    "candidate row chunk byte offset overflow".to_string(),
+                )
+            })?;
     }
 
     if byte_offset != expected_weight_bytes {
@@ -2089,10 +2360,9 @@ pub fn streaming_tile_linear_argmax_candidate_rows_from_model(
         )));
     }
 
-    let mut best = scores
-        .first()
-        .copied()
-        .ok_or_else(|| RuntimeError::InvalidTensorData("empty candidate row score set".to_string()))?;
+    let mut best = scores.first().copied().ok_or_else(|| {
+        RuntimeError::InvalidTensorData("empty candidate row score set".to_string())
+    })?;
     for &(row, score) in scores.iter().skip(1) {
         if score > best.1 {
             best = (row, score);
@@ -2145,7 +2415,10 @@ pub fn streaming_tile_linear_argmax_candidate_rows_range_from_model(
     let mut scores: Vec<(usize, f32)> = rows
         .iter()
         .map(|&row| {
-            let initial = bias.and_then(|values| values.get(row)).copied().unwrap_or(0.0);
+            let initial = bias
+                .and_then(|values| values.get(row))
+                .copied()
+                .unwrap_or(0.0);
             (row, initial)
         })
         .collect();
@@ -2155,7 +2428,9 @@ pub fn streaming_tile_linear_argmax_candidate_rows_range_from_model(
         .out_features
         .checked_mul(config.linear.in_features)
         .and_then(|elements| elements.checked_mul(dtype_size))
-        .ok_or_else(|| RuntimeError::Shape("candidate row weight byte size overflow".to_string()))?;
+        .ok_or_else(|| {
+            RuntimeError::Shape("candidate row weight byte size overflow".to_string())
+        })?;
 
     let mut byte_offset = 0usize;
     for chunk in chunks {
@@ -2198,13 +2473,14 @@ pub fn streaming_tile_linear_argmax_candidate_rows_range_from_model(
             }
 
             let local_element_start = overlap_start - element_start;
-            let range_byte_offset = local_element_start
-                .checked_mul(dtype_size)
-                .ok_or_else(|| RuntimeError::Shape("candidate row range byte offset overflow".to_string()))?;
+            let range_byte_offset =
+                local_element_start.checked_mul(dtype_size).ok_or_else(|| {
+                    RuntimeError::Shape("candidate row range byte offset overflow".to_string())
+                })?;
             let range_elements = overlap_end - overlap_start;
-            let range_byte_len = range_elements
-                .checked_mul(dtype_size)
-                .ok_or_else(|| RuntimeError::Shape("candidate row range byte len overflow".to_string()))?;
+            let range_byte_len = range_elements.checked_mul(dtype_size).ok_or_else(|| {
+                RuntimeError::Shape("candidate row range byte len overflow".to_string())
+            })?;
             let input_start = overlap_start - row_start;
             model.with_decoded_chunk_range(
                 chunk.chunk_id,
@@ -2224,11 +2500,13 @@ pub fn streaming_tile_linear_argmax_candidate_rows_range_from_model(
             )?;
         }
 
-        byte_offset = byte_offset.checked_add(expected_chunk_bytes).ok_or_else(|| {
-            RuntimeError::InvalidTensorData(
-                "candidate row range chunk byte offset overflow".to_string(),
-            )
-        })?;
+        byte_offset = byte_offset
+            .checked_add(expected_chunk_bytes)
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData(
+                    "candidate row range chunk byte offset overflow".to_string(),
+                )
+            })?;
     }
 
     if byte_offset != expected_weight_bytes {
@@ -2237,10 +2515,9 @@ pub fn streaming_tile_linear_argmax_candidate_rows_range_from_model(
         )));
     }
 
-    let mut best = scores
-        .first()
-        .copied()
-        .ok_or_else(|| RuntimeError::InvalidTensorData("empty candidate row score set".to_string()))?;
+    let mut best = scores.first().copied().ok_or_else(|| {
+        RuntimeError::InvalidTensorData("empty candidate row score set".to_string())
+    })?;
     for &(row, score) in scores.iter().skip(1) {
         if score > best.1 {
             best = (row, score);
@@ -2297,7 +2574,9 @@ fn accumulate_candidate_rows_raw_16bit_chunk(
     let expected = config
         .out_features
         .checked_mul(config.in_features)
-        .ok_or_else(|| RuntimeError::Shape("candidate row weight element count overflow".to_string()))?;
+        .ok_or_else(|| {
+            RuntimeError::Shape("candidate row weight element count overflow".to_string())
+        })?;
     if element_end > expected {
         return Err(RuntimeError::InvalidTensorData(format!(
             "weight tensor {weight_name} candidate row chunk elements {element_start}..{element_end} exceed expected {expected}"
@@ -2361,16 +2640,10 @@ pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
         )));
     }
 
-    let dtype_size = tensor.dtype.size_bytes();
     let mut byte_offset = 0usize;
     let mut state = StreamingLinearArgmaxState::new(bias);
     for chunk in chunks {
-        if !byte_offset.is_multiple_of(dtype_size) {
-            return Err(RuntimeError::InvalidTensorData(format!(
-                "weight tensor {weight_name} chunk stream reached unaligned byte offset {byte_offset} for dtype size {dtype_size}"
-            )));
-        }
-        let element_start = byte_offset / dtype_size;
+        let element_start = chunk_element_start_for_dtype(tensor.dtype, byte_offset, weight_name)?;
         let expected_chunk_bytes = usize::try_from(chunk.uncompressed_size).map_err(|_| {
             RuntimeError::InvalidTensorData(format!(
                 "chunk {} uncompressed size does not fit usize",
@@ -2404,7 +2677,63 @@ pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
                     rolling.as_deref_mut(),
                 )
             })?;
+        } else if tensor.dtype == rllm_container::DType::Q8_0 {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_q8_0_chunk_argmax(
+                    input,
+                    bytes,
+                    element_start,
+                    config.linear,
+                    &mut state,
+                    weight_name,
+                )
+            })?;
+        } else if tensor.dtype.is_quantized() {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                let weights = dequantize_quantized_chunk(tensor.dtype, chunk.chunk_id, bytes)?;
+                let scratch_bytes = weights
+                    .len()
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        RuntimeError::Shape("quantized argmax f32 scratch overflow".to_string())
+                    })?;
+                let scratch_label = format!(
+                    "streaming {:?} argmax f32 scratch chunk {} elements {}..{}",
+                    tensor.dtype,
+                    chunk.chunk_id,
+                    element_start,
+                    element_start + weights.len()
+                );
+                budget.reserve(scratch_bytes, scratch_label.clone())?;
+                let result = accumulate_weight_chunk_argmax(
+                    input,
+                    &weights,
+                    element_start,
+                    config.linear,
+                    &mut state,
+                    weight_name,
+                );
+                budget.release(scratch_bytes, scratch_label)?;
+                result
+            })?;
         } else {
+            let dtype_size = tensor.dtype.size_bytes();
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
                 if bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
@@ -2484,12 +2813,7 @@ pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
             })?;
     }
 
-    let expected_weight_bytes = config
-        .linear
-        .out_features
-        .checked_mul(config.linear.in_features)
-        .and_then(|elements| elements.checked_mul(dtype_size))
-        .ok_or_else(|| RuntimeError::Shape("weight byte size overflow".to_string()))?;
+    let expected_weight_bytes = linear_weight_storage_bytes(tensor.dtype, config.linear)?;
     if byte_offset != expected_weight_bytes {
         return Err(RuntimeError::InvalidTensorData(format!(
             "weight tensor {weight_name} streamed {byte_offset} bytes, expected {expected_weight_bytes}"

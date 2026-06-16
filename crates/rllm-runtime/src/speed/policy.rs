@@ -94,7 +94,8 @@ impl RamaExperimentalSpeedConfig {
             return false;
         }
         let Some(exact_layer) = self.aip_exact_layer else {
-            return self.aip_exact_layer_projection
+            return self
+                .aip_exact_layer_projection
                 .map(|exact| exact.matches(projection))
                 .unwrap_or(false);
         };

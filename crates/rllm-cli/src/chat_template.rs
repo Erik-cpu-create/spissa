@@ -6,6 +6,7 @@ use std::str::FromStr;
 pub enum ChatTemplateKind {
     Raw,
     Llama3,
+    ChatMl,
 }
 
 impl FromStr for ChatTemplateKind {
@@ -15,8 +16,9 @@ impl FromStr for ChatTemplateKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "raw" | "none" => Ok(Self::Raw),
             "llama3" | "llama-3" | "llama3-instruct" | "llama-3-instruct" => Ok(Self::Llama3),
+            "chatml" | "chat-ml" | "smollm" | "smollm2" => Ok(Self::ChatMl),
             other => Err(anyhow!(
-                "unknown chat template {other:?}; expected raw or llama3"
+                "unknown chat template {other:?}; expected raw, llama3, or chatml"
             )),
         }
     }
@@ -43,6 +45,12 @@ pub fn render_interactive_user_turn(
             system_prompt,
             user_text,
         ),
+        ChatTemplateKind::ChatMl => render_chatml_user_turn(
+            has_context,
+            previous_assistant_ended,
+            system_prompt,
+            user_text,
+        ),
     }
 }
 
@@ -61,6 +69,9 @@ pub fn stop_token_ids(
             &mut ids,
             tokenizer.token_id_for_raw_token("<|end_of_text|>"),
         );
+    } else if kind == ChatTemplateKind::ChatMl {
+        push_unique_token_id(&mut ids, tokenizer.token_id_for_raw_token("<|im_end|>"));
+        push_unique_token_id(&mut ids, tokenizer.token_id_for_raw_token("<|endoftext|>"));
     }
     ids
 }
@@ -89,6 +100,32 @@ fn render_llama3_user_turn(
     rendered.push_str(user_text.trim());
     rendered.push_str("<|eot_id|>");
     rendered.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+    rendered
+}
+
+fn render_chatml_user_turn(
+    has_context: bool,
+    previous_assistant_ended: bool,
+    system_prompt: Option<&str>,
+    user_text: &str,
+) -> String {
+    let mut rendered = String::new();
+    if !has_context {
+        rendered.push_str("<|im_start|>system\n");
+        let system_prompt = system_prompt
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or("You are a helpful AI assistant named SmolLM, trained by Hugging Face");
+        rendered.push_str(system_prompt);
+        rendered.push_str("<|im_end|>\n");
+    } else if !previous_assistant_ended {
+        rendered.push_str("<|im_end|>\n");
+    }
+
+    rendered.push_str("<|im_start|>user\n");
+    rendered.push_str(user_text.trim());
+    rendered.push_str("<|im_end|>\n");
+    rendered.push_str("<|im_start|>assistant\n");
     rendered
 }
 
@@ -161,6 +198,7 @@ mod tests {
                 "<|end_of_text|>".to_string(),
                 "<|eot_id|>".to_string(),
             ],
+            bpe_merges: Vec::new(),
             unk_token_id: None,
             bos_token_id: None,
             eos_token_id: None,
@@ -174,6 +212,55 @@ mod tests {
         assert_eq!(
             stop_token_ids(ChatTemplateKind::Raw, &tokenizer, Some(1)),
             vec![1]
+        );
+    }
+
+    #[test]
+    fn chatml_template_renders_default_system_and_generation_prompt() {
+        let rendered = render_interactive_user_turn(
+            ChatTemplateKind::ChatMl,
+            false,
+            true,
+            None,
+            "what is 2+2?",
+        );
+
+        assert_eq!(
+            rendered,
+            "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nwhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+
+    #[test]
+    fn chatml_template_forces_im_end_before_next_user_when_generation_hit_limit() {
+        let rendered =
+            render_interactive_user_turn(ChatTemplateKind::ChatMl, true, false, None, "next");
+
+        assert_eq!(
+            rendered,
+            "<|im_end|>\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+
+    #[test]
+    fn chatml_template_uses_im_end_stop_fallback() {
+        let tokenizer = RllmTokenizer::from_metadata(&TokenizerMetadata {
+            tokenizer_type: Some("hf-bpe".to_string()),
+            id_to_token: vec![
+                "<|endoftext|>".to_string(),
+                "<|im_start|>".to_string(),
+                "<|im_end|>".to_string(),
+            ],
+            bpe_merges: Vec::new(),
+            unk_token_id: None,
+            bos_token_id: None,
+            eos_token_id: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            stop_token_ids(ChatTemplateKind::ChatMl, &tokenizer, None),
+            vec![2, 0]
         );
     }
 }

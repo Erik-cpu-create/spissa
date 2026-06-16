@@ -59,10 +59,10 @@ pub enum RamaAipProjectionKind {
     Attention,
     MlpGateUp,
     MlpDown,
-    Mlp,              // Gate-Up and Down
-    AttentionGateUp,  // Attention and Gate-Up
-    AttentionDown,    // Attention and Down
-    All,              // All projections exact
+    Mlp,             // Gate-Up and Down
+    AttentionGateUp, // Attention and Gate-Up
+    AttentionDown,   // Attention and Down
+    All,             // All projections exact
 }
 
 impl RamaAipProjectionKind {
@@ -178,10 +178,14 @@ impl RamaExperimentalSpeedConfig {
                 std::env::var(RLLM_AIP_EDGE_TOPK_ENV).ok().as_deref(),
             ),
             aip_exact_edge_layers: parse_aip_exact_edge_layers(
-                std::env::var(RLLM_AIP_EXACT_EDGE_LAYERS_ENV).ok().as_deref(),
+                std::env::var(RLLM_AIP_EXACT_EDGE_LAYERS_ENV)
+                    .ok()
+                    .as_deref(),
             ),
             aip_exact_prefix_layers: parse_aip_exact_prefix_layers(
-                std::env::var(RLLM_AIP_EXACT_PREFIX_LAYERS_ENV).ok().as_deref(),
+                std::env::var(RLLM_AIP_EXACT_PREFIX_LAYERS_ENV)
+                    .ok()
+                    .as_deref(),
             ),
             aip_exact_periodic_layers: parse_aip_exact_periodic_layers(
                 std::env::var(RLLM_AIP_EXACT_PERIODIC_LAYERS_ENV)
@@ -325,9 +329,7 @@ pub fn parse_aip_policy(value: Option<&str>) -> Option<RamaAipPolicyKind> {
 }
 
 pub fn parse_aip_exact_prefix_layers(value: Option<&str>) -> Option<usize> {
-    value
-        .and_then(|v| v.parse().ok())
-        .filter(|v| *v > 0)
+    value.and_then(|v| v.parse().ok()).filter(|v| *v > 0)
 }
 
 pub fn parse_aip_lm_head_rows(value: Option<&str>) -> Option<usize> {
@@ -478,10 +480,13 @@ pub fn parse_aip_exact_edge_projection(value: Option<&str>) -> Option<RamaAipPro
         }
         Some("mlp-down" | "mlp_down" | "down") => Some(RamaAipProjectionKind::MlpDown),
         Some("mlp" | "mlps") => Some(RamaAipProjectionKind::Mlp),
-        Some("attention-gate-up" | "attention_gate_up" | "attention-gateup" | "attention_gateup" | "attn-gateup") => {
-            Some(RamaAipProjectionKind::AttentionGateUp)
+        Some(
+            "attention-gate-up" | "attention_gate_up" | "attention-gateup" | "attention_gateup"
+            | "attn-gateup",
+        ) => Some(RamaAipProjectionKind::AttentionGateUp),
+        Some("attention-down" | "attention_down" | "attn-down") => {
+            Some(RamaAipProjectionKind::AttentionDown)
         }
-        Some("attention-down" | "attention_down" | "attn-down") => Some(RamaAipProjectionKind::AttentionDown),
         Some("all") => Some(RamaAipProjectionKind::All),
         _ => None,
     }

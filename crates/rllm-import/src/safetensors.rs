@@ -309,7 +309,8 @@ mod tests {
                     "Hello": 0,
                     " world": 1,
                     "<unk>": 2
-                }
+                },
+                "merges": ["H ello", [" wor", "ld"]]
             },
             "added_tokens": [
                 {"id": 3, "content": "<|endoftext|>", "special": true}
@@ -323,6 +324,13 @@ mod tests {
         assert_eq!(
             tokenizer.id_to_token,
             ["Hello", " world", "<unk>", "<|endoftext|>"]
+        );
+        assert_eq!(
+            tokenizer.bpe_merges,
+            [
+                ("H".to_string(), "ello".to_string()),
+                (" wor".to_string(), "ld".to_string())
+            ]
         );
         assert_eq!(tokenizer.unk_token_id, Some(2));
         assert_eq!(tokenizer.eos_token_id, Some(3));

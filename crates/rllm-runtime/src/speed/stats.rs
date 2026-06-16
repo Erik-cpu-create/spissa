@@ -18,7 +18,8 @@ impl RamaLayerDriftProbeStats {
         self.samples = self.samples.saturating_add(other.samples);
         self.layers = self.layers.saturating_add(other.layers);
         self.mismatch_layers = self.mismatch_layers.saturating_add(other.mismatch_layers);
-        self.first_mismatch_layer = min_non_zero(self.first_mismatch_layer, other.first_mismatch_layer);
+        self.first_mismatch_layer =
+            min_non_zero(self.first_mismatch_layer, other.first_mismatch_layer);
         self.pre_mismatch_max_l2_milli = self
             .pre_mismatch_max_l2_milli
             .max(other.pre_mismatch_max_l2_milli);
@@ -27,7 +28,9 @@ impl RamaLayerDriftProbeStats {
             .max(other.pre_mismatch_max_cosine_gap_milli);
         self.max_l2_milli = self.max_l2_milli.max(other.max_l2_milli);
         self.max_cosine_gap_milli = self.max_cosine_gap_milli.max(other.max_cosine_gap_milli);
-        self.max_exact_margin_milli = self.max_exact_margin_milli.max(other.max_exact_margin_milli);
+        self.max_exact_margin_milli = self
+            .max_exact_margin_milli
+            .max(other.max_exact_margin_milli);
     }
 
     pub fn record(

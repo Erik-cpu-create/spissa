@@ -17,6 +17,18 @@ enum PackCodecPolicy {
     Huff,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackQuantizePolicy {
+    None,
+    Raw,
+    Q4_0,
+    Q4_0KeepIo,
+    Q4_0MlpOnly,
+    Q4_0AttentionOnly,
+    Q4AttentionQ8MlpKeepIo,
+    Q8TransformerKeepIo,
+}
+
 fn sha256_array(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -57,6 +69,94 @@ impl PackCodecPolicy {
     }
 }
 
+impl PackQuantizePolicy {
+    fn parse(raw: Option<&str>) -> Result<Self> {
+        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            None | Some("") => Ok(Self::None),
+            Some("raw") => Ok(Self::Raw),
+            Some("q4_0" | "q4-0") => Ok(Self::Q4_0),
+            Some("q4_0_keep_io" | "q4-0-keep-io") => Ok(Self::Q4_0KeepIo),
+            Some("q4_0_mlp_only" | "q4-0-mlp-only") => Ok(Self::Q4_0MlpOnly),
+            Some("q4_0_attention_only" | "q4-0-attention-only") => Ok(Self::Q4_0AttentionOnly),
+            Some("q4_attn_q8_mlp_keep_io" | "q4-attn-q8-mlp-keep-io") => {
+                Ok(Self::Q4AttentionQ8MlpKeepIo)
+            }
+            Some("q8_transformer_keep_io" | "q8-transformer-keep-io") => {
+                Ok(Self::Q8TransformerKeepIo)
+            }
+            Some(other) => {
+                anyhow::bail!(
+                    "unsupported --quantize {other:?}; expected one of: raw, q4_0, q4_0_keep_io, q4_0_mlp_only, q4_0_attention_only, q4_attn_q8_mlp_keep_io, q8_transformer_keep_io"
+                )
+            }
+        }
+    }
+
+    fn is_quantized(self) -> bool {
+        matches!(
+            self,
+            Self::Q4_0
+                | Self::Q4_0KeepIo
+                | Self::Q4_0MlpOnly
+                | Self::Q4_0AttentionOnly
+                | Self::Q4AttentionQ8MlpKeepIo
+                | Self::Q8TransformerKeepIo
+        )
+    }
+
+    fn allows_input_tile_sidecars(self) -> bool {
+        !self.is_quantized()
+    }
+
+    #[cfg(test)]
+    fn should_quantize_tensor(self, tensor_name: &str, shape: &[u64], dtype: DType) -> bool {
+        self.quantized_dtype_for_tensor(tensor_name, shape, dtype)
+            .is_some()
+    }
+
+    fn quantized_dtype_for_tensor(
+        self,
+        tensor_name: &str,
+        shape: &[u64],
+        dtype: DType,
+    ) -> Option<DType> {
+        if !self.is_quantized() || !is_quantizable_weight_tensor(tensor_name, shape, dtype) {
+            return None;
+        }
+        if self == Self::Q4AttentionQ8MlpKeepIo {
+            if is_llama_attention_projection_weight(tensor_name) {
+                return Some(DType::Q4_0);
+            }
+            if is_llama_mlp_projection_weight(tensor_name) {
+                return Some(DType::Q8_0);
+            }
+            return None;
+        }
+        if self == Self::Q8TransformerKeepIo {
+            return (is_llama_attention_projection_weight(tensor_name)
+                || is_llama_mlp_projection_weight(tensor_name))
+            .then_some(DType::Q8_0);
+        }
+        if self == Self::Q4_0MlpOnly {
+            return is_llama_mlp_projection_weight(tensor_name).then_some(DType::Q4_0);
+        }
+        if self == Self::Q4_0AttentionOnly {
+            return is_llama_attention_projection_weight(tensor_name).then_some(DType::Q4_0);
+        }
+        if self == Self::Q4_0KeepIo && is_llama_lm_head_weight(tensor_name) {
+            return None;
+        }
+        Some(DType::Q4_0)
+    }
+}
+
+fn is_quantizable_weight_tensor(tensor_name: &str, shape: &[u64], dtype: DType) -> bool {
+    tensor_name.contains(".weight")
+        && shape.len() >= 2
+        && shape.iter().product::<u64>() >= 128
+        && matches!(dtype, DType::Fp16 | DType::Bf16 | DType::Fp32)
+}
+
 pub fn run(
     input: &str,
     output: &str,
@@ -71,9 +171,11 @@ pub fn run(
     config: Option<&str>,
     tokenizer: Option<&str>,
     no_tokenizer: bool,
+    quantize: Option<&str>,
 ) -> Result<()> {
     let chunk_size_bytes = parse_size(chunk_size)?;
     let codec_policy = PackCodecPolicy::parse(codec_policy)?;
+    let quantize_policy = PackQuantizePolicy::parse(quantize)?;
     let range_checksum_size_bytes = match range_checksum_size.map(parse_size).transpose()? {
         Some(0) => anyhow::bail!("--range-checksum-size must be greater than zero"),
         other => other,
@@ -143,7 +245,7 @@ pub fn run(
         model_name: model_name.clone(),
         architecture,
         source_format: "safetensors".to_string(),
-        lossless: true,
+        lossless: !quantize_policy.is_quantized(),
         default_context_length,
         tokenizer_type,
         created_by: "rllm-cli".to_string(),
@@ -179,7 +281,7 @@ pub fn run(
         );
 
         // Read tensor data
-        let tensor_data = reader.read_tensor(tensor_name)?;
+        let mut tensor_data = reader.read_tensor(tensor_name)?;
         let tensor_meta = reader.to_rllm_meta(tensor_name)?;
 
         // Update tensor ID
@@ -187,18 +289,35 @@ pub fn run(
         let tensor_id = next_tensor_id;
         next_tensor_id = next_tensor_id.saturating_add(1);
         meta.tensor_id = tensor_id;
-        let effective_chunk_size_bytes = if let Some(tile_elements) = tile_block_elements {
-            let dtype_size = meta.dtype.size_bytes();
-            tile_elements.checked_mul(dtype_size).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--tile-block-elements overflow for tensor {} with dtype size {}",
-                    tensor_name,
-                    dtype_size
-                )
-            })?
-        } else {
-            chunk_size_bytes
-        };
+
+        // Apply Q4_0 quantization if requested and applicable
+        let quantized_dtype =
+            quantize_policy.quantized_dtype_for_tensor(tensor_name, &meta.shape, meta.dtype);
+
+        if let Some(target_dtype) = quantized_dtype {
+            println!("  Quantizing {} to {:?}...", tensor_name, target_dtype);
+            let quantized = match target_dtype {
+                rllm_container::DType::Q4_0 => {
+                    quantize_to_q4_0(&tensor_data, meta.dtype, &meta.shape)?
+                }
+                rllm_container::DType::Q8_0 => {
+                    quantize_to_q8_0(&tensor_data, meta.dtype, &meta.shape)?
+                }
+                other => anyhow::bail!("unsupported quantized target dtype {:?}", other),
+            };
+            meta.dtype = target_dtype;
+            meta.original_size_bytes = quantized.len() as u64;
+            meta.original_sha256 = sha256_array(&quantized);
+            tensor_data = quantized;
+        }
+
+        let effective_chunk_size_bytes = effective_chunk_size_bytes_for_tensor(
+            meta.dtype,
+            &meta.shape,
+            chunk_size_bytes,
+            tile_block_elements,
+            tensor_name,
+        )?;
         if effective_chunk_size_bytes == 0 {
             anyhow::bail!("effective chunk size for tensor {} is zero", tensor_name);
         }
@@ -266,11 +385,11 @@ pub fn run(
             total_compressed += encoded.data.len();
         }
 
-        let should_write_input_tile_sidecar = (llama_mlp_input_tiles
-            && is_llama_mlp_projection_weight(tensor_name))
-            || (llama_attention_input_tiles && is_llama_attention_projection_weight(tensor_name));
-        let should_write_input_tile_sidecar = should_write_input_tile_sidecar
-            || (llama_lm_head_input_tiles && is_llama_lm_head_weight(tensor_name));
+        let should_write_input_tile_sidecar = quantize_policy.allows_input_tile_sidecars()
+            && ((llama_mlp_input_tiles && is_llama_mlp_projection_weight(tensor_name))
+                || (llama_attention_input_tiles
+                    && is_llama_attention_projection_weight(tensor_name))
+                || (llama_lm_head_input_tiles && is_llama_lm_head_weight(tensor_name)));
         if should_write_input_tile_sidecar {
             let sidecar_tensor_id = next_tensor_id;
             next_tensor_id = next_tensor_id.saturating_add(1);
@@ -309,7 +428,9 @@ pub fn run(
             tile_block_aligned_tensors, tile_elements
         );
     }
-    if llama_mlp_input_tiles || llama_attention_input_tiles || llama_lm_head_input_tiles {
+    if quantize_policy.allows_input_tile_sidecars()
+        && (llama_mlp_input_tiles || llama_attention_input_tiles || llama_lm_head_input_tiles)
+    {
         println!(
             "Input-tile sidecars: {} tensor(s), {} chunk(s), {} feature range(s), {} feature(s) per chunk",
             input_tile_sidecar_tensors,
@@ -418,6 +539,57 @@ fn input_tile_range_specs(
         .collect()
 }
 
+fn effective_chunk_size_bytes_for_tensor(
+    dtype: rllm_container::DType,
+    shape: &[u64],
+    chunk_size_bytes: usize,
+    tile_block_elements: Option<usize>,
+    tensor_name: &str,
+) -> Result<usize> {
+    if let Some(block_bytes) = quantized_block_bytes(dtype) {
+        let block_aligned = (chunk_size_bytes / block_bytes) * block_bytes;
+        if let Some(row_bytes) = quantized_row_bytes(dtype, shape) {
+            if row_bytes <= chunk_size_bytes {
+                return Ok((chunk_size_bytes / row_bytes) * row_bytes);
+            }
+        }
+        return Ok(block_aligned);
+    }
+
+    if let Some(tile_elements) = tile_block_elements {
+        let dtype_size = dtype.size_bytes();
+        return tile_elements.checked_mul(dtype_size).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--tile-block-elements overflow for tensor {} with dtype size {}",
+                tensor_name,
+                dtype_size
+            )
+        });
+    }
+
+    Ok(chunk_size_bytes)
+}
+
+fn quantized_block_bytes(dtype: rllm_container::DType) -> Option<usize> {
+    match dtype {
+        rllm_container::DType::Q4_0 => Some(18),
+        rllm_container::DType::Q8_0 => Some(34),
+        _ => None,
+    }
+}
+
+fn quantized_row_bytes(dtype: rllm_container::DType, shape: &[u64]) -> Option<usize> {
+    if shape.len() != 2 {
+        return None;
+    }
+    let in_features = usize::try_from(shape[1]).ok()?;
+    if in_features == 0 || !in_features.is_multiple_of(32) {
+        return None;
+    }
+    let block_bytes = quantized_block_bytes(dtype)?;
+    Some((in_features / 32) * block_bytes)
+}
+
 fn write_input_tile_sidecar_tensor(
     writer: &mut RllmWriter,
     tensor_id: u64,
@@ -519,11 +691,28 @@ fn resolve_tokenizer_path(
     sibling.exists().then_some(sibling)
 }
 
+fn quantize_to_q4_0(
+    raw_data: &[u8],
+    dtype: rllm_container::DType,
+    shape: &[u64],
+) -> Result<Vec<u8>> {
+    rllm_runtime::quantize_to_q4_0(raw_data, dtype, shape).map_err(|e| anyhow::anyhow!(e))
+}
+
+fn quantize_to_q8_0(
+    raw_data: &[u8],
+    dtype: rllm_container::DType,
+    shape: &[u64],
+) -> Result<Vec<u8>> {
+    rllm_runtime::quantize_to_q8_0(raw_data, dtype, shape).map_err(|e| anyhow::anyhow!(e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        input_tile_range_specs, input_tile_sidecar_bytes, is_llama_attention_projection_weight,
-        is_llama_lm_head_weight, is_llama_mlp_projection_weight, PackCodecPolicy,
+        effective_chunk_size_bytes_for_tensor, input_tile_range_specs, input_tile_sidecar_bytes,
+        is_llama_attention_projection_weight, is_llama_lm_head_weight,
+        is_llama_mlp_projection_weight, PackCodecPolicy, PackQuantizePolicy,
     };
 
     #[test]
@@ -551,6 +740,249 @@ mod tests {
     #[test]
     fn pack_codec_policy_rejects_unknown_values() {
         assert!(PackCodecPolicy::parse("zstd").is_err());
+    }
+
+    #[test]
+    fn pack_quantize_policy_accepts_raw_and_q4_0_aliases() {
+        assert_eq!(
+            PackQuantizePolicy::parse(None).unwrap(),
+            PackQuantizePolicy::None
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("")).unwrap(),
+            PackQuantizePolicy::None
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("raw")).unwrap(),
+            PackQuantizePolicy::Raw
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4_0")).unwrap(),
+            PackQuantizePolicy::Q4_0
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4-0")).unwrap(),
+            PackQuantizePolicy::Q4_0
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4_0_keep_io")).unwrap(),
+            PackQuantizePolicy::Q4_0KeepIo
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4-0-keep-io")).unwrap(),
+            PackQuantizePolicy::Q4_0KeepIo
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4_0_mlp_only")).unwrap(),
+            PackQuantizePolicy::Q4_0MlpOnly
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4-0-mlp-only")).unwrap(),
+            PackQuantizePolicy::Q4_0MlpOnly
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4_0_attention_only")).unwrap(),
+            PackQuantizePolicy::Q4_0AttentionOnly
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4-0-attention-only")).unwrap(),
+            PackQuantizePolicy::Q4_0AttentionOnly
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4_attn_q8_mlp_keep_io")).unwrap(),
+            PackQuantizePolicy::Q4AttentionQ8MlpKeepIo
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q8_transformer_keep_io")).unwrap(),
+            PackQuantizePolicy::Q8TransformerKeepIo
+        );
+    }
+
+    #[test]
+    fn pack_quantize_policy_rejects_unknown_values() {
+        assert!(PackQuantizePolicy::parse(Some("int4")).is_err());
+    }
+
+    #[test]
+    fn q4_0_keep_io_preserves_embedding_and_lm_head_weights() {
+        assert!(PackQuantizePolicy::Q4_0.should_quantize_tensor(
+            "model.embed_tokens.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(PackQuantizePolicy::Q4_0.should_quantize_tensor(
+            "lm_head.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(!PackQuantizePolicy::Q4_0KeepIo.should_quantize_tensor(
+            "model.embed_tokens.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(!PackQuantizePolicy::Q4_0KeepIo.should_quantize_tensor(
+            "lm_head.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(PackQuantizePolicy::Q4_0KeepIo.should_quantize_tensor(
+            "model.layers.0.mlp.gate_proj.weight",
+            &[1536, 576],
+            rllm_container::DType::Bf16
+        ));
+    }
+
+    #[test]
+    fn q4_0_mlp_only_quantizes_mlp_and_preserves_attention_and_io_weights() {
+        assert!(!PackQuantizePolicy::Q4_0MlpOnly.should_quantize_tensor(
+            "model.embed_tokens.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(!PackQuantizePolicy::Q4_0MlpOnly.should_quantize_tensor(
+            "lm_head.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(!PackQuantizePolicy::Q4_0MlpOnly.should_quantize_tensor(
+            "model.layers.0.self_attn.q_proj.weight",
+            &[576, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(PackQuantizePolicy::Q4_0MlpOnly.should_quantize_tensor(
+            "model.layers.0.mlp.gate_proj.weight",
+            &[1536, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(PackQuantizePolicy::Q4_0MlpOnly.should_quantize_tensor(
+            "model.layers.0.mlp.up_proj.weight",
+            &[1536, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(PackQuantizePolicy::Q4_0MlpOnly.should_quantize_tensor(
+            "model.layers.0.mlp.down_proj.weight",
+            &[576, 1536],
+            rllm_container::DType::Bf16
+        ));
+    }
+
+    #[test]
+    fn q4_0_attention_only_quantizes_attention_and_preserves_mlp_and_io_weights() {
+        assert!(
+            !PackQuantizePolicy::Q4_0AttentionOnly.should_quantize_tensor(
+                "model.embed_tokens.weight",
+                &[49152, 576],
+                rllm_container::DType::Bf16
+            )
+        );
+        assert!(
+            !PackQuantizePolicy::Q4_0AttentionOnly.should_quantize_tensor(
+                "model.layers.0.mlp.gate_proj.weight",
+                &[1536, 576],
+                rllm_container::DType::Bf16
+            )
+        );
+        assert!(
+            PackQuantizePolicy::Q4_0AttentionOnly.should_quantize_tensor(
+                "model.layers.0.self_attn.q_proj.weight",
+                &[576, 576],
+                rllm_container::DType::Bf16
+            )
+        );
+        assert!(
+            PackQuantizePolicy::Q4_0AttentionOnly.should_quantize_tensor(
+                "model.layers.0.self_attn.k_proj.weight",
+                &[192, 576],
+                rllm_container::DType::Bf16
+            )
+        );
+        assert!(
+            PackQuantizePolicy::Q4_0AttentionOnly.should_quantize_tensor(
+                "model.layers.0.self_attn.v_proj.weight",
+                &[192, 576],
+                rllm_container::DType::Bf16
+            )
+        );
+        assert!(
+            PackQuantizePolicy::Q4_0AttentionOnly.should_quantize_tensor(
+                "model.layers.0.self_attn.o_proj.weight",
+                &[576, 576],
+                rllm_container::DType::Bf16
+            )
+        );
+    }
+
+    #[test]
+    fn q4_attention_q8_mlp_keep_io_uses_mixed_quantization() {
+        assert_eq!(
+            PackQuantizePolicy::Q4AttentionQ8MlpKeepIo.quantized_dtype_for_tensor(
+                "model.embed_tokens.weight",
+                &[49152, 576],
+                rllm_container::DType::Bf16
+            ),
+            None
+        );
+        assert_eq!(
+            PackQuantizePolicy::Q4AttentionQ8MlpKeepIo.quantized_dtype_for_tensor(
+                "model.layers.0.self_attn.q_proj.weight",
+                &[576, 576],
+                rllm_container::DType::Bf16
+            ),
+            Some(rllm_container::DType::Q4_0)
+        );
+        assert_eq!(
+            PackQuantizePolicy::Q4AttentionQ8MlpKeepIo.quantized_dtype_for_tensor(
+                "model.layers.0.mlp.gate_proj.weight",
+                &[1536, 576],
+                rllm_container::DType::Bf16
+            ),
+            Some(rllm_container::DType::Q8_0)
+        );
+    }
+
+    #[test]
+    fn q8_transformer_keep_io_quantizes_attention_and_mlp_to_q8() {
+        assert_eq!(
+            PackQuantizePolicy::Q8TransformerKeepIo.quantized_dtype_for_tensor(
+                "model.embed_tokens.weight",
+                &[49152, 576],
+                rllm_container::DType::Bf16
+            ),
+            None
+        );
+        assert_eq!(
+            PackQuantizePolicy::Q8TransformerKeepIo.quantized_dtype_for_tensor(
+                "model.layers.0.self_attn.q_proj.weight",
+                &[576, 576],
+                rllm_container::DType::Bf16
+            ),
+            Some(rllm_container::DType::Q8_0)
+        );
+        assert_eq!(
+            PackQuantizePolicy::Q8TransformerKeepIo.quantized_dtype_for_tensor(
+                "model.layers.0.mlp.down_proj.weight",
+                &[576, 1536],
+                rllm_container::DType::Bf16
+            ),
+            Some(rllm_container::DType::Q8_0)
+        );
+    }
+
+    #[test]
+    fn quantized_2d_chunk_size_aligns_to_row_bytes_for_q8_fast_path() {
+        let chunk_size = effective_chunk_size_bytes_for_tensor(
+            rllm_container::DType::Q8_0,
+            &[8192, 2048],
+            1_048_576,
+            None,
+            "model.layers.0.mlp.gate_proj.weight",
+        )
+        .unwrap();
+
+        let q8_row_bytes = (2048 / 32) * 34;
+        assert_eq!(q8_row_bytes, 2176);
+        assert_eq!(chunk_size % q8_row_bytes, 0);
+        assert_eq!(chunk_size, 1_046_656);
     }
 
     #[test]
