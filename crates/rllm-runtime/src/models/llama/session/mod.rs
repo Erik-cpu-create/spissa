@@ -64,7 +64,6 @@ pub struct LlamaRamaSessionAdapter<'a> {
     lm_head_phrase_novelty_state: LmHeadPhraseNoveltyState,
 }
 
-
 include!("validation.rs");
 include!("lm_head.rs");
 
@@ -240,10 +239,6 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
     pub(crate) fn enable_layer_drift_probe_for_test(&mut self, enabled: bool) {
         self.layer_drift_probe = enabled;
     }
-
-
-
-
 
     fn append_tokens_inner(
         &mut self,
@@ -638,7 +633,6 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
 
 include!("drift_probe.rs");
 
-
 impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
     fn context_len(&self) -> usize {
         self.caches.first().map(KvCache::len).unwrap_or(0)
@@ -693,11 +687,8 @@ impl RamaSessionAdapter for LlamaRamaSessionAdapter<'_> {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
-
 
     include!("tests_core.rs");
     include!("tests_speed.rs");
