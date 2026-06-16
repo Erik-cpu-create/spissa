@@ -688,6 +688,29 @@ mod tests {
     }
 
     #[test]
+    fn f32_dot_32_batch4_into_accumulates_existing_values() {
+        let mut weights = [0.0f32; 32];
+        weights[0] = 1.0;
+        weights[1] = 2.0;
+
+        let mut input = vec![0.0f32; 4 * 32];
+        input[0] = 1.0;
+        input[1] = 10.0;
+        input[32] = 2.0;
+        input[33] = 20.0;
+        input[64] = 3.0;
+        input[65] = 30.0;
+        input[96] = 4.0;
+        input[97] = 40.0;
+
+        let mut accumulators = vec![0.5f32, 1.5, 2.5, 3.5];
+
+        accumulate_f32_dot_32_batch4_into(&weights, &input, 32, &mut accumulators, 0);
+
+        assert_eq!(accumulators, vec![21.5, 43.5, 65.5, 87.5]);
+    }
+
+    #[test]
     fn q8_0_batch1_multiply_row_fast_path_accumulates_complete_rows() {
         let mut row0 = [0i8; 32];
         let mut row1 = [0i8; 32];

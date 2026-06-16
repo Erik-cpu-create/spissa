@@ -393,7 +393,30 @@ fn accumulate_q8_0_chunk_multiply_into(
         let out_feature = block_global_start / config.in_features;
         let in_feature = block_global_start % config.in_features;
 
-        if in_feature + block_len <= config.in_features {
+        if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
+            advance_multiply_state_to_row(state, out_feature, config, weight_name)?;
+            let scaled = q8_0_scaled_block(qs, scale);
+            let mut batch_idx = 0usize;
+            while batch_idx + 4 <= config.batch {
+                let input_start = batch_idx * config.in_features + in_feature;
+                accumulate_f32_dot_32_batch4_into(
+                    &scaled,
+                    &input[input_start..],
+                    config.in_features,
+                    &mut state.current_acc,
+                    batch_idx,
+                );
+                batch_idx += 4;
+            }
+            while batch_idx < config.batch {
+                let input_start = batch_idx * config.in_features + in_feature;
+                state.current_acc[batch_idx] += f32_dot_32(&scaled, &input[input_start..]);
+                batch_idx += 1;
+            }
+            if in_feature + block_len == config.in_features {
+                state.finish_current(config, weight_name)?;
+            }
+        } else if in_feature + block_len <= config.in_features {
             advance_multiply_state_to_row(state, out_feature, config, weight_name)?;
             for batch_idx in 0..config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
@@ -689,6 +712,32 @@ fn accumulate_f32_dot_32_batch4(
     output[output_stride + out_feature] = acc1;
     output[output_stride * 2 + out_feature] = acc2;
     output[output_stride * 3 + out_feature] = acc3;
+}
+
+fn accumulate_f32_dot_32_batch4_into(
+    weights: &[f32; 32],
+    input: &[f32],
+    input_stride: usize,
+    accumulators: &mut [f32],
+    accumulator_start: usize,
+) {
+    let mut acc0 = accumulators[accumulator_start];
+    let mut acc1 = accumulators[accumulator_start + 1];
+    let mut acc2 = accumulators[accumulator_start + 2];
+    let mut acc3 = accumulators[accumulator_start + 3];
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weight = weights[idx];
+        acc0 += weight * input[idx];
+        acc1 += weight * input[input_stride + idx];
+        acc2 += weight * input[input_stride * 2 + idx];
+        acc3 += weight * input[input_stride * 3 + idx];
+        idx += 1;
+    }
+    accumulators[accumulator_start] = acc0;
+    accumulators[accumulator_start + 1] = acc1;
+    accumulators[accumulator_start + 2] = acc2;
+    accumulators[accumulator_start + 3] = acc3;
 }
 
 fn advance_multiply_state_to_row(
