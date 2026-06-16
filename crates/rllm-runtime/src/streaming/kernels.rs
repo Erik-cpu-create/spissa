@@ -251,6 +251,11 @@ fn accumulate_q8_0_chunk(
     let mut normal_batch4_elapsed = std::time::Duration::ZERO;
     let mut normal_batch4_calls = 0u64;
     let mut normal_batch4_items = 0u64;
+    let mut normal_batch4_setup_elapsed = std::time::Duration::ZERO;
+    let mut normal_batch4_setup_calls = 0u64;
+    let mut normal_batch4_kernel_elapsed = std::time::Duration::ZERO;
+    let mut normal_batch4_kernel_calls = 0u64;
+    let mut normal_batch4_kernel_items = 0u64;
     let mut normal_tail_elapsed = std::time::Duration::ZERO;
     let mut normal_tail_calls = 0u64;
     let mut normal_tail_items = 0u64;
@@ -289,8 +294,15 @@ fn accumulate_q8_0_chunk(
             let batch4_start_idx = batch_idx;
             let batch4_start = profile_enabled.then(Instant::now);
             while batch_idx + 4 <= config.batch {
+                let setup_start = profile_enabled.then(Instant::now);
                 let input_start = batch_idx * config.in_features + in_feature;
                 let output_start = batch_idx * config.out_features;
+                if let Some(setup_start) = setup_start {
+                    normal_batch4_setup_elapsed += setup_start.elapsed();
+                    normal_batch4_setup_calls += 1;
+                }
+
+                let kernel_start = profile_enabled.then(Instant::now);
                 accumulate_f32_dot_32_batch4_reevec(
                     &scaled,
                     &input[input_start..],
@@ -299,6 +311,11 @@ fn accumulate_q8_0_chunk(
                     config.out_features,
                     out_feature,
                 );
+                if let Some(kernel_start) = kernel_start {
+                    normal_batch4_kernel_elapsed += kernel_start.elapsed();
+                    normal_batch4_kernel_calls += 1;
+                    normal_batch4_kernel_items += 4;
+                }
                 batch_idx += 4;
             }
             if let Some(batch4_start) = batch4_start {
@@ -389,6 +406,22 @@ fn accumulate_q8_0_chunk(
             0,
             normal_batch4_items,
             normal_batch4_elapsed,
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalBatch4Setup,
+            normal_batch4_setup_calls,
+            normal_batch4_setup_calls,
+            0,
+            0,
+            normal_batch4_setup_elapsed,
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalBatch4Kernel,
+            normal_batch4_kernel_calls,
+            normal_batch4_kernel_calls,
+            0,
+            normal_batch4_kernel_items,
+            normal_batch4_kernel_elapsed,
         );
         record_q8_kernel_path(
             Q8KernelPath::BatchGt1NormalTail,
