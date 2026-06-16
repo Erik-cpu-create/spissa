@@ -54,6 +54,8 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
     let input = deterministic_input(config.batch, config.in_features);
     let q8 = deterministic_q8_blocks(config.blocks_per_row);
     let scale = 0.125f32;
+    #[cfg(target_arch = "aarch64")]
+    let prescaled_sidecar = prescaled_sidecar_blocks(&q8, scale);
 
     let (baseline_ns, baseline_output) = time_variant(config.iters, config.batch, || {
         baseline_i8_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
@@ -156,6 +158,22 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         });
         results.push(Q8KernelBenchResult {
             variant: "reeduo_neon_block64_batch4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reeside_prescaled_f32_batch4(
+                &prescaled_sidecar,
+                &input,
+                config.batch,
+                config.in_features,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reeside_prescaled_f32_batch4".to_string(),
             elapsed_ns,
             checksum: checksum(&output),
             max_abs_diff: max_abs_diff(&baseline_output, &output),
@@ -550,6 +568,37 @@ pub fn reeduo_neon_block64_batch4(
     output
 }
 
+#[cfg(target_arch = "aarch64")]
+pub fn reeside_prescaled_f32_batch4(
+    sidecar: &[[f32; 32]],
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    for (block, scaled) in sidecar.iter().enumerate() {
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled_batch4(
+                    scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] += dot_f32_32(scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
 pub fn unrolled_i8_dot32_batch4(
     q8: &[u8],
     scale: f32,
@@ -731,6 +780,17 @@ unsafe fn scaled_pair_block_neon(first: &[u8], second: &[u8], scale: f32) -> [f3
     out[..32].copy_from_slice(&first_scaled);
     out[32..].copy_from_slice(&second_scaled);
     out
+}
+
+#[cfg(target_arch = "aarch64")]
+fn prescaled_sidecar_blocks(q8: &[u8], scale: f32) -> Vec<[f32; 32]> {
+    let blocks = q8.len() / 34;
+    let mut sidecar = Vec::with_capacity(blocks);
+    for block in 0..blocks {
+        let offset = block * 34;
+        sidecar.push(unsafe { scaled_block_neon(&q8[offset + 2..offset + 34], scale) });
+    }
+    sidecar
 }
 
 fn accumulate_scaled_batch4(
@@ -1044,6 +1104,8 @@ mod tests {
         assert!(variants.contains(&"reewide_neon_f32_dot32_batch8"));
         #[cfg(target_arch = "aarch64")]
         assert!(variants.contains(&"reeduo_neon_block64_batch4"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(variants.contains(&"reeside_prescaled_f32_batch4"));
 
         for result in &report.results {
             assert!(
