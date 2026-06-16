@@ -311,24 +311,13 @@ pub fn run(
             tensor_data = quantized;
         }
 
-        let effective_chunk_size_bytes = if meta.dtype == rllm_container::DType::Q4_0 {
-            // Must be multiple of 18 (Q4_0 block size)
-            (chunk_size_bytes / 18) * 18
-        } else if meta.dtype == rllm_container::DType::Q8_0 {
-            // Must be multiple of 34 (Q8_0 block size)
-            (chunk_size_bytes / 34) * 34
-        } else if let Some(tile_elements) = tile_block_elements {
-            let dtype_size = meta.dtype.size_bytes();
-            tile_elements.checked_mul(dtype_size).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--tile-block-elements overflow for tensor {} with dtype size {}",
-                    tensor_name,
-                    dtype_size
-                )
-            })?
-        } else {
-            chunk_size_bytes
-        };
+        let effective_chunk_size_bytes = effective_chunk_size_bytes_for_tensor(
+            meta.dtype,
+            &meta.shape,
+            chunk_size_bytes,
+            tile_block_elements,
+            tensor_name,
+        )?;
         if effective_chunk_size_bytes == 0 {
             anyhow::bail!("effective chunk size for tensor {} is zero", tensor_name);
         }
@@ -550,6 +539,57 @@ fn input_tile_range_specs(
         .collect()
 }
 
+fn effective_chunk_size_bytes_for_tensor(
+    dtype: rllm_container::DType,
+    shape: &[u64],
+    chunk_size_bytes: usize,
+    tile_block_elements: Option<usize>,
+    tensor_name: &str,
+) -> Result<usize> {
+    if let Some(block_bytes) = quantized_block_bytes(dtype) {
+        let block_aligned = (chunk_size_bytes / block_bytes) * block_bytes;
+        if let Some(row_bytes) = quantized_row_bytes(dtype, shape) {
+            if row_bytes <= chunk_size_bytes {
+                return Ok((chunk_size_bytes / row_bytes) * row_bytes);
+            }
+        }
+        return Ok(block_aligned);
+    }
+
+    if let Some(tile_elements) = tile_block_elements {
+        let dtype_size = dtype.size_bytes();
+        return tile_elements.checked_mul(dtype_size).ok_or_else(|| {
+            anyhow::anyhow!(
+                "--tile-block-elements overflow for tensor {} with dtype size {}",
+                tensor_name,
+                dtype_size
+            )
+        });
+    }
+
+    Ok(chunk_size_bytes)
+}
+
+fn quantized_block_bytes(dtype: rllm_container::DType) -> Option<usize> {
+    match dtype {
+        rllm_container::DType::Q4_0 => Some(18),
+        rllm_container::DType::Q8_0 => Some(34),
+        _ => None,
+    }
+}
+
+fn quantized_row_bytes(dtype: rllm_container::DType, shape: &[u64]) -> Option<usize> {
+    if shape.len() != 2 {
+        return None;
+    }
+    let in_features = usize::try_from(shape[1]).ok()?;
+    if in_features == 0 || !in_features.is_multiple_of(32) {
+        return None;
+    }
+    let block_bytes = quantized_block_bytes(dtype)?;
+    Some((in_features / 32) * block_bytes)
+}
+
 fn write_input_tile_sidecar_tensor(
     writer: &mut RllmWriter,
     tensor_id: u64,
@@ -670,9 +710,9 @@ fn quantize_to_q8_0(
 #[cfg(test)]
 mod tests {
     use super::{
-        input_tile_range_specs, input_tile_sidecar_bytes, is_llama_attention_projection_weight,
-        is_llama_lm_head_weight, is_llama_mlp_projection_weight, PackCodecPolicy,
-        PackQuantizePolicy,
+        effective_chunk_size_bytes_for_tensor, input_tile_range_specs, input_tile_sidecar_bytes,
+        is_llama_attention_projection_weight, is_llama_lm_head_weight,
+        is_llama_mlp_projection_weight, PackCodecPolicy, PackQuantizePolicy,
     };
 
     #[test]
@@ -926,6 +966,23 @@ mod tests {
             ),
             Some(rllm_container::DType::Q8_0)
         );
+    }
+
+    #[test]
+    fn quantized_2d_chunk_size_aligns_to_row_bytes_for_q8_fast_path() {
+        let chunk_size = effective_chunk_size_bytes_for_tensor(
+            rllm_container::DType::Q8_0,
+            &[8192, 2048],
+            1_048_576,
+            None,
+            "model.layers.0.mlp.gate_proj.weight",
+        )
+        .unwrap();
+
+        let q8_row_bytes = (2048 / 32) * 34;
+        assert_eq!(q8_row_bytes, 2176);
+        assert_eq!(chunk_size % q8_row_bytes, 0);
+        assert_eq!(chunk_size, 1_046_656);
     }
 
     #[test]
