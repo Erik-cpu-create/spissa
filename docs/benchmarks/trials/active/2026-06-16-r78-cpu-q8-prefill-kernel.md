@@ -46,14 +46,19 @@ Runtime context:
 
 | run | prompt/input tokens | generated tokens | TTFT/prefill | decode tok/s | end-to-end tok/s | RSS | peak transient | notes |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
-| baseline | | | | | | | | |
+| baseline | 55 | 2 | 26.75s | 0.87 | 0.07 | 2233090048 | 1050673152 | output `No`; prefill transformer 24613.37ms, prefill MLP 20324.73ms, gate/up/down 6723.82/6745.49/6844.64ms |
 | trial | | | | | | | | |
 
 ## Analysis
 
-Fill this after baseline and trial runs. Include the phase-profile breakdown for
-prefill and decode, especially `attention_total`, `mlp_total`, `gate`, `up`,
-`down`, and `lm_head`.
+Baseline confirms the current exact-Q8 Llama 1B prefill bottleneck is CPU MLP
+projection arithmetic, not attention. Prefill took `26754.93ms`; transformer
+time was `24613.37ms`, and MLP alone took `20324.73ms`. The three MLP
+projections were evenly dominant: gate `6723.82ms`, up `6745.49ms`, and down
+`6844.64ms`. Attention total was `4288.49ms`, and LM head was `2141.34ms`.
+
+The trial must reduce the `batch > 1` Q8 MLP projection path without changing
+the output text or increasing RLLM peak transient memory.
 
 ## Decision
 
