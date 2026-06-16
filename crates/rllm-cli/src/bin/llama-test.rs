@@ -47,6 +47,23 @@ struct Args {
     /// Optional path for RAMA chunk trace JSON output.
     #[arg(long)]
     rama_trace: Option<String>,
+
+    /// Runtime chunk integrity mode: strict, verify-once, or unchecked.
+    #[arg(long, default_value = "verify-once")]
+    rama_integrity: String,
+}
+
+fn parse_rama_integrity_mode(raw: &str) -> Result<RamaIntegrityMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "strict" => Ok(RamaIntegrityMode::Strict),
+        "verify-once" | "verify_once" | "once" => Ok(RamaIntegrityMode::VerifyOnce),
+        "unchecked" | "none" | "trusted" => Ok(RamaIntegrityMode::Unchecked),
+        other => {
+            anyhow::bail!(
+                "unsupported --rama-integrity {other:?}; expected strict, verify-once, or unchecked"
+            )
+        }
+    }
 }
 
 fn tensor_bucket(tensor_name: Option<&str>) -> &'static str {
@@ -416,6 +433,7 @@ fn main() -> Result<()> {
     if args.rama_trace.is_some() {
         model.enable_rama_trace();
     }
+    let rama_integrity = parse_rama_integrity_mode(&args.rama_integrity)?;
 
     let tokenizer_meta = model
         .metadata()
@@ -434,9 +452,7 @@ fn main() -> Result<()> {
         sampling: StreamingSamplingConfig::Argmax,
     };
 
-    // VerifyOnce: verify each chunk SHA-256 only on first access, then trust it.
-    // This eliminates ~420 redundant SHA-256 computations per generated token.
-    model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
+    model.set_rama_integrity_mode(rama_integrity);
 
     let prepared = prepare_llama_rama_layer_decode_transformer_from_metadata(&mut model, config)?;
     let mut budget = MemoryBudget::unbounded();
@@ -780,6 +796,21 @@ mod tests {
             traced_args.rama_trace.as_deref(),
             Some("/tmp/rama-trace.json")
         );
+    }
+
+    #[test]
+    fn args_default_to_verify_once_integrity_and_accept_unchecked() {
+        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        assert_eq!(default_args.rama_integrity, "verify-once");
+
+        let unchecked_args = Args::parse_from([
+            "llama-test",
+            "--model",
+            "model.rllm",
+            "--rama-integrity",
+            "unchecked",
+        ]);
+        assert_eq!(unchecked_args.rama_integrity, "unchecked");
     }
 
     #[test]
