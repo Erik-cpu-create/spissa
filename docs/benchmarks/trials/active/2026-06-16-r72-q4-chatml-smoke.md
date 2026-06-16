@@ -19,6 +19,8 @@ show immediate stop-token collapse or malformed ChatML prompting.
   - `models/SmolLM2-135M-Instruct-raw.rllm`
   - `models/SmolLM2-135M-Instruct-q4_0.rllm`
   - `models/SmolLM2-135M-Instruct-q4_0_keep_io.rllm`
+  - `models/SmolLM2-135M-Instruct-q4_0_mlp_only.rllm`
+  - `models/SmolLM2-135M-Instruct-q4_0_attention_only.rllm`
 - Architecture: SmolLM2/Llama-compatible decoder
 - Target device/profile: local macOS CPU, release binary
 - Expected bottleneck: memory footprint vs dequantization CPU cost
@@ -90,6 +92,22 @@ target/release/rllm pack \
   --quantize q4_0_keep_io
 ```
 
+Projection-family Q4_0 controls:
+
+```bash
+target/release/rllm pack \
+  models/downloads/smollm2-135m-instruct/model.safetensors \
+  --out models/SmolLM2-135M-Instruct-q4_0_mlp_only.rllm \
+  --codec raw \
+  --quantize q4_0_mlp_only
+
+target/release/rllm pack \
+  models/downloads/smollm2-135m-instruct/model.safetensors \
+  --out models/SmolLM2-135M-Instruct-q4_0_attention_only.rllm \
+  --codec raw \
+  --quantize q4_0_attention_only
+```
+
 Runtime context:
 
 - build profile: release
@@ -107,6 +125,8 @@ Artifact sizes:
 | `SmolLM2-135M-Instruct-raw.rllm` | 260M |
 | `SmolLM2-135M-Instruct-q4_0.rllm` | 76M |
 | `SmolLM2-135M-Instruct-q4_0_keep_io.rllm` | 115M |
+| `SmolLM2-135M-Instruct-q4_0_mlp_only.rllm` | 151M |
+| `SmolLM2-135M-Instruct-q4_0_attention_only.rllm` | 224M |
 
 Prompt matrix:
 
@@ -127,6 +147,16 @@ Prompt matrix:
 | Q4_0 keep-IO | translate to Indonesian | 32 | 1.09s | 11.84 | 8.62 | 331792384 | 116785152 | still poor: `Ngaliknya, ini-iya, ...` |
 | Q4_0 keep-IO | three fruits | 13 | 1.11s | 13.09 | 6.42 | 331120640 | 116785152 | lists numbered fruits instead of commas |
 | Q4_0 keep-IO | is fire cold | 8 | 1.11s | 12.96 | 4.86 | 329859072 | 116785152 | wrong answer: `Yes, fire is indeed cold.` |
+| Q4_0 MLP-only | `2 plus 2` | 19 | 1.54s | 14.38 | 6.80 | 367476736 | 116785152 | answers 4 but verbose |
+| Q4_0 MLP-only | sky color | 14 | 1.36s | 14.90 | 6.26 | 366821376 | 116785152 | acceptable: deep blue |
+| Q4_0 MLP-only | translate to Indonesian | 32 | 1.26s | 14.81 | 9.53 | 368459776 | 116785152 | still poor/repetitive: `Ia makalah ini, ...` |
+| Q4_0 MLP-only | three fruits | 9 | 1.22s | 14.49 | 5.07 | 367394816 | 116785152 | closer to raw first token, still numbered |
+| Q4_0 MLP-only | is fire cold | 32 | 1.24s | 14.62 | 9.52 | 368328704 | 116785152 | worse than raw, verbose wrong answer |
+| Q4_0 attention-only | `2 plus 2` | 8 | 1.95s | 18.33 | 3.42 | 439877632 | 114573312 | correct: `Two plus two is 4.` |
+| Q4_0 attention-only | sky color | 16 | 1.68s | 18.23 | 6.40 | 441434112 | 114573312 | matches raw text |
+| Q4_0 attention-only | translate to Indonesian | 32 | 1.54s | 17.92 | 9.78 | 442269696 | 114573312 | closer than full Q4, still poor |
+| Q4_0 attention-only | three fruits | 14 | 1.53s | 17.87 | 6.19 | 441384960 | 114573312 | numbered fruits |
+| Q4_0 attention-only | is fire cold | 8 | 1.55s | 17.75 | 4.12 | 441122816 | 114573312 | wrong answer like Q4 variants |
 
 External Hugging Face greedy generation matched the RLLM raw outputs for the
 five prompts above, including the weak `fire cold` answer and the poor
@@ -165,6 +195,18 @@ artifact from 76M to 115M and the process RSS from about 255-258 MB to about
 it still did not recover raw/Hugging Face behavior. That points to transformer
 weight quantization drift, not only embedding/output-head quantization.
 
+The projection-family controls refine the attribution:
+
+- `q4_0_mlp_only` keeps attention and IO raw, but still produces poor translation
+  and a worse verbose answer for `fire cold`. This makes Q4 MLP weights the main
+  suspect for quality drift.
+- `q4_0_attention_only` is closer to raw/Hugging Face on the sky prompt and has a
+  less degenerate translation than full Q4, but its memory savings are small
+  because MLP and IO remain raw.
+
+In short: full Q4_0 is the best memory result, but Q4_0 MLP quantization is too
+lossy for this small SmolLM2 chat-quality matrix.
+
 This trial therefore supports the Q4_0 pivot for memory/runtime feasibility, but
 does not yet close the chat-quality question.
 
@@ -174,9 +216,9 @@ needs follow-up
 
 Reason: Q4_0 passes the low-RAM runtime smoke and avoids the previous immediate
 ChatML/tokenizer collapse. Raw RLLM matches Hugging Face greedy on this matrix.
-Full Q4_0 and keep-IO Q4_0 both diverge on at least one prompt, so the
-multi-prompt quality matrix is not strong enough to call Q4_0 chat-quality
-parity accepted.
+Full Q4_0, keep-IO Q4_0, MLP-only Q4_0, and attention-only Q4_0 all diverge on
+at least one prompt, so the multi-prompt quality matrix is not strong enough to
+call Q4_0 chat-quality parity accepted.
 
 Paper value:
 
@@ -185,10 +227,11 @@ Paper value:
 
 ## Next Experiment
 
-Run a quantization-policy sweep that preserves progressively more sensitive
-subsystems:
+Run a mixed-precision follow-up focused on MLP weights:
 
-- Q4 transformer with raw embeddings/output already tested as `q4_0_keep_io`.
-- Next: raw attention + Q4 MLP.
-- Next: raw first/last N layers + Q4 middle layers.
+- Raw first/last N layers + Q4 middle MLP layers.
+- Or keep MLP in BF16 and Q4 attention/IO only if the target is conservative
+  quality with modest RAM savings.
+- Longer term: add a less lossy MLP quantizer such as Q8_0 or a row/group-aware
+  4-bit variant before claiming chat-quality parity.
 - Compare each against the Hugging Face/raw greedy token sequence, not only text.
