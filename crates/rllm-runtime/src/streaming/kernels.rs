@@ -245,6 +245,16 @@ fn accumulate_q8_0_chunk(
         .checked_mul(config.in_features)
         .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
     validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
+    if accumulate_q8_0_chunk_batch1_complete_rows(
+        input,
+        output,
+        q8_bytes,
+        element_start,
+        config,
+        weight_name,
+    )? {
+        return Ok(());
+    }
 
     for block_idx in 0..q8_bytes.len() / 34 {
         let block_global_start = element_start + block_idx * 32;
@@ -279,6 +289,59 @@ fn accumulate_q8_0_chunk(
     }
 
     Ok(())
+}
+
+fn accumulate_q8_0_chunk_batch1_complete_rows(
+    input: &[f32],
+    output: &mut [f32],
+    q8_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    weight_name: &str,
+) -> Result<bool> {
+    if config.batch != 1
+        || config.in_features == 0
+        || !config.in_features.is_multiple_of(32)
+        || !element_start.is_multiple_of(config.in_features)
+    {
+        return Ok(false);
+    }
+    let chunk_elements = quantized_elements_for_bytes(rllm_container::DType::Q8_0, q8_bytes.len())?;
+    if chunk_elements == 0 || !chunk_elements.is_multiple_of(config.in_features) {
+        return Ok(false);
+    }
+    let first_row = element_start / config.in_features;
+    let row_count = chunk_elements / config.in_features;
+    let row_end = first_row
+        .checked_add(row_count)
+        .ok_or_else(|| RuntimeError::Shape("Q8_0 row fast path row range overflow".to_string()))?;
+    if row_end > config.out_features {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} Q8_0 row fast path rows {first_row}..{row_end} exceed expected {}",
+            config.out_features
+        )));
+    }
+
+    let blocks_per_row = config.in_features / 32;
+    for local_row in 0..row_count {
+        let out_feature = first_row + local_row;
+        let mut acc = output[out_feature];
+        let first_block = local_row * blocks_per_row;
+        for block_in_row in 0..blocks_per_row {
+            let block_offset = (first_block + block_in_row) * 34;
+            let scale = q8_0_block_scale(q8_bytes, block_offset);
+            let input_start = block_in_row * 32;
+            acc += scale
+                * q8_0_dot_i8_f32(
+                    &q8_bytes[block_offset + 2..block_offset + 34],
+                    &input[input_start..],
+                    32,
+                );
+        }
+        output[out_feature] = acc;
+    }
+
+    Ok(true)
 }
 
 fn accumulate_q8_0_chunk_multiply_into(
