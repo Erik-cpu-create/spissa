@@ -30,7 +30,7 @@ pub use chat_session::{
     RamaSessionPhaseTimings, RamaSessionStep, RamaSessionTurnMetrics, RamaSessionTurnResult,
     RamaTransformerPhaseTimings,
 };
-pub use dequantize::{dequantize_q4_0, quantize_to_q4_0};
+pub use dequantize::{dequantize_q4_0, dequantize_q8_0, quantize_to_q4_0, quantize_to_q8_0};
 pub use echo::{
     streaming_echo_transformer_decode_step_from_model,
     streaming_echo_transformer_generate_from_model, streaming_echo_transformer_prefill_from_model,

@@ -5,6 +5,17 @@ use rllm_container::DType;
 
 /// Quantize a slice of floats (represented as raw bytes of dtype) to Q4_0 block bytes.
 pub fn quantize_to_q4_0(raw_data: &[u8], dtype: DType, shape: &[u64]) -> Result<Vec<u8>> {
+    let f32_data = raw_to_f32_data(raw_data, dtype, shape, "Q4_0")?;
+    quantize_f32_to_q4_0(&f32_data)
+}
+
+/// Quantize a slice of floats (represented as raw bytes of dtype) to Q8_0 block bytes.
+pub fn quantize_to_q8_0(raw_data: &[u8], dtype: DType, shape: &[u64]) -> Result<Vec<u8>> {
+    let f32_data = raw_to_f32_data(raw_data, dtype, shape, "Q8_0")?;
+    quantize_f32_to_q8_0(&f32_data)
+}
+
+fn raw_to_f32_data(raw_data: &[u8], dtype: DType, shape: &[u64], label: &str) -> Result<Vec<f32>> {
     let elements = shape.iter().product::<u64>() as usize;
     let element_size = dtype.size_bytes();
     let expected_bytes = elements.checked_mul(element_size).ok_or_else(|| {
@@ -12,7 +23,7 @@ pub fn quantize_to_q4_0(raw_data: &[u8], dtype: DType, shape: &[u64]) -> Result<
     })?;
     if raw_data.len() != expected_bytes {
         return Err(crate::RuntimeError::InvalidTensorData(format!(
-            "Q4_0 quantization expected byte length {expected_bytes} for {:?} shape {:?}, got {}",
+            "{label} quantization expected byte length {expected_bytes} for {:?} shape {:?}, got {}",
             dtype,
             shape,
             raw_data.len()
@@ -48,6 +59,11 @@ pub fn quantize_to_q4_0(raw_data: &[u8], dtype: DType, shape: &[u64]) -> Result<
         f32_data[i] = val;
     }
 
+    Ok(f32_data)
+}
+
+fn quantize_f32_to_q4_0(f32_data: &[f32]) -> Result<Vec<u8>> {
+    let elements = f32_data.len();
     let num_blocks = (elements + 31) / 32;
     let mut quantized_data = vec![0u8; num_blocks * 18];
 
@@ -97,6 +113,45 @@ pub fn quantize_to_q4_0(raw_data: &[u8], dtype: DType, shape: &[u64]) -> Result<
     Ok(quantized_data)
 }
 
+fn quantize_f32_to_q8_0(f32_data: &[f32]) -> Result<Vec<u8>> {
+    let elements = f32_data.len();
+    let num_blocks = (elements + 31) / 32;
+    let mut quantized_data = vec![0u8; num_blocks * 34];
+
+    for b in 0..num_blocks {
+        let block_start = b * 32;
+        let block_len = (elements - block_start).min(32);
+        let block_slice = &f32_data[block_start..block_start + block_len];
+
+        let mut max_val = 0.0f32;
+        for &x in block_slice {
+            max_val = max_val.max(x.abs());
+        }
+
+        let scale = max_val / 127.0;
+        let scale_bits = if scale == 0.0 {
+            0u16
+        } else {
+            crate::tensor::f32_to_fp16(scale)
+        };
+        let scale_f32 = crate::tensor::fp16_to_f32(scale_bits);
+
+        let out_offset = b * 34;
+        quantized_data[out_offset..out_offset + 2].copy_from_slice(&scale_bits.to_le_bytes());
+
+        for i in 0..block_len {
+            let q = if scale_f32 == 0.0 {
+                0
+            } else {
+                (block_slice[i] / scale_f32).round().clamp(-127.0, 127.0) as i8
+            };
+            quantized_data[out_offset + 2 + i] = q as u8;
+        }
+    }
+
+    Ok(quantized_data)
+}
+
 /// Dequantize a Q4_0 byte slice into an f32 slice.
 ///
 /// Input is a Q4_0 slice where each block of 32 elements takes 18 bytes:
@@ -129,6 +184,35 @@ pub fn dequantize_q4_0(input: &[u8], output: &mut [f32]) {
             if out_idx + 1 < limit {
                 output[out_idx + 1] = scale * q1;
             }
+        }
+    }
+}
+
+/// Dequantize a Q8_0 byte slice into an f32 slice.
+///
+/// Input is a Q8_0 slice where each block of 32 elements takes 34 bytes:
+/// - scale: fp16 (2 bytes)
+/// - qs: 32 signed int8 elements.
+pub fn dequantize_q8_0(input: &[u8], output: &mut [f32]) {
+    let num_blocks = input.len() / 34;
+    let limit = output.len().min(num_blocks * 32);
+
+    for b in 0..num_blocks {
+        let offset = b * 34;
+        if offset + 34 > input.len() {
+            break;
+        }
+        let scale_bits = u16::from_le_bytes([input[offset], input[offset + 1]]);
+        let scale = crate::tensor::fp16_to_f32(scale_bits);
+
+        let block_out_start = b * 32;
+        for i in 0..32 {
+            let out_idx = block_out_start + i;
+            if out_idx >= limit {
+                break;
+            }
+            let q = input[offset + 2 + i] as i8;
+            output[out_idx] = scale * q as f32;
         }
     }
 }
@@ -195,6 +279,22 @@ mod tests {
     fn q4_0_quantize_rejects_source_byte_len_mismatch() {
         let err = quantize_to_q4_0(&[0, 0, 0], DType::Fp32, &[1]).unwrap_err();
         assert!(err.to_string().contains("byte length"));
+    }
+
+    #[test]
+    fn q8_0_quantize_dequantize_roundtrip() {
+        let original_floats: Vec<f32> = (0..64).map(|i| (i as f32 - 32.0) * 0.125).collect();
+        let quantized =
+            quantize_to_q8_0(&raw_data_helper(&original_floats), DType::Fp32, &[64]).unwrap();
+        assert_eq!(quantized.len(), 68);
+
+        let mut dequantized = vec![0.0f32; 64];
+        dequantize_q8_0(&quantized, &mut dequantized);
+
+        for i in 0..64 {
+            let diff = (dequantized[i] - original_floats[i]).abs();
+            assert!(diff <= (4.0 / 127.0) + 1e-5, "index {i} diff={diff}");
+        }
     }
 
     fn raw_data_helper(floats: &[f32]) -> Vec<u8> {

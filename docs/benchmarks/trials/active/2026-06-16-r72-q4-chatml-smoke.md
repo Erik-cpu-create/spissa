@@ -21,6 +21,7 @@ show immediate stop-token collapse or malformed ChatML prompting.
   - `models/SmolLM2-135M-Instruct-q4_0_keep_io.rllm`
   - `models/SmolLM2-135M-Instruct-q4_0_mlp_only.rllm`
   - `models/SmolLM2-135M-Instruct-q4_0_attention_only.rllm`
+  - `models/SmolLM2-135M-Instruct-q8_transformer_keepio.rllm`
 - Architecture: SmolLM2/Llama-compatible decoder
 - Target device/profile: local macOS CPU, release binary
 - Expected bottleneck: memory footprint vs dequantization CPU cost
@@ -106,6 +107,12 @@ target/release/rllm pack \
   --out models/SmolLM2-135M-Instruct-q4_0_attention_only.rllm \
   --codec raw \
   --quantize q4_0_attention_only
+
+target/release/rllm pack \
+  models/downloads/smollm2-135m-instruct/model.safetensors \
+  --out models/SmolLM2-135M-Instruct-q8_transformer_keepio.rllm \
+  --codec raw \
+  --quantize q8_transformer_keep_io
 ```
 
 Runtime context:
@@ -127,6 +134,7 @@ Artifact sizes:
 | `SmolLM2-135M-Instruct-q4_0_keep_io.rllm` | 115M |
 | `SmolLM2-135M-Instruct-q4_0_mlp_only.rllm` | 151M |
 | `SmolLM2-135M-Instruct-q4_0_attention_only.rllm` | 224M |
+| `SmolLM2-135M-Instruct-q8_transformer_keepio.rllm` | 165M |
 
 Prompt matrix:
 
@@ -157,6 +165,11 @@ Prompt matrix:
 | Q4_0 attention-only | translate to Indonesian | 32 | 1.54s | 17.92 | 9.78 | 442269696 | 114573312 | closer than full Q4, still poor |
 | Q4_0 attention-only | three fruits | 14 | 1.53s | 17.87 | 6.19 | 441384960 | 114573312 | numbered fruits |
 | Q4_0 attention-only | is fire cold | 8 | 1.55s | 17.75 | 4.12 | 441122816 | 114573312 | wrong answer like Q4 variants |
+| Q8 transformer keep-IO | `2 plus 2` | 12 | 1.58s | 14.44 | 5.13 | 382189568 | 116785152 | matches raw text |
+| Q8 transformer keep-IO | sky color | 14 | 1.37s | 14.68 | 6.21 | 382222336 | 116785152 | semantically acceptable: deep rich blue |
+| Q8 transformer keep-IO | translate to Indonesian | 32 | 1.27s | 14.57 | 9.41 | 383320064 | 116785152 | matches raw text |
+| Q8 transformer keep-IO | three fruits | 13 | 1.25s | 14.56 | 6.26 | 382304256 | 116785152 | matches raw text |
+| Q8 transformer keep-IO | is fire cold | 7 | 1.29s | 14.69 | 4.12 | 382287872 | 116785152 | matches raw text |
 
 External Hugging Face greedy generation matched the RLLM raw outputs for the
 five prompts above, including the weak `fire cold` answer and the poor
@@ -207,31 +220,36 @@ The projection-family controls refine the attribution:
 In short: full Q4_0 is the best memory result, but Q4_0 MLP quantization is too
 lossy for this small SmolLM2 chat-quality matrix.
 
-This trial therefore supports the Q4_0 pivot for memory/runtime feasibility, but
-does not yet close the chat-quality question.
+The Q8 transformer keep-IO variant is the first practical fix in this sweep. It
+keeps embeddings/output head raw BF16 and quantizes attention plus MLP projection
+weights to Q8_0. It preserves raw text exactly on four of five prompts, with the
+remaining sky-color prompt staying semantically acceptable. It reduces artifact
+size from 260M to 165M and process RSS from about 478-479 MB to about 382-383
+MB. Decode speed falls from about 22-24 tok/s raw to about 14-15 tok/s because
+Q8_0 is currently JIT-dequantized into FP32 scratch before matmul.
+
+This trial therefore rejects Q4_0 for chat-quality parity on SmolLM2-Instruct
+and accepts Q8 transformer keep-IO as the current practical low-RAM chat
+artifact.
 
 ## Decision
 
-needs follow-up
+accepted for Q8 keep-IO; rejected for Q4_0 chat parity
 
-Reason: Q4_0 passes the low-RAM runtime smoke and avoids the previous immediate
-ChatML/tokenizer collapse. Raw RLLM matches Hugging Face greedy on this matrix.
-Full Q4_0, keep-IO Q4_0, MLP-only Q4_0, and attention-only Q4_0 all diverge on
-at least one prompt, so the multi-prompt quality matrix is not strong enough to
-call Q4_0 chat-quality parity accepted.
+Reason: Raw RLLM matches Hugging Face greedy on this matrix. Full Q4_0,
+keep-IO Q4_0, MLP-only Q4_0, and attention-only Q4_0 all diverge on at least
+one prompt, so Q4_0 chat-quality parity is rejected. Q8 transformer keep-IO
+matches raw text on four of five prompts, keeps the fifth semantically
+acceptable, and cuts RSS by about 96 MB versus raw.
 
 Paper value:
 
-- use as positive evidence for low-RAM exact execution feasibility
-- use as limitation for quality validation still needing an external baseline
+- use as positive evidence for Q8 transformer low-RAM exact execution feasibility
+- use as negative evidence for Q4_0 MLP chat-quality parity
 
 ## Next Experiment
 
-Run a mixed-precision follow-up focused on MLP weights:
-
-- Raw first/last N layers + Q4 middle MLP layers.
-- Or keep MLP in BF16 and Q4 attention/IO only if the target is conservative
-  quality with modest RAM savings.
-- Longer term: add a less lossy MLP quantizer such as Q8_0 or a row/group-aware
-  4-bit variant before claiming chat-quality parity.
-- Compare each against the Hugging Face/raw greedy token sequence, not only text.
+Make Q8 transformer keep-IO the default recommended low-RAM chat artifact for
+SmolLM2-Instruct. Next optimization should target Q8_0 direct dot kernels or
+SIMD dequantized dot products to recover decode speed without returning to Q4
+MLP drift.

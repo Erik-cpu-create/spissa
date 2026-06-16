@@ -32,6 +32,8 @@ pub enum DType {
     U64,
     /// 4-bit block-quantized type (32 elements per block)
     Q4_0,
+    /// 8-bit block-quantized type (32 elements per block)
+    Q8_0,
 }
 
 impl DType {
@@ -41,13 +43,13 @@ impl DType {
             DType::Fp16 | DType::Bf16 | DType::I16 | DType::U16 => 2,
             DType::Fp32 | DType::I32 | DType::U32 => 4,
             DType::Fp64 | DType::I64 | DType::U64 => 8,
-            DType::I8 | DType::U8 | DType::Q4_0 => 1,
+            DType::I8 | DType::U8 | DType::Q4_0 | DType::Q8_0 => 1,
         }
     }
 
     /// Whether this dtype is quantized
     pub fn is_quantized(&self) -> bool {
-        matches!(self, DType::Q4_0)
+        matches!(self, DType::Q4_0 | DType::Q8_0)
     }
 
     /// Calculate total bytes for a given number of elements of this dtype
@@ -56,6 +58,10 @@ impl DType {
             DType::Q4_0 => {
                 let blocks = (count + 31) / 32;
                 blocks * 18
+            }
+            DType::Q8_0 => {
+                let blocks = (count + 31) / 32;
+                blocks * 34
             }
             _ => count * self.size_bytes(),
         }
@@ -267,6 +273,15 @@ mod tests {
         assert_eq!(DType::Q4_0.byte_size_for_elements(1), 18);
         assert_eq!(DType::Q4_0.byte_size_for_elements(32), 18);
         assert_eq!(DType::Q4_0.byte_size_for_elements(33), 36);
+    }
+
+    #[test]
+    fn q8_0_dtype_uses_block_byte_size() {
+        assert!(DType::Q8_0.is_quantized());
+        assert_eq!(DType::Q8_0.byte_size_for_elements(0), 0);
+        assert_eq!(DType::Q8_0.byte_size_for_elements(1), 34);
+        assert_eq!(DType::Q8_0.byte_size_for_elements(32), 34);
+        assert_eq!(DType::Q8_0.byte_size_for_elements(33), 68);
     }
 
     #[test]
