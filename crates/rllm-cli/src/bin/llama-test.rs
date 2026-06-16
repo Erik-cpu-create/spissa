@@ -250,17 +250,40 @@ fn format_repetition_suffix(stats: rllm_runtime::RamaRepetitionStats) -> String 
     }
 }
 
-fn format_phase_profile_suffix(timings: RamaSessionPhaseTimings, decode_wall_ms: f64) -> String {
-    if timings.total_ms() == 0.0 {
+fn format_phase_profile_suffix(
+    prefill_timings: RamaSessionPhaseTimings,
+    prefill_wall_ms: f64,
+    decode_timings: RamaSessionPhaseTimings,
+    decode_wall_ms: f64,
+) -> String {
+    if prefill_timings.total_ms() == 0.0 && decode_timings.total_ms() == 0.0 {
         return String::new();
     }
 
+    format!(
+        "{}{}",
+        format_phase_profile_segment(
+            "PrefillProfile",
+            "prefill",
+            prefill_timings,
+            prefill_wall_ms
+        ),
+        format_phase_profile_segment("DecodeProfile", "decode", decode_timings, decode_wall_ms)
+    )
+}
+
+fn format_phase_profile_segment(
+    label: &str,
+    total_label: &str,
+    timings: RamaSessionPhaseTimings,
+    wall_ms: f64,
+) -> String {
     let detail = timings.transformer_detail;
     let profiled_total_ms = timings.total_ms();
-    let overhead_ms = (decode_wall_ms - profiled_total_ms).max(0.0);
+    let overhead_ms = (wall_ms - profiled_total_ms).max(0.0);
     format!(
-        " | Profile: decode_total={:.2}ms profiled={:.2}ms overhead={:.2}ms embedding={:.2}ms transformer={:.2}ms attention_total={:.2}ms mlp_total={:.2}ms final_norm={:.2}ms lm_head={:.2}ms layers={} q={:.2}ms k={:.2}ms v={:.2}ms attn={:.2}ms gate={:.2}ms up={:.2}ms down={:.2}ms",
-        decode_wall_ms,
+        " | {label}: {total_label}_total={:.2}ms profiled={:.2}ms overhead={:.2}ms embedding={:.2}ms transformer={:.2}ms attention_total={:.2}ms mlp_total={:.2}ms final_norm={:.2}ms lm_head={:.2}ms layers={} q={:.2}ms k={:.2}ms v={:.2}ms attn={:.2}ms gate={:.2}ms up={:.2}ms down={:.2}ms",
+        wall_ms,
         profiled_total_ms,
         overhead_ms,
         timings.embedding_ms,
@@ -378,6 +401,8 @@ fn main() -> Result<()> {
         let repetition_suffix = format_repetition_suffix(result.metrics.repetition_stats);
         let phase_profile_suffix = if args.profile_phases {
             format_phase_profile_suffix(
+                result.metrics.prefill_phase_timings,
+                result.metrics.prefill_ms,
                 result.metrics.decode_phase_timings,
                 result.metrics.decode_ms,
             )
@@ -627,29 +652,49 @@ mod tests {
     }
 
     #[test]
-    fn phase_profile_suffix_reports_decode_subphases_and_overhead() {
-        let suffix = format_phase_profile_suffix(
-            rllm_runtime::RamaSessionPhaseTimings {
-                embedding_ms: 1.0,
-                transformer_ms: 20.0,
-                transformer_detail: rllm_runtime::RamaTransformerPhaseTimings {
-                    q_projection_ms: 2.0,
-                    k_projection_ms: 3.0,
-                    v_projection_ms: 4.0,
-                    attention_ms: 5.0,
-                    gate_projection_ms: 6.0,
-                    up_projection_ms: 7.0,
-                    down_projection_ms: 8.0,
-                    profiled_layers: 16,
-                    ..Default::default()
-                },
-                final_norm_ms: 9.0,
-                lm_head_ms: 10.0,
+    fn phase_profile_suffix_reports_prefill_and_decode_subphases() {
+        let prefill = rllm_runtime::RamaSessionPhaseTimings {
+            embedding_ms: 2.0,
+            transformer_ms: 50.0,
+            transformer_detail: rllm_runtime::RamaTransformerPhaseTimings {
+                q_projection_ms: 10.0,
+                k_projection_ms: 11.0,
+                v_projection_ms: 12.0,
+                attention_ms: 13.0,
+                gate_projection_ms: 14.0,
+                up_projection_ms: 15.0,
+                down_projection_ms: 16.0,
+                profiled_layers: 16,
+                ..Default::default()
             },
-            44.0,
-        );
+            final_norm_ms: 17.0,
+            lm_head_ms: 18.0,
+        };
+        let decode = rllm_runtime::RamaSessionPhaseTimings {
+            embedding_ms: 1.0,
+            transformer_ms: 20.0,
+            transformer_detail: rllm_runtime::RamaTransformerPhaseTimings {
+                q_projection_ms: 2.0,
+                k_projection_ms: 3.0,
+                v_projection_ms: 4.0,
+                attention_ms: 5.0,
+                gate_projection_ms: 6.0,
+                up_projection_ms: 7.0,
+                down_projection_ms: 8.0,
+                profiled_layers: 16,
+                ..Default::default()
+            },
+            final_norm_ms: 9.0,
+            lm_head_ms: 10.0,
+        };
+        let suffix = format_phase_profile_suffix(prefill, 60.0, decode, 44.0);
 
-        assert!(suffix.contains("Profile: decode_total=44.00ms"));
+        assert!(suffix.contains("PrefillProfile: prefill_total=60.00ms"));
+        assert!(suffix.contains("profiled=87.00ms"));
+        assert!(suffix.contains("attention_total=46.00ms"));
+        assert!(suffix.contains("mlp_total=45.00ms"));
+        assert!(suffix.contains("lm_head=18.00ms"));
+        assert!(suffix.contains("DecodeProfile: decode_total=44.00ms"));
         assert!(suffix.contains("profiled=40.00ms"));
         assert!(suffix.contains("overhead=4.00ms"));
         assert!(suffix.contains("attention_total=14.00ms"));
