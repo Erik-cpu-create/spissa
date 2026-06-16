@@ -190,6 +190,9 @@ pub struct TokenizerMetadata {
     /// Token strings indexed by token ID.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub id_to_token: Vec<String>,
+    /// Optional HuggingFace BPE merge rules, in rank order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bpe_merges: Vec<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unk_token_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -399,6 +402,7 @@ mod tests {
         meta.tokenizer = Some(TokenizerMetadata {
             tokenizer_type: Some("hf-wordlevel".to_string()),
             id_to_token: vec!["A".to_string(), " B".to_string(), "<unk>".to_string()],
+            bpe_merges: Vec::new(),
             unk_token_id: Some(2),
             bos_token_id: None,
             eos_token_id: None,
