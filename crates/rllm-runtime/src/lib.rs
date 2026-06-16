@@ -16,6 +16,8 @@ mod memory;
 pub mod models;
 mod ops;
 mod planner;
+#[doc(hidden)]
+pub mod q8_kernel_lab;
 mod rolling;
 mod rotary;
 mod speed;

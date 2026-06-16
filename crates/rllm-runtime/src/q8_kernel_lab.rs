@@ -1,0 +1,346 @@
+use serde::Serialize;
+use std::time::Instant;
+
+pub const REE_KERNEL_NAME: &str = "REEDOT-LAB";
+
+#[derive(Debug, Clone, Copy)]
+pub struct Q8KernelBenchConfig {
+    pub batch: usize,
+    pub in_features: usize,
+    pub blocks_per_row: usize,
+    pub out_features: usize,
+    pub iters: usize,
+}
+
+impl Default for Q8KernelBenchConfig {
+    fn default() -> Self {
+        Self {
+            batch: 55,
+            in_features: 2048,
+            blocks_per_row: 64,
+            out_features: 8192,
+            iters: 2000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Q8KernelBenchResult {
+    pub variant: String,
+    pub elapsed_ns: u128,
+    pub checksum: f32,
+    pub max_abs_diff: f32,
+    pub speedup_vs_baseline: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Q8KernelBenchReport {
+    pub ree_kernel: String,
+    pub batch: usize,
+    pub in_features: usize,
+    pub out_features: usize,
+    pub iters: usize,
+    pub results: Vec<Q8KernelBenchResult>,
+}
+
+pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
+    assert!(config.batch > 0);
+    assert!(config.iters > 0);
+    assert_eq!(config.in_features % 32, 0);
+    assert_eq!(config.blocks_per_row, config.in_features / 32);
+
+    let input = deterministic_input(config.batch, config.in_features);
+    let q8 = deterministic_q8_blocks(config.blocks_per_row);
+    let scale = 0.125f32;
+
+    let (baseline_ns, baseline_output) = time_variant(config.iters, config.batch, || {
+        baseline_i8_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
+    });
+    let baseline_checksum = checksum(&baseline_output);
+
+    let mut results = Vec::new();
+    results.push(Q8KernelBenchResult {
+        variant: "baseline_i8_dot32_batch4".to_string(),
+        elapsed_ns: baseline_ns,
+        checksum: baseline_checksum,
+        max_abs_diff: 0.0,
+        speedup_vs_baseline: 1.0,
+    });
+
+    for (variant, elapsed_ns, output) in [
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                scaled_f32_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
+            });
+            ("scaled_f32_dot32_batch4", elapsed_ns, output)
+        },
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                unrolled_i8_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
+            });
+            ("unrolled_i8_dot32_batch4", elapsed_ns, output)
+        },
+    ] {
+        results.push(Q8KernelBenchResult {
+            variant: variant.to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+    }
+
+    Q8KernelBenchReport {
+        ree_kernel: REE_KERNEL_NAME.to_string(),
+        batch: config.batch,
+        in_features: config.in_features,
+        out_features: config.out_features,
+        iters: config.iters,
+        results,
+    }
+}
+
+fn deterministic_input(batch: usize, in_features: usize) -> Vec<f32> {
+    (0..batch * in_features)
+        .map(|idx| (idx as f32 % 97.0) * 0.00390625 - 0.1875)
+        .collect()
+}
+
+fn deterministic_q8_blocks(blocks_per_row: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(blocks_per_row * 34);
+    for block in 0..blocks_per_row {
+        bytes.extend_from_slice(&crate::tensor::f32_to_fp16(0.125).to_le_bytes());
+        for idx in 0..32 {
+            let q = (((block * 7 + idx * 3) as i16 % 17) - 8) as i8;
+            bytes.push(q as u8);
+        }
+    }
+    bytes
+}
+
+fn time_variant(
+    iters: usize,
+    output_len: usize,
+    mut f: impl FnMut() -> Vec<f32>,
+) -> (u128, Vec<f32>) {
+    let warmup = f();
+    assert_eq!(warmup.len(), output_len);
+    let started = Instant::now();
+    let mut output = warmup;
+    for _ in 0..iters {
+        output = f();
+        std::hint::black_box(&output);
+    }
+    (started.elapsed().as_nanos(), output)
+}
+
+pub fn baseline_i8_dot32_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let qs = &q8[offset + 2..offset + 34];
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            for lane in 0..4 {
+                output[batch_idx + lane] +=
+                    scale * dot_i8_f32(qs, &input[(batch_idx + lane) * in_features + in_feature..]);
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                scale * dot_i8_f32(qs, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+pub fn scaled_f32_dot32_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = scaled_block(&q8[offset + 2..offset + 34], scale);
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            accumulate_scaled_batch4(
+                &scaled,
+                &input[batch_idx * in_features + in_feature..],
+                in_features,
+                &mut output,
+                batch_idx,
+            );
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+pub fn unrolled_i8_dot32_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let qs = &q8[offset + 2..offset + 34];
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            for lane in 0..4 {
+                output[batch_idx + lane] += scale
+                    * dot_i8_f32_unrolled(
+                        qs,
+                        &input[(batch_idx + lane) * in_features + in_feature..],
+                    );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                scale * dot_i8_f32_unrolled(qs, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+fn dot_i8_f32(qs: &[u8], input: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    for idx in 0..32 {
+        acc += (qs[idx] as i8 as f32) * input[idx];
+    }
+    acc
+}
+
+fn dot_i8_f32_unrolled(qs: &[u8], input: &[f32]) -> f32 {
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut acc3 = 0.0f32;
+    let mut idx = 0usize;
+    while idx < 32 {
+        acc0 += (qs[idx] as i8 as f32) * input[idx];
+        acc1 += (qs[idx + 1] as i8 as f32) * input[idx + 1];
+        acc2 += (qs[idx + 2] as i8 as f32) * input[idx + 2];
+        acc3 += (qs[idx + 3] as i8 as f32) * input[idx + 3];
+        idx += 4;
+    }
+    (acc0 + acc1) + (acc2 + acc3)
+}
+
+fn scaled_block(qs: &[u8], scale: f32) -> [f32; 32] {
+    let mut scaled = [0.0f32; 32];
+    for idx in 0..32 {
+        scaled[idx] = (qs[idx] as i8 as f32) * scale;
+    }
+    scaled
+}
+
+fn accumulate_scaled_batch4(
+    scaled: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    output[batch_idx] += dot_f32_32(scaled, input);
+    output[batch_idx + 1] += dot_f32_32(scaled, &input[stride..]);
+    output[batch_idx + 2] += dot_f32_32(scaled, &input[stride * 2..]);
+    output[batch_idx + 3] += dot_f32_32(scaled, &input[stride * 3..]);
+}
+
+fn dot_f32_32(weights: &[f32; 32], input: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    for idx in 0..32 {
+        acc += weights[idx] * input[idx];
+    }
+    acc
+}
+
+fn checksum(values: &[f32]) -> f32 {
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| value * ((idx % 13) as f32 + 1.0))
+        .sum()
+}
+
+fn max_abs_diff(left: &[f32], right: &[f32]) -> f32 {
+    assert_eq!(left.len(), right.len());
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn q8_kernel_lab_reports_required_ree_variants() {
+        let report = run_suite(Q8KernelBenchConfig {
+            batch: 5,
+            in_features: 64,
+            blocks_per_row: 2,
+            out_features: 1,
+            iters: 2,
+        });
+
+        assert_eq!(report.ree_kernel, "REEDOT-LAB");
+
+        let variants = report
+            .results
+            .iter()
+            .map(|result| result.variant.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            variants,
+            [
+                "baseline_i8_dot32_batch4",
+                "scaled_f32_dot32_batch4",
+                "unrolled_i8_dot32_batch4"
+            ]
+        );
+
+        for result in &report.results {
+            assert!(
+                result.elapsed_ns > 0,
+                "{} should report elapsed time",
+                result.variant
+            );
+            assert!(
+                result.max_abs_diff <= 0.0001,
+                "{} diff {} exceeded tolerance",
+                result.variant,
+                result.max_abs_diff
+            );
+        }
+    }
+}
