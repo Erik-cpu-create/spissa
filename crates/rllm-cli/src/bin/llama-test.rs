@@ -1000,12 +1000,30 @@ mod tests {
             1,
             std::time::Duration::from_micros(500),
         );
+        rllm_runtime::record_q8_kernel_path(
+            rllm_runtime::Q8KernelPath::BatchGt1NormalBatch4Setup,
+            3,
+            3,
+            0,
+            0,
+            std::time::Duration::from_micros(250),
+        );
+        rllm_runtime::record_q8_kernel_path(
+            rllm_runtime::Q8KernelPath::BatchGt1NormalBatch4Kernel,
+            3,
+            3,
+            0,
+            12,
+            std::time::Duration::from_micros(750),
+        );
 
         let suffix = format_q8_kernel_profile_suffix();
 
         assert!(suffix.contains("Q8KernelProfile: kernel=REEGLASS-Q8-HOTLOOP-PROFILER"));
         assert!(suffix.contains("contiguous_i8_dot calls=2 blocks=4"));
         assert!(suffix.contains("batch1_complete_multiply calls=1 blocks=8 rows=1"));
+        assert!(suffix.contains("batch_gt1_normal_batch4_setup calls=3 blocks=3"));
+        assert!(suffix.contains("batch_gt1_normal_batch4_kernel calls=3 blocks=3"));
         assert!(suffix.contains("elapsed=1.50ms"));
         assert_eq!(format_q8_kernel_profile_suffix(), "");
     }

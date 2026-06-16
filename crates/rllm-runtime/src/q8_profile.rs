@@ -8,6 +8,8 @@ pub enum Q8KernelPath {
     BatchGt1Scaled,
     BatchGt1NormalScale,
     BatchGt1NormalBatch4,
+    BatchGt1NormalBatch4Setup,
+    BatchGt1NormalBatch4Kernel,
     BatchGt1NormalTail,
     BatchGt1MultiplyAdvance,
     BatchGt1MultiplyScale,
@@ -27,6 +29,8 @@ impl Q8KernelPath {
             Self::BatchGt1Scaled => "batch_gt1_scaled",
             Self::BatchGt1NormalScale => "batch_gt1_normal_scale",
             Self::BatchGt1NormalBatch4 => "batch_gt1_normal_batch4",
+            Self::BatchGt1NormalBatch4Setup => "batch_gt1_normal_batch4_setup",
+            Self::BatchGt1NormalBatch4Kernel => "batch_gt1_normal_batch4_kernel",
             Self::BatchGt1NormalTail => "batch_gt1_normal_tail",
             Self::BatchGt1MultiplyAdvance => "batch_gt1_multiply_advance",
             Self::BatchGt1MultiplyScale => "batch_gt1_multiply_scale",
@@ -163,6 +167,22 @@ mod tests {
             Duration::from_nanos(40),
         );
         record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalBatch4Setup,
+            4,
+            4,
+            0,
+            16,
+            Duration::from_nanos(15),
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalBatch4Kernel,
+            4,
+            4,
+            0,
+            16,
+            Duration::from_nanos(45),
+        );
+        record_q8_kernel_path(
             Q8KernelPath::BatchGt1MultiplyFinish,
             2,
             2,
@@ -173,13 +193,25 @@ mod tests {
 
         let snapshot = q8_kernel_profile_snapshot_and_reset().unwrap();
         assert_eq!(snapshot.ree_kernel, "REEGLASS-Q8-HOTLOOP-PROFILER");
-        assert_eq!(snapshot.rows[0].path, "batch_gt1_normal_batch4");
+        assert_eq!(snapshot.rows[0].path, "batch_gt1_normal_batch4_kernel");
         assert_eq!(snapshot.rows[0].calls, 4);
-        assert_eq!(snapshot.rows[0].elapsed_ns, 40);
+        assert_eq!(snapshot.rows[0].elapsed_ns, 45);
+        assert!(snapshot
+            .rows
+            .iter()
+            .any(|row| row.path == "batch_gt1_normal_batch4"));
         assert!(snapshot
             .rows
             .iter()
             .any(|row| row.path == "batch_gt1_multiply_finish"));
+        assert!(snapshot
+            .rows
+            .iter()
+            .any(|row| row.path == "batch_gt1_normal_batch4_setup"));
+        assert!(snapshot
+            .rows
+            .iter()
+            .any(|row| row.path == "batch_gt1_normal_batch4_kernel"));
         assert!(q8_kernel_profile_snapshot_and_reset().is_none());
     }
 }
