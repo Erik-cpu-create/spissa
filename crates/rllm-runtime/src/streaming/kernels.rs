@@ -268,7 +268,14 @@ fn accumulate_q8_0_chunk(
         let out_feature = block_global_start / config.in_features;
         let in_feature = block_global_start % config.in_features;
 
-        if in_feature + block_len <= config.in_features {
+        if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
+            let scaled = q8_0_scaled_block(qs, scale);
+            for batch_idx in 0..config.batch {
+                let input_start = batch_idx * config.in_features + in_feature;
+                let output_idx = batch_idx * config.out_features + out_feature;
+                output[output_idx] += f32_dot_32(&scaled, &input[input_start..]);
+            }
+        } else if in_feature + block_len <= config.in_features {
             for batch_idx in 0..config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
                 let output_idx = batch_idx * config.out_features + out_feature;
@@ -616,6 +623,30 @@ fn q8_0_dot_i8_f32(qs: &[u8], input: &[f32], len: usize) -> f32 {
         idx += 1;
     }
     acc
+}
+
+fn q8_0_scaled_block(qs: &[u8], scale: f32) -> [f32; 32] {
+    let mut scaled = [0.0f32; 32];
+    for idx in 0..32 {
+        scaled[idx] = scale * (qs[idx] as i8) as f32;
+    }
+    scaled
+}
+
+fn f32_dot_32(weights: &[f32; 32], input: &[f32]) -> f32 {
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut acc3 = 0.0f32;
+    let mut idx = 0usize;
+    while idx < 32 {
+        acc0 += weights[idx] * input[idx];
+        acc1 += weights[idx + 1] * input[idx + 1];
+        acc2 += weights[idx + 2] * input[idx + 2];
+        acc3 += weights[idx + 3] * input[idx + 3];
+        idx += 4;
+    }
+    (acc0 + acc1) + (acc2 + acc3)
 }
 
 fn advance_multiply_state_to_row(
