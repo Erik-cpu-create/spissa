@@ -1,7 +1,8 @@
 use crate::tensor::decode_to_f32;
 use crate::{
-    apply_gpt_neox_rotary_inplace, scaled_dot_product_attention_with_cache, KvAttentionConfig,
-    KvCache, LazyRllmModel, MemoryBudget, Result, RotaryEmbeddingConfig, RuntimeError,
+    apply_gpt_neox_rotary_inplace, q8_kernel_profile_enabled, record_q8_kernel_path,
+    scaled_dot_product_attention_with_cache, KvAttentionConfig, KvCache, LazyRllmModel,
+    MemoryBudget, Q8KernelPath, Result, RotaryEmbeddingConfig, RuntimeError,
 };
 use rllm_container::{ChunkMeta, TensorMeta};
 use std::time::{Duration, Instant};

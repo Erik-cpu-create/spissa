@@ -240,6 +240,7 @@ fn accumulate_q8_0_chunk(
     config: StreamingLinearConfig,
     weight_name: &str,
 ) -> Result<()> {
+    let profile_enabled = q8_kernel_profile_enabled();
     let weight_elements = config
         .out_features
         .checked_mul(config.in_features)
@@ -269,6 +270,7 @@ fn accumulate_q8_0_chunk(
         let in_feature = block_global_start % config.in_features;
 
         if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
+            let profile_start = profile_enabled.then(Instant::now);
             let scaled = q8_0_scaled_block(qs, scale);
             let mut batch_idx = 0usize;
             while batch_idx + 4 <= config.batch {
@@ -290,13 +292,35 @@ fn accumulate_q8_0_chunk(
                 output[output_idx] += f32_dot_32(&scaled, &input[input_start..]);
                 batch_idx += 1;
             }
+            if let Some(profile_start) = profile_start {
+                record_q8_kernel_path(
+                    Q8KernelPath::BatchGt1Scaled,
+                    1,
+                    1,
+                    0,
+                    config.batch as u64,
+                    profile_start.elapsed(),
+                );
+            }
         } else if in_feature + block_len <= config.in_features {
+            let profile_start = profile_enabled.then(Instant::now);
             for batch_idx in 0..config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
                 let output_idx = batch_idx * config.out_features + out_feature;
                 output[output_idx] += scale * q8_0_dot_i8_f32(qs, &input[input_start..], block_len);
             }
+            if let Some(profile_start) = profile_start {
+                record_q8_kernel_path(
+                    Q8KernelPath::ContiguousI8Dot,
+                    1,
+                    1,
+                    0,
+                    config.batch as u64,
+                    profile_start.elapsed(),
+                );
+            }
         } else {
+            let profile_start = profile_enabled.then(Instant::now);
             for (idx, &q) in qs.iter().take(block_len).enumerate() {
                 let global_idx = block_global_start + idx;
                 let out_feature = global_idx / config.in_features;
@@ -306,6 +330,16 @@ fn accumulate_q8_0_chunk(
                     output[batch_idx * config.out_features + out_feature] +=
                         input[batch_idx * config.in_features + in_feature] * weight;
                 }
+            }
+            if let Some(profile_start) = profile_start {
+                record_q8_kernel_path(
+                    Q8KernelPath::SplitRowScalar,
+                    1,
+                    1,
+                    0,
+                    config.batch as u64,
+                    profile_start.elapsed(),
+                );
             }
         }
     }
@@ -321,6 +355,7 @@ fn accumulate_q8_0_chunk_batch1_complete_rows(
     config: StreamingLinearConfig,
     weight_name: &str,
 ) -> Result<bool> {
+    let profile_enabled = q8_kernel_profile_enabled();
     let Some((first_row, row_count, blocks_per_row)) =
         q8_0_complete_row_span(q8_bytes, element_start, config)?
     else {
@@ -336,6 +371,7 @@ fn accumulate_q8_0_chunk_batch1_complete_rows(
         )));
     }
 
+    let profile_start = profile_enabled.then(Instant::now);
     for local_row in 0..row_count {
         let out_feature = first_row + local_row;
         let mut acc = output[out_feature];
@@ -353,6 +389,16 @@ fn accumulate_q8_0_chunk_batch1_complete_rows(
         }
         output[out_feature] = acc;
     }
+    if let Some(profile_start) = profile_start {
+        record_q8_kernel_path(
+            Q8KernelPath::Batch1CompleteLinear,
+            1,
+            (row_count * blocks_per_row) as u64,
+            row_count as u64,
+            config.batch as u64,
+            profile_start.elapsed(),
+        );
+    }
 
     Ok(true)
 }
@@ -365,6 +411,7 @@ fn accumulate_q8_0_chunk_multiply_into(
     state: &mut StreamingLinearMultiplyIntoState<'_>,
     weight_name: &str,
 ) -> Result<()> {
+    let profile_enabled = q8_kernel_profile_enabled();
     let weight_elements = config
         .out_features
         .checked_mul(config.in_features)
@@ -394,6 +441,7 @@ fn accumulate_q8_0_chunk_multiply_into(
         let in_feature = block_global_start % config.in_features;
 
         if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
+            let profile_start = profile_enabled.then(Instant::now);
             advance_multiply_state_to_row(state, out_feature, config, weight_name)?;
             let scaled = q8_0_scaled_block(qs, scale);
             let mut batch_idx = 0usize;
@@ -416,7 +464,18 @@ fn accumulate_q8_0_chunk_multiply_into(
             if in_feature + block_len == config.in_features {
                 state.finish_current(config, weight_name)?;
             }
+            if let Some(profile_start) = profile_start {
+                record_q8_kernel_path(
+                    Q8KernelPath::BatchGt1Scaled,
+                    1,
+                    1,
+                    0,
+                    config.batch as u64,
+                    profile_start.elapsed(),
+                );
+            }
         } else if in_feature + block_len <= config.in_features {
+            let profile_start = profile_enabled.then(Instant::now);
             advance_multiply_state_to_row(state, out_feature, config, weight_name)?;
             for batch_idx in 0..config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
@@ -426,7 +485,18 @@ fn accumulate_q8_0_chunk_multiply_into(
             if in_feature + block_len == config.in_features {
                 state.finish_current(config, weight_name)?;
             }
+            if let Some(profile_start) = profile_start {
+                record_q8_kernel_path(
+                    Q8KernelPath::ContiguousI8Dot,
+                    1,
+                    1,
+                    0,
+                    config.batch as u64,
+                    profile_start.elapsed(),
+                );
+            }
         } else {
+            let profile_start = profile_enabled.then(Instant::now);
             for (idx, &q) in qs.iter().take(block_len).enumerate() {
                 let global_idx = block_global_start + idx;
                 let out_feature = global_idx / config.in_features;
@@ -440,6 +510,16 @@ fn accumulate_q8_0_chunk_multiply_into(
                 if in_feature + 1 == config.in_features {
                     state.finish_current(config, weight_name)?;
                 }
+            }
+            if let Some(profile_start) = profile_start {
+                record_q8_kernel_path(
+                    Q8KernelPath::SplitRowScalar,
+                    1,
+                    1,
+                    0,
+                    config.batch as u64,
+                    profile_start.elapsed(),
+                );
             }
         }
     }
@@ -455,6 +535,7 @@ fn accumulate_q8_0_chunk_multiply_into_batch1_complete_rows(
     state: &mut StreamingLinearMultiplyIntoState<'_>,
     weight_name: &str,
 ) -> Result<bool> {
+    let profile_enabled = q8_kernel_profile_enabled();
     let Some((first_row, row_count, blocks_per_row)) =
         q8_0_complete_row_span(q8_bytes, element_start, config)?
     else {
@@ -470,6 +551,7 @@ fn accumulate_q8_0_chunk_multiply_into_batch1_complete_rows(
         )));
     }
 
+    let profile_start = profile_enabled.then(Instant::now);
     for local_row in 0..row_count {
         let out_feature = first_row + local_row;
         advance_multiply_state_to_row(state, out_feature, config, weight_name)?;
@@ -489,6 +571,16 @@ fn accumulate_q8_0_chunk_multiply_into_batch1_complete_rows(
         state.current_acc[0] = acc;
         state.finish_current(config, weight_name)?;
     }
+    if let Some(profile_start) = profile_start {
+        record_q8_kernel_path(
+            Q8KernelPath::Batch1CompleteMultiply,
+            1,
+            (row_count * blocks_per_row) as u64,
+            row_count as u64,
+            config.batch as u64,
+            profile_start.elapsed(),
+        );
+    }
 
     Ok(true)
 }
@@ -501,6 +593,7 @@ fn accumulate_q8_0_chunk_argmax(
     state: &mut StreamingLinearArgmaxState<'_>,
     weight_name: &str,
 ) -> Result<()> {
+    let profile_enabled = q8_kernel_profile_enabled();
     let weight_elements = config
         .out_features
         .checked_mul(config.in_features)
@@ -530,12 +623,24 @@ fn accumulate_q8_0_chunk_argmax(
         let in_feature = block_global_start % config.in_features;
 
         if in_feature + block_len <= config.in_features {
+            let profile_start = profile_enabled.then(Instant::now);
             advance_argmax_state_to_row(state, out_feature, config, weight_name)?;
             state.current_acc += scale * q8_0_dot_i8_f32(qs, &input[in_feature..], block_len);
             if in_feature + block_len == config.in_features {
                 state.finish_current(config, weight_name)?;
             }
+            if let Some(profile_start) = profile_start {
+                record_q8_kernel_path(
+                    Q8KernelPath::ContiguousI8Dot,
+                    1,
+                    1,
+                    0,
+                    config.batch as u64,
+                    profile_start.elapsed(),
+                );
+            }
         } else {
+            let profile_start = profile_enabled.then(Instant::now);
             for (idx, &q) in qs.iter().take(block_len).enumerate() {
                 let global_idx = block_global_start + idx;
                 let out_feature = global_idx / config.in_features;
@@ -545,6 +650,16 @@ fn accumulate_q8_0_chunk_argmax(
                 if in_feature + 1 == config.in_features {
                     state.finish_current(config, weight_name)?;
                 }
+            }
+            if let Some(profile_start) = profile_start {
+                record_q8_kernel_path(
+                    Q8KernelPath::SplitRowScalar,
+                    1,
+                    1,
+                    0,
+                    config.batch as u64,
+                    profile_start.elapsed(),
+                );
             }
         }
     }
@@ -560,6 +675,7 @@ fn accumulate_q8_0_chunk_argmax_batch1_complete_rows(
     state: &mut StreamingLinearArgmaxState<'_>,
     weight_name: &str,
 ) -> Result<bool> {
+    let profile_enabled = q8_kernel_profile_enabled();
     let Some((first_row, row_count, blocks_per_row)) =
         q8_0_complete_row_span(q8_bytes, element_start, config)?
     else {
@@ -575,6 +691,7 @@ fn accumulate_q8_0_chunk_argmax_batch1_complete_rows(
         )));
     }
 
+    let profile_start = profile_enabled.then(Instant::now);
     for local_row in 0..row_count {
         let out_feature = first_row + local_row;
         advance_argmax_state_to_row(state, out_feature, config, weight_name)?;
@@ -593,6 +710,16 @@ fn accumulate_q8_0_chunk_argmax_batch1_complete_rows(
         }
         state.current_acc = acc;
         state.finish_current(config, weight_name)?;
+    }
+    if let Some(profile_start) = profile_start {
+        record_q8_kernel_path(
+            Q8KernelPath::Batch1CompleteArgmax,
+            1,
+            (row_count * blocks_per_row) as u64,
+            row_count as u64,
+            config.batch as u64,
+            profile_start.elapsed(),
+        );
     }
 
     Ok(true)
