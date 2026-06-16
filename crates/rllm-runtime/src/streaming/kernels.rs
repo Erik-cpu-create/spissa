@@ -271,7 +271,7 @@ fn accumulate_q8_0_chunk(
 
         if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
             let profile_start = profile_enabled.then(Instant::now);
-            let scaled = q8_0_scaled_block(qs, scale);
+            let scaled = q8_0_scaled_block_reecast(qs, scale);
             let mut batch_idx = 0usize;
             while batch_idx + 4 <= config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
@@ -443,7 +443,7 @@ fn accumulate_q8_0_chunk_multiply_into(
         if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
             let profile_start = profile_enabled.then(Instant::now);
             advance_multiply_state_to_row(state, out_feature, config, weight_name)?;
-            let scaled = q8_0_scaled_block(qs, scale);
+            let scaled = q8_0_scaled_block_reecast(qs, scale);
             let mut batch_idx = 0usize;
             while batch_idx + 4 <= config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
@@ -790,12 +790,59 @@ fn q8_0_dot_i8_f32(qs: &[u8], input: &[f32], len: usize) -> f32 {
     acc
 }
 
+#[allow(dead_code)]
 fn q8_0_scaled_block(qs: &[u8], scale: f32) -> [f32; 32] {
     let mut scaled = [0.0f32; 32];
     for idx in 0..32 {
         scaled[idx] = scale * (qs[idx] as i8) as f32;
     }
     scaled
+}
+
+fn q8_0_scaled_block_reecast(qs: &[u8], scale: f32) -> [f32; 32] {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        return q8_0_scaled_block_neon(qs, scale);
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    q8_0_scaled_block(qs, scale)
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn q8_0_scaled_block_neon(qs: &[u8], scale: f32) -> [f32; 32] {
+    let mut out = [0.0f32; 32];
+    let scale_vec = vdupq_n_f32(scale);
+    let mut offset = 0usize;
+    while offset < 32 {
+        let q_i8 = vld1q_s8(qs.as_ptr().add(offset) as *const i8);
+        let low_i16 = vmovl_s8(vget_low_s8(q_i8));
+        let high_i16 = vmovl_s8(vget_high_s8(q_i8));
+
+        let low_low_i32 = vmovl_s16(vget_low_s16(low_i16));
+        let low_high_i32 = vmovl_s16(vget_high_s16(low_i16));
+        let high_low_i32 = vmovl_s16(vget_low_s16(high_i16));
+        let high_high_i32 = vmovl_s16(vget_high_s16(high_i16));
+
+        vst1q_f32(
+            out.as_mut_ptr().add(offset),
+            vmulq_f32(vcvtq_f32_s32(low_low_i32), scale_vec),
+        );
+        vst1q_f32(
+            out.as_mut_ptr().add(offset + 4),
+            vmulq_f32(vcvtq_f32_s32(low_high_i32), scale_vec),
+        );
+        vst1q_f32(
+            out.as_mut_ptr().add(offset + 8),
+            vmulq_f32(vcvtq_f32_s32(high_low_i32), scale_vec),
+        );
+        vst1q_f32(
+            out.as_mut_ptr().add(offset + 12),
+            vmulq_f32(vcvtq_f32_s32(high_high_i32), scale_vec),
+        );
+        offset += 16;
+    }
+    out
 }
 
 fn f32_dot_32(weights: &[f32; 32], input: &[f32]) -> f32 {
