@@ -270,10 +270,25 @@ fn accumulate_q8_0_chunk(
 
         if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
             let scaled = q8_0_scaled_block(qs, scale);
-            for batch_idx in 0..config.batch {
+            let mut batch_idx = 0usize;
+            while batch_idx + 4 <= config.batch {
+                let input_start = batch_idx * config.in_features + in_feature;
+                let output_start = batch_idx * config.out_features;
+                accumulate_f32_dot_32_batch4(
+                    &scaled,
+                    &input[input_start..],
+                    config.in_features,
+                    &mut output[output_start..],
+                    config.out_features,
+                    out_feature,
+                );
+                batch_idx += 4;
+            }
+            while batch_idx < config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
                 let output_idx = batch_idx * config.out_features + out_feature;
                 output[output_idx] += f32_dot_32(&scaled, &input[input_start..]);
+                batch_idx += 1;
             }
         } else if in_feature + block_len <= config.in_features {
             for batch_idx in 0..config.batch {
@@ -647,6 +662,33 @@ fn f32_dot_32(weights: &[f32; 32], input: &[f32]) -> f32 {
         idx += 4;
     }
     (acc0 + acc1) + (acc2 + acc3)
+}
+
+fn accumulate_f32_dot_32_batch4(
+    weights: &[f32; 32],
+    input: &[f32],
+    input_stride: usize,
+    output: &mut [f32],
+    output_stride: usize,
+    out_feature: usize,
+) {
+    let mut acc0 = output[out_feature];
+    let mut acc1 = output[output_stride + out_feature];
+    let mut acc2 = output[output_stride * 2 + out_feature];
+    let mut acc3 = output[output_stride * 3 + out_feature];
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weight = weights[idx];
+        acc0 += weight * input[idx];
+        acc1 += weight * input[input_stride + idx];
+        acc2 += weight * input[input_stride * 2 + idx];
+        acc3 += weight * input[input_stride * 3 + idx];
+        idx += 1;
+    }
+    output[out_feature] = acc0;
+    output[output_stride + out_feature] = acc1;
+    output[output_stride * 2 + out_feature] = acc2;
+    output[output_stride * 3 + out_feature] = acc3;
 }
 
 fn advance_multiply_state_to_row(
