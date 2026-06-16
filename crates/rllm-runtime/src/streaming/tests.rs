@@ -650,6 +650,21 @@ mod tests {
     }
 
     #[test]
+    fn q8_0_scaled_block_applies_scale_once() {
+        let mut q = [0i8; 32];
+        for (idx, value) in q.iter_mut().enumerate() {
+            *value = idx as i8 - 16;
+        }
+        let q8 = q8_0_block_bytes(0.5, &q);
+
+        let scaled = q8_0_scaled_block(&q8[2..34], 0.5);
+
+        assert_eq!(scaled[0], -8.0);
+        assert_eq!(scaled[16], 0.0);
+        assert_eq!(scaled[31], 7.5);
+    }
+
+    #[test]
     fn q8_0_batch1_multiply_row_fast_path_accumulates_complete_rows() {
         let mut row0 = [0i8; 32];
         let mut row1 = [0i8; 32];
