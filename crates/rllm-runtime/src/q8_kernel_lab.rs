@@ -150,6 +150,17 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
             max_abs_diff: max_abs_diff(&baseline_output, &output),
             speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
         });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reeduo_neon_block64_batch4(&q8, scale, &input, config.batch, config.in_features)
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reeduo_neon_block64_batch4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
     }
 
     if config.batch == 1 {
@@ -471,6 +482,74 @@ pub fn reewide_neon_f32_dot32_batch8(
     output
 }
 
+#[cfg(target_arch = "aarch64")]
+pub fn reeduo_neon_block64_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    let mut block = 0usize;
+    while block + 1 < blocks {
+        let first_offset = block * 34;
+        let second_offset = first_offset + 34;
+        let scaled = unsafe {
+            scaled_pair_block_neon(
+                &q8[first_offset + 2..first_offset + 34],
+                &q8[second_offset + 2..second_offset + 34],
+                scale,
+            )
+        };
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled64_batch4(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] += dot_f32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+        block += 2;
+    }
+    while block < blocks {
+        let offset = block * 34;
+        let scaled = unsafe { scaled_block_neon(&q8[offset + 2..offset + 34], scale) };
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled_batch4(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+        block += 1;
+    }
+    output
+}
+
 pub fn unrolled_i8_dot32_batch4(
     q8: &[u8],
     scale: f32,
@@ -641,6 +720,16 @@ unsafe fn scaled_block_neon(qs: &[u8], scale: f32) -> [f32; 32] {
         );
         offset += 16;
     }
+    out
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn scaled_pair_block_neon(first: &[u8], second: &[u8], scale: f32) -> [f32; 64] {
+    let mut out = [0.0f32; 64];
+    let first_scaled = scaled_block_neon(first, scale);
+    let second_scaled = scaled_block_neon(second, scale);
+    out[..32].copy_from_slice(&first_scaled);
+    out[32..].copy_from_slice(&second_scaled);
     out
 }
 
@@ -823,6 +912,41 @@ unsafe fn accumulate_neon_scaled_batch8(
     output[batch_idx + 7] += vaddvq_f32(acc7);
 }
 
+#[cfg(target_arch = "aarch64")]
+unsafe fn accumulate_neon_scaled64_batch4(
+    scaled: &[f32; 64],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut idx = 0usize;
+    while idx < 64 {
+        let weights = vld1q_f32(scaled.as_ptr().add(idx));
+        acc0 = vfmaq_f32(acc0, weights, vld1q_f32(input.as_ptr().add(idx)));
+        acc1 = vfmaq_f32(acc1, weights, vld1q_f32(input.as_ptr().add(stride + idx)));
+        acc2 = vfmaq_f32(
+            acc2,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 2 + idx)),
+        );
+        acc3 = vfmaq_f32(
+            acc3,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 3 + idx)),
+        );
+        idx += 4;
+    }
+    output[batch_idx] += vaddvq_f32(acc0);
+    output[batch_idx + 1] += vaddvq_f32(acc1);
+    output[batch_idx + 2] += vaddvq_f32(acc2);
+    output[batch_idx + 3] += vaddvq_f32(acc3);
+}
+
 fn accumulate_reeflow_i8_scaled_batch4(
     qs: &[u8],
     scale: f32,
@@ -856,6 +980,14 @@ fn dot_f32_32(weights: &[f32; 32], input: &[f32]) -> f32 {
         acc += weights[idx] * input[idx];
     }
     acc
+}
+
+fn dot_f32(weights: &[f32], input: &[f32]) -> f32 {
+    weights
+        .iter()
+        .zip(input.iter())
+        .map(|(weight, value)| weight * value)
+        .sum()
 }
 
 fn checksum(values: &[f32]) -> f32 {
@@ -910,6 +1042,8 @@ mod tests {
         assert!(variants.contains(&"reecast_neon_scale_batch4"));
         #[cfg(target_arch = "aarch64")]
         assert!(variants.contains(&"reewide_neon_f32_dot32_batch8"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(variants.contains(&"reeduo_neon_block64_batch4"));
 
         for result in &report.results {
             assert!(
