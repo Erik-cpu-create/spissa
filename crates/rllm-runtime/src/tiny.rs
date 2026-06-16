@@ -6,7 +6,7 @@ use crate::{
     StreamingBlockParameters, StreamingBlockRuntime, StreamingBlockTensorNames,
     StreamingLinearConfig, StreamingTileLinearConfig, DEFAULT_STREAMING_TILE_ELEMENTS,
 };
-use rllm_container::{ChunkMeta, TensorMeta};
+use rllm_container::{ChunkMeta, DType, TensorMeta};
 
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingEmbeddingConfig {
@@ -34,6 +34,22 @@ struct EmbeddingChunkRequest {
     range_start_in_chunk: usize,
     range_len_bytes: usize,
     copies: Vec<EmbeddingCopySpan>,
+}
+
+#[derive(Debug, Clone)]
+struct Q4EmbeddingCopySpan {
+    global_element_start: usize,
+    element_len: usize,
+    output_start: usize,
+}
+
+#[derive(Debug, Clone)]
+struct Q4EmbeddingChunkRequest {
+    chunk: ChunkMeta,
+    range_start_in_chunk: usize,
+    range_len_bytes: usize,
+    decoded_global_element_start: usize,
+    copies: Vec<Q4EmbeddingCopySpan>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -255,6 +271,20 @@ pub fn streaming_embedding_lookup_from_model(
     }
 
     let mut output = vec![0.0f32; token_ids.len() * config.hidden_size];
+    if tensor.dtype == DType::Q4_0 {
+        streaming_q4_embedding_lookup_from_model(
+            model,
+            &tensor,
+            &chunks,
+            embedding_name,
+            token_ids,
+            config,
+            budget,
+            &mut output,
+        )?;
+        return Ok(output);
+    }
+
     let dtype_size = tensor.dtype.size_bytes();
     let expected_bytes = config
         .vocab_size
@@ -336,6 +366,95 @@ pub fn streaming_embedding_lookup_from_model(
     }
 
     Ok(output)
+}
+
+fn streaming_q4_embedding_lookup_from_model(
+    model: &mut LazyRllmModel,
+    tensor: &TensorMeta,
+    chunks: &[ChunkMeta],
+    embedding_name: &str,
+    token_ids: &[usize],
+    config: StreamingEmbeddingConfig,
+    budget: &mut MemoryBudget,
+    output: &mut [f32],
+) -> Result<()> {
+    const Q4_BLOCK_ELEMENTS: usize = 32;
+    const Q4_BLOCK_BYTES: usize = 18;
+
+    let element_count = config
+        .vocab_size
+        .checked_mul(config.hidden_size)
+        .ok_or_else(|| RuntimeError::Shape("embedding element count overflow".to_string()))?;
+    let expected_bytes = DType::Q4_0.byte_size_for_elements(element_count);
+    let chunk_windows =
+        embedding_chunk_windows(chunks, Q4_BLOCK_BYTES, expected_bytes, embedding_name)?;
+    let requests = build_q4_embedding_row_requests(
+        token_ids,
+        config,
+        &chunk_windows,
+        embedding_name,
+        Q4_BLOCK_ELEMENTS,
+        Q4_BLOCK_BYTES,
+    )?;
+
+    for request in requests {
+        model.with_decoded_chunk_range(
+            request.chunk.chunk_id,
+            request.range_start_in_chunk as u64,
+            request.range_len_bytes as u64,
+            budget,
+            |bytes, budget| {
+                if bytes.len() != request.range_len_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "embedding Q4_0 chunk {} range decoded to {} bytes, expected {}",
+                        request.chunk.chunk_id,
+                        bytes.len(),
+                        request.range_len_bytes
+                    )));
+                }
+                if bytes.len() % Q4_BLOCK_BYTES != 0 {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "embedding Q4_0 chunk {} range byte len {} is not aligned to block size {}",
+                        request.chunk.chunk_id,
+                        bytes.len(),
+                        Q4_BLOCK_BYTES
+                    )));
+                }
+
+                let decoded_elements = (bytes.len() / Q4_BLOCK_BYTES)
+                    .checked_mul(Q4_BLOCK_ELEMENTS)
+                    .ok_or_else(|| {
+                        RuntimeError::Shape("embedding Q4_0 f32 scratch overflow".to_string())
+                    })?;
+                let scratch_bytes = decoded_elements
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        RuntimeError::Shape("embedding Q4_0 f32 scratch overflow".to_string())
+                    })?;
+                let scratch_label = format!(
+                    "streaming embedding Q4_0 f32 scratch chunk {} range [{}..{})",
+                    request.chunk.chunk_id,
+                    request.range_start_in_chunk,
+                    request.range_start_in_chunk + request.range_len_bytes
+                );
+                budget.reserve(scratch_bytes, scratch_label.clone())?;
+                let values = match decode_to_f32(tensor.dtype, bytes) {
+                    Ok(values) => values,
+                    Err(err) => {
+                        budget.release(scratch_bytes, scratch_label)?;
+                        return Err(err);
+                    }
+                };
+
+                let result = copy_q4_embedding_request_values(&values, &request, output);
+                drop(values);
+                budget.release(scratch_bytes, scratch_label)?;
+                result
+            },
+        )?;
+    }
+
+    Ok(())
 }
 
 /// Tiny end-to-end next-token smoke path over one streaming transformer block.
@@ -788,7 +907,7 @@ fn validate_embedding_tensor(tensor: &TensorMeta, config: StreamingEmbeddingConf
     let expected_bytes = config
         .vocab_size
         .checked_mul(config.hidden_size)
-        .and_then(|elements| elements.checked_mul(tensor.dtype.size_bytes()))
+        .map(|elements| tensor.dtype.byte_size_for_elements(elements))
         .ok_or_else(|| RuntimeError::Shape("embedding byte size overflow".to_string()))?;
     if tensor.original_size_bytes != expected_bytes as u64 {
         return Err(RuntimeError::InvalidTensorData(format!(
@@ -911,6 +1030,108 @@ fn build_embedding_row_requests(
     Ok(requests)
 }
 
+fn build_q4_embedding_row_requests(
+    token_ids: &[usize],
+    config: StreamingEmbeddingConfig,
+    windows: &[EmbeddingChunkWindow],
+    embedding_name: &str,
+    block_elements: usize,
+    block_bytes: usize,
+) -> Result<Vec<Q4EmbeddingChunkRequest>> {
+    let mut requests = Vec::new();
+    for window in windows {
+        if window.start_byte % block_bytes != 0 || window.end_byte % block_bytes != 0 {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "embedding tensor {embedding_name} Q4_0 chunk window [{}..{}) is not block-aligned",
+                window.start_byte, window.end_byte
+            )));
+        }
+
+        let window_element_start = (window.start_byte / block_bytes)
+            .checked_mul(block_elements)
+            .ok_or_else(|| {
+                RuntimeError::Shape("embedding Q4_0 window element offset overflow".to_string())
+            })?;
+        let window_element_end = (window.end_byte / block_bytes)
+            .checked_mul(block_elements)
+            .ok_or_else(|| {
+                RuntimeError::Shape("embedding Q4_0 window element end overflow".to_string())
+            })?;
+
+        let mut copies = Vec::new();
+        let mut request_start = usize::MAX;
+        let mut request_end = 0usize;
+
+        for (seq_idx, &token_id) in token_ids.iter().enumerate() {
+            let row_start = token_id.checked_mul(config.hidden_size).ok_or_else(|| {
+                RuntimeError::Shape("embedding Q4_0 row element offset overflow".to_string())
+            })?;
+            let row_end = row_start.checked_add(config.hidden_size).ok_or_else(|| {
+                RuntimeError::Shape("embedding Q4_0 row element end overflow".to_string())
+            })?;
+            let overlap_start = row_start.max(window_element_start);
+            let overlap_end = row_end.min(window_element_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            let block_start = overlap_start / block_elements;
+            let block_end = overlap_end.div_ceil(block_elements);
+            let range_start = block_start
+                .checked_mul(block_bytes)
+                .and_then(|byte| byte.checked_sub(window.start_byte))
+                .ok_or_else(|| {
+                    RuntimeError::Shape("embedding Q4_0 range start overflow".to_string())
+                })?;
+            let range_end = block_end
+                .checked_mul(block_bytes)
+                .and_then(|byte| byte.checked_sub(window.start_byte))
+                .ok_or_else(|| {
+                    RuntimeError::Shape("embedding Q4_0 range end overflow".to_string())
+                })?;
+            let output_start = seq_idx
+                .checked_mul(config.hidden_size)
+                .and_then(|base| base.checked_add(overlap_start - row_start))
+                .ok_or_else(|| {
+                    RuntimeError::Shape("embedding Q4_0 output offset overflow".to_string())
+                })?;
+
+            copies.push(Q4EmbeddingCopySpan {
+                global_element_start: overlap_start,
+                element_len: overlap_end - overlap_start,
+                output_start,
+            });
+            request_start = request_start.min(range_start);
+            request_end = request_end.max(range_end);
+        }
+
+        if !copies.is_empty() {
+            if request_start % block_bytes != 0 || request_end % block_bytes != 0 {
+                return Err(RuntimeError::InvalidTensorData(format!(
+                    "embedding tensor {embedding_name} Q4_0 request range [{}..{}) is not block-aligned",
+                    request_start, request_end
+                )));
+            }
+            let decoded_global_element_start = ((window.start_byte + request_start) / block_bytes)
+                .checked_mul(block_elements)
+                .ok_or_else(|| {
+                    RuntimeError::Shape(
+                        "embedding Q4_0 decoded element offset overflow".to_string(),
+                    )
+                })?;
+            requests.push(Q4EmbeddingChunkRequest {
+                chunk: window.chunk.clone(),
+                range_start_in_chunk: request_start,
+                range_len_bytes: request_end - request_start,
+                decoded_global_element_start,
+                copies,
+            });
+        }
+    }
+
+    Ok(requests)
+}
+
 fn copy_embedding_request_values(
     values: &[f32],
     request: &EmbeddingChunkRequest,
@@ -942,6 +1163,39 @@ fn copy_embedding_request_values(
         {
             return Err(RuntimeError::InvalidTensorData(format!(
                 "embedding tensor {embedding_name} copy range out of bounds: source [{}..{}) / {}, output [{}..{}) / {}",
+                source_start,
+                source_end,
+                values.len(),
+                copy.output_start,
+                output_end,
+                output.len()
+            )));
+        }
+        output[copy.output_start..output_end].copy_from_slice(&values[source_start..source_end]);
+    }
+    Ok(())
+}
+
+fn copy_q4_embedding_request_values(
+    values: &[f32],
+    request: &Q4EmbeddingChunkRequest,
+    output: &mut [f32],
+) -> Result<()> {
+    for copy in &request.copies {
+        let source_start = copy
+            .global_element_start
+            .checked_sub(request.decoded_global_element_start)
+            .ok_or_else(|| RuntimeError::Shape("embedding Q4_0 source underflow".to_string()))?;
+        let source_end = source_start
+            .checked_add(copy.element_len)
+            .ok_or_else(|| RuntimeError::Shape("embedding Q4_0 source overflow".to_string()))?;
+        let output_end = copy
+            .output_start
+            .checked_add(copy.element_len)
+            .ok_or_else(|| RuntimeError::Shape("embedding Q4_0 output overflow".to_string()))?;
+        if source_end > values.len() || output_end > output.len() {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "embedding Q4_0 copy range out of bounds: source [{}..{}) / {}, output [{}..{}) / {}",
                 source_start,
                 source_end,
                 values.len(),
@@ -1111,6 +1365,45 @@ mod tests {
                 1,
             )
             .unwrap();
+    }
+
+    fn add_q4_tensor(
+        writer: &mut RllmWriter,
+        tensor_id: u64,
+        name: &str,
+        shape: Vec<u64>,
+        values: &[f32],
+    ) -> Vec<u8> {
+        let source_bytes = f32_bytes(values);
+        let bytes = crate::quantize_to_q4_0(&source_bytes, DType::Fp32, &shape).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id,
+            name: name.to_string(),
+            shape,
+            dtype: DType::Q4_0,
+            original_size_bytes: bytes.len() as u64,
+            compressed_size_bytes: bytes.len() as u64,
+            original_sha256: sha256_array(&bytes),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(tensor_id, "rtc-raw-v1", &bytes, &bytes, 0)
+            .unwrap();
+        bytes
+    }
+
+    fn write_q4_embedding_model(path: &std::path::Path) -> Vec<u8> {
+        let mut writer = RllmWriter::new(path, GlobalMetadata::new_test()).unwrap();
+        let bytes = add_q4_tensor(
+            &mut writer,
+            0,
+            "embed.weight",
+            vec![VOCAB_SIZE as u64, HIDDEN_SIZE as u64],
+            &EMBEDDING_WEIGHT,
+        );
+        writer.finalize().unwrap();
+        bytes
     }
 
     fn write_tiny_model(path: &std::path::Path) {
@@ -1441,6 +1734,38 @@ mod tests {
             "selective row recall should fit under the budget that full embedding chunk scan exceeds; peak={} bytes",
             budget.peak_bytes()
         );
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_embedding_lookup_dequantizes_q4_0_rows() {
+        let path = temp_path("embedding-q4");
+        let q4_bytes = write_q4_embedding_model(&path);
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let token_ids = [2, 0, 2];
+        let mut dequantized = vec![0.0f32; 32];
+        crate::dequantize_q4_0(&q4_bytes, &mut dequantized);
+        let mut expected = Vec::new();
+        for &token_id in &token_ids {
+            let start = token_id * HIDDEN_SIZE;
+            expected.extend_from_slice(&dequantized[start..start + HIDDEN_SIZE]);
+        }
+        let mut budget = MemoryBudget::new(256);
+
+        let actual = streaming_embedding_lookup_from_model(
+            &mut model,
+            "embed.weight",
+            &token_ids,
+            StreamingEmbeddingConfig {
+                vocab_size: VOCAB_SIZE,
+                hidden_size: HIDDEN_SIZE,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_close_vec(&actual, &expected, 1e-6);
+        assert_eq!(budget.current_bytes(), 0);
         std::fs::remove_file(&path).ok();
     }
 
