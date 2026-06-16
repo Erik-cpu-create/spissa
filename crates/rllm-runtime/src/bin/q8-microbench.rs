@@ -93,7 +93,7 @@ fn write_output(path: &PathBuf, content: String) -> std::io::Result<()> {
 
 fn markdown_report(report: &rllm_runtime::q8_kernel_lab::Q8KernelBenchReport) -> String {
     let mut out = String::new();
-    out.push_str("# R91 Q8 Kernel Microbench\n\n");
+    out.push_str("# Q8 Kernel Microbench\n\n");
     out.push_str(&format!("- REE kernel: `{}`\n", report.ree_kernel));
     out.push_str(&format!("- batch: `{}`\n", report.batch));
     out.push_str(&format!("- in_features: `{}`\n", report.in_features));

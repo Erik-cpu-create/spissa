@@ -90,6 +90,32 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         });
     }
 
+    if config.batch == 1 {
+        let (baseline_batch1_ns, baseline_batch1_output) = time_variant(config.iters, 1, || {
+            baseline_i8_dot32_batch1_row(&q8, scale, &input, config.in_features)
+        });
+
+        results.push(Q8KernelBenchResult {
+            variant: "baseline_i8_dot32_batch1_row".to_string(),
+            elapsed_ns: baseline_batch1_ns,
+            checksum: checksum(&baseline_batch1_output),
+            max_abs_diff: 0.0,
+            speedup_vs_baseline: 1.0,
+        });
+
+        let (scaled_batch1_ns, scaled_batch1_output) = time_variant(config.iters, 1, || {
+            scaled_f32_dot32_batch1_row(&q8, scale, &input, config.in_features)
+        });
+
+        results.push(Q8KernelBenchResult {
+            variant: "scaled_f32_dot32_batch1_row".to_string(),
+            elapsed_ns: scaled_batch1_ns,
+            checksum: checksum(&scaled_batch1_output),
+            max_abs_diff: max_abs_diff(&baseline_batch1_output, &scaled_batch1_output),
+            speedup_vs_baseline: baseline_batch1_ns as f64 / scaled_batch1_ns.max(1) as f64,
+        });
+    }
+
     Q8KernelBenchReport {
         ree_kernel: REE_KERNEL_NAME.to_string(),
         batch: config.batch,
@@ -230,6 +256,41 @@ pub fn unrolled_i8_dot32_batch4(
     output
 }
 
+pub fn baseline_i8_dot32_batch1_row(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    in_features: usize,
+) -> Vec<f32> {
+    let blocks = q8.len() / 34;
+    let mut output = vec![0.0f32; 1];
+    for block in 0..blocks {
+        let offset = block * 34;
+        let in_feature = block * 32;
+        output[0] += scale * dot_i8_f32(&q8[offset + 2..offset + 34], &input[in_feature..]);
+    }
+    assert_eq!(blocks * 32, in_features);
+    output
+}
+
+pub fn scaled_f32_dot32_batch1_row(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    in_features: usize,
+) -> Vec<f32> {
+    let blocks = q8.len() / 34;
+    let mut output = vec![0.0f32; 1];
+    for block in 0..blocks {
+        let offset = block * 34;
+        let in_feature = block * 32;
+        let scaled = scaled_block(&q8[offset + 2..offset + 34], scale);
+        output[0] += dot_f32_32(&scaled, &input[in_feature..]);
+    }
+    assert_eq!(blocks * 32, in_features);
+    output
+}
+
 fn dot_i8_f32(qs: &[u8], input: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     for idx in 0..32 {
@@ -335,6 +396,39 @@ mod tests {
                 "{} should report elapsed time",
                 result.variant
             );
+            assert!(
+                result.max_abs_diff <= 0.0001,
+                "{} diff {} exceeded tolerance",
+                result.variant,
+                result.max_abs_diff
+            );
+        }
+    }
+
+    #[test]
+    fn q8_kernel_lab_reports_batch1_decode_gate_variants() {
+        let report = run_suite(Q8KernelBenchConfig {
+            batch: 1,
+            in_features: 2048,
+            blocks_per_row: 64,
+            out_features: 8192,
+            iters: 2,
+        });
+
+        let variants = report
+            .results
+            .iter()
+            .map(|result| result.variant.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(variants.contains(&"baseline_i8_dot32_batch1_row"));
+        assert!(variants.contains(&"scaled_f32_dot32_batch1_row"));
+
+        for result in report
+            .results
+            .iter()
+            .filter(|result| result.variant.ends_with("_batch1_row"))
+        {
             assert!(
                 result.max_abs_diff <= 0.0001,
                 "{} diff {} exceeded tolerance",
