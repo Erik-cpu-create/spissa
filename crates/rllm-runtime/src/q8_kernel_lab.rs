@@ -76,6 +76,24 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         },
         {
             let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                scaled_f32_dot32_batch4_runtime(
+                    &q8,
+                    scale,
+                    &input,
+                    config.batch,
+                    config.in_features,
+                )
+            });
+            ("scaled_f32_dot32_batch4_runtime", elapsed_ns, output)
+        },
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                reelane_f32_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
+            });
+            ("reelane_f32_dot32_batch4", elapsed_ns, output)
+        },
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
                 reflow_i8_scaled_batch4(&q8, scale, &input, config.batch, config.in_features)
             });
             ("reeflow_i8_scaled_batch4", elapsed_ns, output)
@@ -212,6 +230,72 @@ pub fn scaled_f32_dot32_batch4(
         let mut batch_idx = 0usize;
         while batch_idx + 4 <= batch {
             accumulate_scaled_batch4(
+                &scaled,
+                &input[batch_idx * in_features + in_feature..],
+                in_features,
+                &mut output,
+                batch_idx,
+            );
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+pub fn scaled_f32_dot32_batch4_runtime(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = scaled_block(&q8[offset + 2..offset + 34], scale);
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            accumulate_scaled_batch4_runtime(
+                &scaled,
+                &input[batch_idx * in_features + in_feature..],
+                in_features,
+                &mut output,
+                batch_idx,
+            );
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+pub fn reelane_f32_dot32_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = scaled_block(&q8[offset + 2..offset + 34], scale);
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            accumulate_reelane_scaled_batch4(
                 &scaled,
                 &input[batch_idx * in_features + in_feature..],
                 in_features,
@@ -379,6 +463,78 @@ fn accumulate_scaled_batch4(
     output[batch_idx + 3] += dot_f32_32(scaled, &input[stride * 3..]);
 }
 
+fn accumulate_scaled_batch4_runtime(
+    scaled: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = output[batch_idx];
+    let mut acc1 = output[batch_idx + 1];
+    let mut acc2 = output[batch_idx + 2];
+    let mut acc3 = output[batch_idx + 3];
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weight = scaled[idx];
+        acc0 += weight * input[idx];
+        acc1 += weight * input[stride + idx];
+        acc2 += weight * input[stride * 2 + idx];
+        acc3 += weight * input[stride * 3 + idx];
+        idx += 1;
+    }
+    output[batch_idx] = acc0;
+    output[batch_idx + 1] = acc1;
+    output[batch_idx + 2] = acc2;
+    output[batch_idx + 3] = acc3;
+}
+
+fn accumulate_reelane_scaled_batch4(
+    scaled: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = output[batch_idx];
+    let mut acc1 = output[batch_idx + 1];
+    let mut acc2 = output[batch_idx + 2];
+    let mut acc3 = output[batch_idx + 3];
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weight0 = scaled[idx];
+        let weight1 = scaled[idx + 1];
+        let weight2 = scaled[idx + 2];
+        let weight3 = scaled[idx + 3];
+
+        acc0 += weight0 * input[idx];
+        acc1 += weight0 * input[stride + idx];
+        acc2 += weight0 * input[stride * 2 + idx];
+        acc3 += weight0 * input[stride * 3 + idx];
+
+        acc0 += weight1 * input[idx + 1];
+        acc1 += weight1 * input[stride + idx + 1];
+        acc2 += weight1 * input[stride * 2 + idx + 1];
+        acc3 += weight1 * input[stride * 3 + idx + 1];
+
+        acc0 += weight2 * input[idx + 2];
+        acc1 += weight2 * input[stride + idx + 2];
+        acc2 += weight2 * input[stride * 2 + idx + 2];
+        acc3 += weight2 * input[stride * 3 + idx + 2];
+
+        acc0 += weight3 * input[idx + 3];
+        acc1 += weight3 * input[stride + idx + 3];
+        acc2 += weight3 * input[stride * 2 + idx + 3];
+        acc3 += weight3 * input[stride * 3 + idx + 3];
+
+        idx += 4;
+    }
+    output[batch_idx] = acc0;
+    output[batch_idx + 1] = acc1;
+    output[batch_idx + 2] = acc2;
+    output[batch_idx + 3] = acc3;
+}
+
 fn accumulate_reeflow_i8_scaled_batch4(
     qs: &[u8],
     scale: f32,
@@ -456,6 +612,8 @@ mod tests {
             [
                 "baseline_i8_dot32_batch4",
                 "scaled_f32_dot32_batch4",
+                "scaled_f32_dot32_batch4_runtime",
+                "reelane_f32_dot32_batch4",
                 "reeflow_i8_scaled_batch4",
                 "unrolled_i8_dot32_batch4"
             ]
