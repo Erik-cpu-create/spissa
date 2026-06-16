@@ -76,6 +76,12 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         },
         {
             let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                reflow_i8_scaled_batch4(&q8, scale, &input, config.batch, config.in_features)
+            });
+            ("reeflow_i8_scaled_batch4", elapsed_ns, output)
+        },
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
                 unrolled_i8_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
             });
             ("unrolled_i8_dot32_batch4", elapsed_ns, output)
@@ -256,6 +262,43 @@ pub fn unrolled_i8_dot32_batch4(
     output
 }
 
+pub fn reflow_i8_scaled_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let qs = &q8[offset + 2..offset + 34];
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            accumulate_reeflow_i8_scaled_batch4(
+                qs,
+                scale,
+                &input[batch_idx * in_features + in_feature..],
+                in_features,
+                &mut output,
+                batch_idx,
+            );
+            batch_idx += 4;
+        }
+        if batch_idx < batch {
+            let scaled = scaled_block(qs, scale);
+            while batch_idx < batch {
+                output[batch_idx] +=
+                    dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+                batch_idx += 1;
+            }
+        }
+    }
+    output
+}
+
 pub fn baseline_i8_dot32_batch1_row(
     q8: &[u8],
     scale: f32,
@@ -336,6 +379,33 @@ fn accumulate_scaled_batch4(
     output[batch_idx + 3] += dot_f32_32(scaled, &input[stride * 3..]);
 }
 
+fn accumulate_reeflow_i8_scaled_batch4(
+    qs: &[u8],
+    scale: f32,
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = output[batch_idx];
+    let mut acc1 = output[batch_idx + 1];
+    let mut acc2 = output[batch_idx + 2];
+    let mut acc3 = output[batch_idx + 3];
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weight = scale * (qs[idx] as i8) as f32;
+        acc0 += weight * input[idx];
+        acc1 += weight * input[stride + idx];
+        acc2 += weight * input[stride * 2 + idx];
+        acc3 += weight * input[stride * 3 + idx];
+        idx += 1;
+    }
+    output[batch_idx] = acc0;
+    output[batch_idx + 1] = acc1;
+    output[batch_idx + 2] = acc2;
+    output[batch_idx + 3] = acc3;
+}
+
 fn dot_f32_32(weights: &[f32; 32], input: &[f32]) -> f32 {
     let mut acc = 0.0f32;
     for idx in 0..32 {
@@ -386,6 +456,7 @@ mod tests {
             [
                 "baseline_i8_dot32_batch4",
                 "scaled_f32_dot32_batch4",
+                "reeflow_i8_scaled_batch4",
                 "unrolled_i8_dot32_batch4"
             ]
         );
