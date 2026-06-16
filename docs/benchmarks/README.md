@@ -41,6 +41,7 @@ Examples:
 Each report should include:
 
 - hypothesis being tested
+- REE kernel name when the trial touches an execution kernel
 - artifact/model path and model shape
 - exact command or benchmark harness
 - machine/runtime context
@@ -68,5 +69,7 @@ important for bottleneck analysis and paper evidence.
 - Do not claim speedups without before/after numbers.
 - Keep failed trials. Negative evidence prevents repeated dead ends.
 - Separate exact/lossless results from fast/lossy or experimental results.
+- Name every serious kernel candidate with the REE lineage before reporting or merging it.
+- Use `*-LAB` for microbench-only REE kernels and only promote a REE kernel into runtime after benchmark evidence supports it.
 - Cite external papers as prior art when they inform a hypothesis.
 - Do not copy source code, formats, or implementation structure from other projects.

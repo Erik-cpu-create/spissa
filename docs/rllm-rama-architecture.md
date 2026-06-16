@@ -27,6 +27,12 @@ Reserved future subsystem name:
 ERIK = Episodic Recall Inference Kernel
 ```
 
+Required kernel lineage prefix:
+
+```text
+REE = Rama Erik Esprada kernel lineage
+```
+
 Short positioning:
 
 ```text
@@ -57,6 +63,22 @@ RAMA is the runtime architecture. It owns:
 - future eviction, consolidation, and adaptive layout policies
 
 ERIK is reserved for a later focused subsystem. It should not be used as a broad architecture name. Its intended scope is smarter episodic/context recall after RAMA has a stable runtime foundation.
+
+REE is the required lineage prefix for original RLLM execution kernels. Any new CPU
+kernel that becomes a serious benchmark candidate must receive a REE name before
+it is reported, merged, or promoted into runtime use. This naming is not cosmetic:
+it is part of RLLM's kernel versioning and research traceability contract.
+
+Required REE naming rules:
+
+- Use original names beginning with `REE`, for example `REEDOT-LAB`, `REEBORN-Q8`, `REETHINK-Q8`, `REEFUSE-Q8`, or `REELITE-Q8`.
+- Use `*-LAB` for microbench-only kernels that are not wired into inference.
+- Use `REEBORN-*` for the first measured kernel in a lineage that is promoted into runtime.
+- Use `REETHINK-*` for a redesigned replacement after a failed kernel direction.
+- Use `REEFUSE-*` for fused kernels such as gate/up or matmul+scale variants.
+- Use `REELITE-*` for kernels explicitly optimized for low-end or IoT CPU profiles.
+- Benchmark reports must include the REE kernel name, even when the trial fails.
+- Do not merge anonymous "fast path", "candidate", or "optimized kernel" changes without assigning and documenting the REE name.
 
 ## Originality Doctrine
 

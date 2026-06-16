@@ -12,6 +12,7 @@ State the specific idea being tested and why it should improve RLLM.
 ## Scope
 
 - Mode: exact-lowram | fast-lowram | experimental
+- REE kernel: none | REEDOT-LAB | REEBORN-* | REETHINK-* | REEFUSE-* | REELITE-*
 - Model/artifact:
 - Architecture:
 - Target device/profile:

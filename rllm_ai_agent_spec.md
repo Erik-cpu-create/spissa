@@ -22,6 +22,7 @@ RLLM = Runtime-compressed Local LLM
 RTC  = RLLM Tensor Codec
 RAMA = Rama Active Memory Architecture
 ERIK = Episodic Recall Inference Kernel (reserved future subsystem)
+REE  = Rama Erik Esprada kernel lineage
 ```
 
 Core positioning:
@@ -119,6 +120,32 @@ membaca konsep umum transformer
 menggunakan library standar untuk CLI, checksum, mmap, filesystem
 menggunakan model kecil/toy model untuk validasi awal
 ```
+
+### 1.5 Kernel runtime wajib punya versioning REE
+
+Setiap kernel eksekusi RLLM yang menjadi kandidat serius harus punya nama
+lineage REE sebelum dilaporkan, di-benchmark, atau di-merge.
+
+Aturan:
+
+```text
+REE = Rama Erik Esprada kernel lineage
+```
+
+Contoh nama:
+
+```text
+REEDOT-LAB    = microbench dot-product lab, belum dipakai runtime
+REEBORN-Q8    = kernel Q8 pertama yang terbukti dan dipromosikan ke runtime
+REETHINK-Q8   = redesign kernel setelah arah sebelumnya gagal
+REEFUSE-Q8    = fused kernel, misalnya gate/up atau matmul+scale
+REELITE-Q8    = kernel khusus low-end CPU / IoT profile
+```
+
+Agent tidak boleh membuat atau merge perubahan bernama generik seperti
+`fast path`, `candidate kernel`, atau `optimized kernel` tanpa mencatat nama
+REE-nya di plan dan laporan benchmark. Trial yang gagal tetap harus mencatat
+nama REE supaya negative evidence bisa dilacak.
 
 ---
 
