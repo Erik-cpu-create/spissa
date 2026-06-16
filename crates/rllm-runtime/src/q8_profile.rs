@@ -6,6 +6,14 @@ const PROFILE_ENV: &str = "RLLM_Q8_KERNEL_PROFILE";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Q8KernelPath {
     BatchGt1Scaled,
+    BatchGt1NormalScale,
+    BatchGt1NormalBatch4,
+    BatchGt1NormalTail,
+    BatchGt1MultiplyAdvance,
+    BatchGt1MultiplyScale,
+    BatchGt1MultiplyBatch4,
+    BatchGt1MultiplyTail,
+    BatchGt1MultiplyFinish,
     Batch1CompleteLinear,
     Batch1CompleteMultiply,
     Batch1CompleteArgmax,
@@ -17,6 +25,14 @@ impl Q8KernelPath {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BatchGt1Scaled => "batch_gt1_scaled",
+            Self::BatchGt1NormalScale => "batch_gt1_normal_scale",
+            Self::BatchGt1NormalBatch4 => "batch_gt1_normal_batch4",
+            Self::BatchGt1NormalTail => "batch_gt1_normal_tail",
+            Self::BatchGt1MultiplyAdvance => "batch_gt1_multiply_advance",
+            Self::BatchGt1MultiplyScale => "batch_gt1_multiply_scale",
+            Self::BatchGt1MultiplyBatch4 => "batch_gt1_multiply_batch4",
+            Self::BatchGt1MultiplyTail => "batch_gt1_multiply_tail",
+            Self::BatchGt1MultiplyFinish => "batch_gt1_multiply_finish",
             Self::Batch1CompleteLinear => "batch1_complete_linear",
             Self::Batch1CompleteMultiply => "batch1_complete_multiply",
             Self::Batch1CompleteArgmax => "batch1_complete_argmax",
@@ -101,7 +117,7 @@ pub fn q8_kernel_profile_snapshot_and_reset() -> Option<Q8KernelProfileSnapshot>
     let mut rows = std::mem::take(&mut state.rows);
     rows.sort_by(|left, right| right.elapsed_ns.cmp(&left.elapsed_ns));
     Some(Q8KernelProfileSnapshot {
-        ree_kernel: "REETHINK-Q8-SHAPE-PROFILER",
+        ree_kernel: "REEGLASS-Q8-HOTLOOP-PROFILER",
         rows,
     })
 }
@@ -138,13 +154,32 @@ mod tests {
             5,
             Duration::from_nanos(20),
         );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalBatch4,
+            4,
+            8,
+            0,
+            16,
+            Duration::from_nanos(40),
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1MultiplyFinish,
+            2,
+            2,
+            2,
+            0,
+            Duration::from_nanos(5),
+        );
 
         let snapshot = q8_kernel_profile_snapshot_and_reset().unwrap();
-        assert_eq!(snapshot.ree_kernel, "REETHINK-Q8-SHAPE-PROFILER");
-        assert_eq!(snapshot.rows[0].path, "contiguous_i8_dot");
-        assert_eq!(snapshot.rows[0].calls, 3);
-        assert_eq!(snapshot.rows[0].elapsed_ns, 30);
-        assert_eq!(snapshot.rows[1].path, "batch_gt1_scaled");
+        assert_eq!(snapshot.ree_kernel, "REEGLASS-Q8-HOTLOOP-PROFILER");
+        assert_eq!(snapshot.rows[0].path, "batch_gt1_normal_batch4");
+        assert_eq!(snapshot.rows[0].calls, 4);
+        assert_eq!(snapshot.rows[0].elapsed_ns, 40);
+        assert!(snapshot
+            .rows
+            .iter()
+            .any(|row| row.path == "batch_gt1_multiply_finish"));
         assert!(q8_kernel_profile_snapshot_and_reset().is_none());
     }
 }

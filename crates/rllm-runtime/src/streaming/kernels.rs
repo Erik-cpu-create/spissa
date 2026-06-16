@@ -246,6 +246,14 @@ fn accumulate_q8_0_chunk(
         .checked_mul(config.in_features)
         .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
     validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
+    let mut normal_scale_elapsed = std::time::Duration::ZERO;
+    let mut normal_scale_calls = 0u64;
+    let mut normal_batch4_elapsed = std::time::Duration::ZERO;
+    let mut normal_batch4_calls = 0u64;
+    let mut normal_batch4_items = 0u64;
+    let mut normal_tail_elapsed = std::time::Duration::ZERO;
+    let mut normal_tail_calls = 0u64;
+    let mut normal_tail_items = 0u64;
     if accumulate_q8_0_chunk_batch1_complete_rows(
         input,
         output,
@@ -271,8 +279,15 @@ fn accumulate_q8_0_chunk(
 
         if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
             let profile_start = profile_enabled.then(Instant::now);
+            let scale_start = profile_enabled.then(Instant::now);
             let scaled = q8_0_scaled_block_reecast(qs, scale);
+            if let Some(scale_start) = scale_start {
+                normal_scale_elapsed += scale_start.elapsed();
+                normal_scale_calls += 1;
+            }
             let mut batch_idx = 0usize;
+            let batch4_start_idx = batch_idx;
+            let batch4_start = profile_enabled.then(Instant::now);
             while batch_idx + 4 <= config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
                 let output_start = batch_idx * config.out_features;
@@ -286,11 +301,25 @@ fn accumulate_q8_0_chunk(
                 );
                 batch_idx += 4;
             }
+            if let Some(batch4_start) = batch4_start {
+                let calls = ((batch_idx - batch4_start_idx) / 4) as u64;
+                normal_batch4_elapsed += batch4_start.elapsed();
+                normal_batch4_calls += calls;
+                normal_batch4_items += calls * 4;
+            }
+            let tail_start_idx = batch_idx;
+            let tail_start = profile_enabled.then(Instant::now);
             while batch_idx < config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
                 let output_idx = batch_idx * config.out_features + out_feature;
                 output[output_idx] += f32_dot_32(&scaled, &input[input_start..]);
                 batch_idx += 1;
+            }
+            if let Some(tail_start) = tail_start {
+                let calls = (batch_idx - tail_start_idx) as u64;
+                normal_tail_elapsed += tail_start.elapsed();
+                normal_tail_calls += calls;
+                normal_tail_items += calls;
             }
             if let Some(profile_start) = profile_start {
                 record_q8_kernel_path(
@@ -342,6 +371,33 @@ fn accumulate_q8_0_chunk(
                 );
             }
         }
+    }
+
+    if profile_enabled {
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalScale,
+            normal_scale_calls,
+            normal_scale_calls,
+            0,
+            0,
+            normal_scale_elapsed,
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalBatch4,
+            normal_batch4_calls,
+            normal_batch4_calls,
+            0,
+            normal_batch4_items,
+            normal_batch4_elapsed,
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalTail,
+            normal_tail_calls,
+            normal_tail_calls,
+            0,
+            normal_tail_items,
+            normal_tail_elapsed,
+        );
     }
 
     Ok(())
@@ -417,6 +473,18 @@ fn accumulate_q8_0_chunk_multiply_into(
         .checked_mul(config.in_features)
         .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
     validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
+    let mut multiply_advance_elapsed = std::time::Duration::ZERO;
+    let mut multiply_advance_calls = 0u64;
+    let mut multiply_scale_elapsed = std::time::Duration::ZERO;
+    let mut multiply_scale_calls = 0u64;
+    let mut multiply_batch4_elapsed = std::time::Duration::ZERO;
+    let mut multiply_batch4_calls = 0u64;
+    let mut multiply_batch4_items = 0u64;
+    let mut multiply_tail_elapsed = std::time::Duration::ZERO;
+    let mut multiply_tail_calls = 0u64;
+    let mut multiply_tail_items = 0u64;
+    let mut multiply_finish_elapsed = std::time::Duration::ZERO;
+    let mut multiply_finish_calls = 0u64;
     if accumulate_q8_0_chunk_multiply_into_batch1_complete_rows(
         input,
         q8_bytes,
@@ -442,9 +510,21 @@ fn accumulate_q8_0_chunk_multiply_into(
 
         if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
             let profile_start = profile_enabled.then(Instant::now);
+            let advance_start = profile_enabled.then(Instant::now);
             advance_multiply_state_to_row(state, out_feature, config, weight_name)?;
+            if let Some(advance_start) = advance_start {
+                multiply_advance_elapsed += advance_start.elapsed();
+                multiply_advance_calls += 1;
+            }
+            let scale_start = profile_enabled.then(Instant::now);
             let scaled = q8_0_scaled_block_reecast(qs, scale);
+            if let Some(scale_start) = scale_start {
+                multiply_scale_elapsed += scale_start.elapsed();
+                multiply_scale_calls += 1;
+            }
             let mut batch_idx = 0usize;
+            let batch4_start_idx = batch_idx;
+            let batch4_start = profile_enabled.then(Instant::now);
             while batch_idx + 4 <= config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
                 accumulate_f32_dot_32_batch4_into_reevec(
@@ -456,13 +536,32 @@ fn accumulate_q8_0_chunk_multiply_into(
                 );
                 batch_idx += 4;
             }
+            if let Some(batch4_start) = batch4_start {
+                let calls = ((batch_idx - batch4_start_idx) / 4) as u64;
+                multiply_batch4_elapsed += batch4_start.elapsed();
+                multiply_batch4_calls += calls;
+                multiply_batch4_items += calls * 4;
+            }
+            let tail_start_idx = batch_idx;
+            let tail_start = profile_enabled.then(Instant::now);
             while batch_idx < config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
                 state.current_acc[batch_idx] += f32_dot_32(&scaled, &input[input_start..]);
                 batch_idx += 1;
             }
+            if let Some(tail_start) = tail_start {
+                let calls = (batch_idx - tail_start_idx) as u64;
+                multiply_tail_elapsed += tail_start.elapsed();
+                multiply_tail_calls += calls;
+                multiply_tail_items += calls;
+            }
             if in_feature + block_len == config.in_features {
+                let finish_start = profile_enabled.then(Instant::now);
                 state.finish_current(config, weight_name)?;
+                if let Some(finish_start) = finish_start {
+                    multiply_finish_elapsed += finish_start.elapsed();
+                    multiply_finish_calls += 1;
+                }
             }
             if let Some(profile_start) = profile_start {
                 record_q8_kernel_path(
@@ -522,6 +621,49 @@ fn accumulate_q8_0_chunk_multiply_into(
                 );
             }
         }
+    }
+
+    if profile_enabled {
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1MultiplyAdvance,
+            multiply_advance_calls,
+            multiply_advance_calls,
+            0,
+            0,
+            multiply_advance_elapsed,
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1MultiplyScale,
+            multiply_scale_calls,
+            multiply_scale_calls,
+            0,
+            0,
+            multiply_scale_elapsed,
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1MultiplyBatch4,
+            multiply_batch4_calls,
+            multiply_batch4_calls,
+            0,
+            multiply_batch4_items,
+            multiply_batch4_elapsed,
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1MultiplyTail,
+            multiply_tail_calls,
+            multiply_tail_calls,
+            0,
+            multiply_tail_items,
+            multiply_tail_elapsed,
+        );
+        record_q8_kernel_path(
+            Q8KernelPath::BatchGt1MultiplyFinish,
+            multiply_finish_calls,
+            multiply_finish_calls,
+            multiply_finish_calls,
+            0,
+            multiply_finish_elapsed,
+        );
     }
 
     Ok(())

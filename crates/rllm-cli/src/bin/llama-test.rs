@@ -432,7 +432,7 @@ fn format_q8_kernel_profile_suffix() -> String {
     let rows = snapshot
         .rows
         .iter()
-        .take(4)
+        .take(8)
         .map(|row| {
             format!(
                 "{} calls={} blocks={} rows={} batch_items={} elapsed={:.2}ms",
@@ -1003,7 +1003,7 @@ mod tests {
 
         let suffix = format_q8_kernel_profile_suffix();
 
-        assert!(suffix.contains("Q8KernelProfile: kernel=REETHINK-Q8-SHAPE-PROFILER"));
+        assert!(suffix.contains("Q8KernelProfile: kernel=REEGLASS-Q8-HOTLOOP-PROFILER"));
         assert!(suffix.contains("contiguous_i8_dot calls=2 blocks=4"));
         assert!(suffix.contains("batch1_complete_multiply calls=1 blocks=8 rows=1"));
         assert!(suffix.contains("elapsed=1.50ms"));
