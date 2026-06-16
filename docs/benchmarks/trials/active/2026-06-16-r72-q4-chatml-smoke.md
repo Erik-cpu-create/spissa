@@ -18,6 +18,7 @@ show immediate stop-token collapse or malformed ChatML prompting.
 - Model/artifact:
   - `models/SmolLM2-135M-Instruct-raw.rllm`
   - `models/SmolLM2-135M-Instruct-q4_0.rllm`
+  - `models/SmolLM2-135M-Instruct-q4_0_keep_io.rllm`
 - Architecture: SmolLM2/Llama-compatible decoder
 - Target device/profile: local macOS CPU, release binary
 - Expected bottleneck: memory footprint vs dequantization CPU cost
@@ -63,6 +64,32 @@ for model in "${models[@]}"; do
 done
 ```
 
+External greedy baseline:
+
+```bash
+uv run --with torch --with transformers --with accelerate python - <<'PY'
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
+
+model_dir = 'models/downloads/smollm2-135m-instruct'
+tok = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32, local_files_only=True)
+model.eval()
+# Generate with tokenizer.apply_chat_template(..., add_generation_prompt=True),
+# max_new_tokens=32, do_sample=False.
+PY
+```
+
+Keep-IO Q4_0 repack:
+
+```bash
+target/release/rllm pack \
+  models/downloads/smollm2-135m-instruct/model.safetensors \
+  --out models/SmolLM2-135M-Instruct-q4_0_keep_io.rllm \
+  --codec raw \
+  --quantize q4_0_keep_io
+```
+
 Runtime context:
 
 - build profile: release
@@ -79,6 +106,7 @@ Artifact sizes:
 |---|---:|
 | `SmolLM2-135M-Instruct-raw.rllm` | 260M |
 | `SmolLM2-135M-Instruct-q4_0.rllm` | 76M |
+| `SmolLM2-135M-Instruct-q4_0_keep_io.rllm` | 115M |
 
 Prompt matrix:
 
@@ -94,6 +122,16 @@ Prompt matrix:
 | Q4_0 | translate to Indonesian | 32 | 1.05s | 12.06 | 8.83 | 257589248 | 120702720 | repetitive: `Ini, ini, ...` |
 | Q4_0 | three fruits | 13 | 1.03s | 11.93 | 6.38 | 256393216 | 120702720 | lists numbered fruits instead of commas |
 | Q4_0 | is fire cold | 8 | 1.03s | 12.07 | 4.96 | 255311872 | 120702720 | wrong answer: `Yes, fire is indeed cold.` |
+| Q4_0 keep-IO | `2 plus 2` | 8 | 1.32s | 12.96 | 4.30 | 329285632 | 116785152 | correct: `2 plus 2 is 4` |
+| Q4_0 keep-IO | sky color | 14 | 1.22s | 13.07 | 6.34 | 330842112 | 116785152 | acceptable: deep blue |
+| Q4_0 keep-IO | translate to Indonesian | 32 | 1.09s | 11.84 | 8.62 | 331792384 | 116785152 | still poor: `Ngaliknya, ini-iya, ...` |
+| Q4_0 keep-IO | three fruits | 13 | 1.11s | 13.09 | 6.42 | 331120640 | 116785152 | lists numbered fruits instead of commas |
+| Q4_0 keep-IO | is fire cold | 8 | 1.11s | 12.96 | 4.86 | 329859072 | 116785152 | wrong answer: `Yes, fire is indeed cold.` |
+
+External Hugging Face greedy generation matched the RLLM raw outputs for the
+five prompts above, including the weak `fire cold` answer and the poor
+Indonesian translation. That isolates those raw-quality failures to the
+model/greedy baseline rather than RLLM's tokenizer or runtime.
 
 Verification already run for the implementation commits:
 
@@ -115,10 +153,17 @@ The Q4_0 path now clears the basic runtime requirements:
 - Q4_0 can produce a correct short factual answer on the arithmetic prompt.
 
 The quality result is still mixed. The same small SmolLM2-Instruct artifact gives
-bad answers in raw and Q4_0 for the `fire cold` prompt, so that case is not
-specific evidence against quantization. However, Q4_0 shows a clear repetitive
-translation failure (`Ini, ini, ...`) that needs a follow-up comparison against
-Hugging Face or llama.cpp before claiming chat quality parity.
+bad answers in raw, Hugging Face greedy, and Q4_0 for the `fire cold` prompt, so
+that case is not specific evidence against quantization. However, Q4_0 shows a
+clear repetitive translation failure (`Ini, ini, ...`) that is not present in the
+raw/Hugging Face baseline.
+
+The `q4_0_keep_io` variant preserves `model.embed_tokens.weight` and
+`lm_head.weight`/tied embedding-output weights as raw BF16. This increased the
+artifact from 76M to 115M and the process RSS from about 255-258 MB to about
+329-332 MB. It made the translation output less degenerate than full Q4_0, but
+it still did not recover raw/Hugging Face behavior. That points to transformer
+weight quantization drift, not only embedding/output-head quantization.
 
 This trial therefore supports the Q4_0 pivot for memory/runtime feasibility, but
 does not yet close the chat-quality question.
@@ -128,8 +173,10 @@ does not yet close the chat-quality question.
 needs follow-up
 
 Reason: Q4_0 passes the low-RAM runtime smoke and avoids the previous immediate
-ChatML/tokenizer collapse, but the multi-prompt quality matrix is not strong
-enough to call this accepted.
+ChatML/tokenizer collapse. Raw RLLM matches Hugging Face greedy on this matrix.
+Full Q4_0 and keep-IO Q4_0 both diverge on at least one prompt, so the
+multi-prompt quality matrix is not strong enough to call Q4_0 chat-quality
+parity accepted.
 
 Paper value:
 
@@ -138,6 +185,10 @@ Paper value:
 
 ## Next Experiment
 
-Run the same prompt matrix through a known-good external baseline for
-`SmolLM2-135M-Instruct`, preferably Hugging Face generation or llama.cpp with the
-same tokenizer/template, then compare raw RLLM and Q4_0 against that baseline.
+Run a quantization-policy sweep that preserves progressively more sensitive
+subsystems:
+
+- Q4 transformer with raw embeddings/output already tested as `q4_0_keep_io`.
+- Next: raw attention + Q4 MLP.
+- Next: raw first/last N layers + Q4 middle layers.
+- Compare each against the Hugging Face/raw greedy token sequence, not only text.

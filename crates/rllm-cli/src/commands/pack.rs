@@ -22,6 +22,7 @@ enum PackQuantizePolicy {
     None,
     Raw,
     Q4_0,
+    Q4_0KeepIo,
 }
 
 fn sha256_array(bytes: &[u8]) -> [u8; 32] {
@@ -70,18 +71,39 @@ impl PackQuantizePolicy {
             None | Some("") => Ok(Self::None),
             Some("raw") => Ok(Self::Raw),
             Some("q4_0" | "q4-0") => Ok(Self::Q4_0),
+            Some("q4_0_keep_io" | "q4-0-keep-io") => Ok(Self::Q4_0KeepIo),
             Some(other) => {
-                anyhow::bail!("unsupported --quantize {other:?}; expected one of: raw, q4_0")
+                anyhow::bail!(
+                    "unsupported --quantize {other:?}; expected one of: raw, q4_0, q4_0_keep_io"
+                )
             }
         }
     }
 
     fn is_q4_0(self) -> bool {
-        self == Self::Q4_0
+        matches!(self, Self::Q4_0 | Self::Q4_0KeepIo)
     }
 
     fn allows_input_tile_sidecars(self) -> bool {
-        self != Self::Q4_0
+        !self.is_q4_0()
+    }
+
+    fn should_quantize_tensor(self, tensor_name: &str, shape: &[u64], dtype: DType) -> bool {
+        if !self.is_q4_0() {
+            return false;
+        }
+        if self == Self::Q4_0KeepIo && is_llama_lm_head_weight(tensor_name) {
+            return false;
+        }
+        tensor_name.contains(".weight")
+            && shape.len() >= 2
+            && shape.iter().product::<u64>() >= 128
+            && matches!(
+                dtype,
+                rllm_container::DType::Fp16
+                    | rllm_container::DType::Bf16
+                    | rllm_container::DType::Fp32
+            )
     }
 }
 
@@ -219,19 +241,8 @@ pub fn run(
         meta.tensor_id = tensor_id;
 
         // Apply Q4_0 quantization if requested and applicable
-        let should_quantize = if quantize_policy.is_q4_0() {
-            tensor_name.contains(".weight")
-                && meta.shape.len() >= 2
-                && meta.shape.iter().product::<u64>() >= 128
-                && matches!(
-                    meta.dtype,
-                    rllm_container::DType::Fp16
-                        | rllm_container::DType::Bf16
-                        | rllm_container::DType::Fp32
-                )
-        } else {
-            false
-        };
+        let should_quantize =
+            quantize_policy.should_quantize_tensor(tensor_name, &meta.shape, meta.dtype);
 
         if should_quantize {
             println!("  Quantizing {} to Q4_0...", tensor_name);
@@ -644,11 +655,48 @@ mod tests {
             PackQuantizePolicy::parse(Some("q4-0")).unwrap(),
             PackQuantizePolicy::Q4_0
         );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4_0_keep_io")).unwrap(),
+            PackQuantizePolicy::Q4_0KeepIo
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4-0-keep-io")).unwrap(),
+            PackQuantizePolicy::Q4_0KeepIo
+        );
     }
 
     #[test]
     fn pack_quantize_policy_rejects_unknown_values() {
         assert!(PackQuantizePolicy::parse(Some("int4")).is_err());
+    }
+
+    #[test]
+    fn q4_0_keep_io_preserves_embedding_and_lm_head_weights() {
+        assert!(PackQuantizePolicy::Q4_0.should_quantize_tensor(
+            "model.embed_tokens.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(PackQuantizePolicy::Q4_0.should_quantize_tensor(
+            "lm_head.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(!PackQuantizePolicy::Q4_0KeepIo.should_quantize_tensor(
+            "model.embed_tokens.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(!PackQuantizePolicy::Q4_0KeepIo.should_quantize_tensor(
+            "lm_head.weight",
+            &[49152, 576],
+            rllm_container::DType::Bf16
+        ));
+        assert!(PackQuantizePolicy::Q4_0KeepIo.should_quantize_tensor(
+            "model.layers.0.mlp.gate_proj.weight",
+            &[1536, 576],
+            rllm_container::DType::Bf16
+        ));
     }
 
     #[test]
