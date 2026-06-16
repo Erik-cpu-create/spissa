@@ -41,6 +41,15 @@ mod tests {
         bytes
     }
 
+    fn q8_0_block_bytes(scale: f32, values: &[i8; 32]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 34];
+        bytes[0..2].copy_from_slice(&crate::tensor::f32_to_fp16(scale).to_le_bytes());
+        for (idx, value) in values.iter().enumerate() {
+            bytes[2 + idx] = *value as u8;
+        }
+        bytes
+    }
+
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("rllm-streaming-{name}-{}.rllm", std::process::id()))
     }
@@ -417,6 +426,167 @@ mod tests {
 
         assert_eq!(actual, 1);
         assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_accumulates_q8_0_without_f32_chunk_scratch() {
+        let path = temp_path("tile-linear-q8-0-direct");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q8_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q8.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q8_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut budget = MemoryBudget::new(96);
+
+        let actual = streaming_tile_linear_from_model(
+            &mut model,
+            "linear.q8.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, vec![16.0, 32.0]);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(budget.peak_bytes() <= 96);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_multiply_into_accumulates_q8_0_without_f32_chunk_scratch() {
+        let path = temp_path("tile-linear-q8-0-multiply-direct");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q8_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q8.multiply.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q8_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut target = vec![2.0f32, 3.0];
+        let mut budget = MemoryBudget::new(96);
+
+        streaming_tile_linear_multiply_into_from_model(
+            &mut model,
+            "linear.q8.multiply.weight",
+            &input,
+            None,
+            &mut target,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(target, vec![32.0, 96.0]);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(budget.peak_bytes() <= 96);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_argmax_accumulates_q8_0_without_f32_chunk_scratch() {
+        let path = temp_path("tile-linear-q8-0-argmax-direct");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q8_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q8.argmax.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q8_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut budget = MemoryBudget::new(96);
+
+        let actual = streaming_tile_linear_argmax_from_model(
+            &mut model,
+            "linear.q8.argmax.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, 1);
+        assert_eq!(budget.current_bytes(), 0);
+        assert!(budget.peak_bytes() <= 96);
 
         std::fs::remove_file(&path).ok();
     }
