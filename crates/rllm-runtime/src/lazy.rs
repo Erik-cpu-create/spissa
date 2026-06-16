@@ -1009,14 +1009,18 @@ impl LazyRllmModel {
 }
 
 pub(crate) fn runtime_f32_bytes_for_tensor(tensor: &TensorMeta) -> Result<usize> {
-    let dtype_size = tensor.dtype.size_bytes() as u64;
-    if dtype_size == 0 || !tensor.original_size_bytes.is_multiple_of(dtype_size) {
-        return Err(RuntimeError::InvalidTensorData(format!(
-            "tensor {} has original_size_bytes={} not divisible by dtype size {}",
-            tensor.name, tensor.original_size_bytes, dtype_size
-        )));
-    }
-    let elements = tensor.original_size_bytes / dtype_size;
+    let elements = if tensor.dtype == rllm_container::DType::Q4_0 {
+        tensor.shape.iter().product::<u64>()
+    } else {
+        let dtype_size = tensor.dtype.size_bytes() as u64;
+        if dtype_size == 0 || !tensor.original_size_bytes.is_multiple_of(dtype_size) {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "tensor {} has original_size_bytes={} not divisible by dtype size {}",
+                tensor.name, tensor.original_size_bytes, dtype_size
+            )));
+        }
+        tensor.original_size_bytes / dtype_size
+    };
     elements
         .checked_mul(std::mem::size_of::<f32>() as u64)
         .and_then(|bytes| usize::try_from(bytes).ok())
