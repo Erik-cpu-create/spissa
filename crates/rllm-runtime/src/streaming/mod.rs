@@ -5,6 +5,8 @@ use crate::{
     MemoryBudget, Q8KernelPath, Result, RotaryEmbeddingConfig, RuntimeError,
 };
 use rllm_container::{ChunkMeta, TensorMeta};
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_STREAMING_TILE_ELEMENTS: usize = 4096;
