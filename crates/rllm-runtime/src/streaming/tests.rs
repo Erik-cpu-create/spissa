@@ -369,6 +369,58 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    #[test]
+    fn streaming_tile_linear_argmax_dequantizes_q4_0_weight_block() {
+        let path = temp_path("tile-linear-argmax-q4-0");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q4_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q4.argmax.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q4_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut budget = MemoryBudget::new(512);
+
+        let actual = streaming_tile_linear_argmax_from_model(
+            &mut model,
+            "linear.q4.argmax.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, 1);
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
     fn add_f32_tensor(
         writer: &mut RllmWriter,
         tensor_id: u64,
@@ -666,8 +718,8 @@ mod tests {
     fn streaming_tile_linear_argmax_candidate_rows_scores_only_candidates() {
         let path = temp_path("tile-linear-argmax-candidates-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0x4040,
-            0x0000, 0x3f80,
+            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0x4040, 0x0000,
+            0x3f80,
         ];
         let weight_f32: Vec<f32> = weight_bf16
             .iter()
@@ -719,8 +771,8 @@ mod tests {
     fn streaming_tile_linear_argmax_candidate_rows_range_scores_only_candidates() {
         let path = temp_path("tile-linear-argmax-candidate-ranges-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0x4040,
-            0x0000, 0x3f80,
+            0x3f80, 0x0000, 0x0000, 0x0000, 0x4000, 0x0000, 0x3f80, 0x3f80, 0x3f80, 0x4040, 0x0000,
+            0x3f80,
         ];
         let weight_f32: Vec<f32> = weight_bf16
             .iter()
@@ -829,9 +881,9 @@ mod tests {
     fn streaming_tile_linear_argmax_with_rolling_records_stats() {
         let path = temp_path("tile-linear-argmax-bf16-rolling");
         let weight_bf16 = vec![
-            0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000,
-            0xbf00, 0x3f40, 0x3f80, 0x4000, 0x4040, 0xc040, 0x3f00, 0x3e80, 0x3f00,
-            0x3f80, 0x4000, 0x4040, 0x4080, 0x40a0,
+            0x3f00, 0xbf80, 0x4000, 0xc000, 0x3e80, 0x3f00, 0x3f80, 0x3f80, 0xbf80, 0x0000, 0xbf00,
+            0x3f40, 0x3f80, 0x4000, 0x4040, 0xc040, 0x3f00, 0x3e80, 0x3f00, 0x3f80, 0x4000, 0x4040,
+            0x4080, 0x40a0,
         ];
         let weight_f32: Vec<f32> = weight_bf16
             .iter()
@@ -1514,8 +1566,8 @@ mod tests {
     fn sparse_raw_bf16_linear_matches_manual_topk_projection() {
         let path = temp_path("sparse-linear-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
-            0x4000, 0x4040,
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80, 0x4000,
+            0x4040,
         ];
         let input = vec![1.0, -8.0, 2.0, 7.0];
         let selected = crate::select_top_abs_indices(&input, 2);
@@ -1559,16 +1611,16 @@ mod tests {
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
-            aip_exact_edge_layers: None,
-            aip_exact_prefix_layers: None,
-            aip_exact_periodic_layers: None,
-            aip_layer_topk_overrides: [0; 128],
-            aip_exact_edge_projection: None,
-            aip_exact_layer: None,
-            aip_exact_layer_projection: None,
+                aip_exact_edge_layers: None,
+                aip_exact_prefix_layers: None,
+                aip_exact_periodic_layers: None,
+                aip_layer_topk_overrides: [0; 128],
+                aip_exact_edge_projection: None,
+                aip_exact_layer: None,
+                aip_exact_layer_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
-            aip_lm_head_rescore_gap_milli: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1656,16 +1708,16 @@ mod tests {
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
-            aip_exact_edge_layers: None,
-            aip_exact_prefix_layers: None,
-            aip_exact_periodic_layers: None,
-            aip_layer_topk_overrides: [0; 128],
-            aip_exact_edge_projection: None,
-            aip_exact_layer: None,
-            aip_exact_layer_projection: None,
+                aip_exact_edge_layers: None,
+                aip_exact_prefix_layers: None,
+                aip_exact_periodic_layers: None,
+                aip_layer_topk_overrides: [0; 128],
+                aip_exact_edge_projection: None,
+                aip_exact_layer: None,
+                aip_exact_layer_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
-            aip_lm_head_rescore_gap_milli: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1717,8 +1769,8 @@ mod tests {
     fn input_tiled_sparse_raw_bf16_linear_matches_manual_topk_projection() {
         let path = temp_path("input-tiled-sparse-linear-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
-            0x4000, 0x4040,
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80, 0x4000,
+            0x4040,
         ];
         let input = vec![1.0, -8.0, 2.0, 7.0];
 
@@ -1770,16 +1822,16 @@ mod tests {
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
-            aip_exact_edge_layers: None,
-            aip_exact_prefix_layers: None,
-            aip_exact_periodic_layers: None,
-            aip_layer_topk_overrides: [0; 128],
-            aip_exact_edge_projection: None,
-            aip_exact_layer: None,
-            aip_exact_layer_projection: None,
+                aip_exact_edge_layers: None,
+                aip_exact_prefix_layers: None,
+                aip_exact_periodic_layers: None,
+                aip_layer_topk_overrides: [0; 128],
+                aip_exact_edge_projection: None,
+                aip_exact_layer: None,
+                aip_exact_layer_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
-            aip_lm_head_rescore_gap_milli: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -1815,8 +1867,8 @@ mod tests {
     fn input_tiled_sparse_linear_uses_explicit_selected_indices() {
         let path = temp_path("input-tiled-sparse-linear-selected-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
-            0x4000, 0x4040,
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80, 0x4000,
+            0x4040,
         ];
         let input = vec![1.0, -8.0, 2.0, 7.0];
 
@@ -1952,16 +2004,16 @@ mod tests {
                 aip_down_topk: None,
                 aip_edge_layers: None,
                 aip_edge_topk: None,
-            aip_exact_edge_layers: None,
-            aip_exact_prefix_layers: None,
-            aip_exact_periodic_layers: None,
-            aip_layer_topk_overrides: [0; 128],
-            aip_exact_edge_projection: None,
-            aip_exact_layer: None,
-            aip_exact_layer_projection: None,
+                aip_exact_edge_layers: None,
+                aip_exact_prefix_layers: None,
+                aip_exact_periodic_layers: None,
+                aip_layer_topk_overrides: [0; 128],
+                aip_exact_edge_projection: None,
+                aip_exact_layer: None,
+                aip_exact_layer_projection: None,
                 aip_lm_head_topk: None,
                 aip_lm_head_rescore: None,
-            aip_lm_head_rescore_gap_milli: None,
+                aip_lm_head_rescore_gap_milli: None,
                 aip_lm_head_agreement: false,
                 aip_lm_head_rows: None,
                 aip_lm_head_repeat_margin_milli: None,
@@ -2014,8 +2066,8 @@ mod tests {
     fn column_cached_sparse_raw_bf16_linear_matches_manual_topk_and_reuses_columns() {
         let path = temp_path("column-cache-sparse-linear-bf16");
         let weight_bf16 = vec![
-            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80,
-            0x4000, 0x4040,
+            0x3f80, 0x4000, 0x4040, 0x4080, 0xbf80, 0xc000, 0xc040, 0xc080, 0x3f00, 0x3f80, 0x4000,
+            0x4040,
         ];
         let input = vec![1.0, -8.0, 2.0, 7.0];
 
@@ -2248,14 +2300,7 @@ mod tests {
             out_features: 8,
         };
         let weight_bf16: Vec<u16> = (0..config.out_features)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4040,
-                    0x4080 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x4000 + row as u16, 0x4040, 0x4080 + row as u16])
             .collect();
         let raw_bytes = bf16_bytes(&weight_bf16);
         let mut sequential = vec![0.0; config.out_features];
@@ -2298,24 +2343,10 @@ mod tests {
             out_features: 8,
         };
         let gate_bf16: Vec<u16> = (0..config.out_features)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4040,
-                    0x4080 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x4000 + row as u16, 0x4040, 0x4080 + row as u16])
             .collect();
         let up_bf16: Vec<u16> = (0..config.out_features)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4000 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x3f80, 0x4000 + row as u16, 0x4000 + row as u16])
             .collect();
         let gate_bytes = bf16_bytes(&gate_bf16);
         let up_bytes = bf16_bytes(&up_bf16);
@@ -2368,24 +2399,10 @@ mod tests {
             out_features: 8,
         };
         let gate_bf16: Vec<u16> = (4..8)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4040,
-                    0x4080 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x4000 + row as u16, 0x4040, 0x4080 + row as u16])
             .collect();
         let up_bf16: Vec<u16> = (4..8)
-            .flat_map(|row| {
-                [
-                    0x3f80,
-                    0x3f80,
-                    0x4000 + row as u16,
-                    0x4000 + row as u16,
-                ]
-            })
+            .flat_map(|row| [0x3f80, 0x3f80, 0x4000 + row as u16, 0x4000 + row as u16])
             .collect();
         let gate_bytes = bf16_bytes(&gate_bf16);
         let up_bytes = bf16_bytes(&up_bf16);
