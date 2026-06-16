@@ -185,11 +185,13 @@ fn format_aip_suffix(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String 
         };
         let layer_drift_note = if stats.layer_drift_probe.samples > 0 {
             format!(
-                " layer_drift_probe={} layers={} mismatch_layers={} first_mismatch_layer={} max_l2_milli={} max_cosine_gap_milli={} max_exact_margin_milli={}",
+                " layer_drift_probe={} layers={} mismatch_layers={} first_mismatch_layer={} pre_mismatch_max_l2_milli={} pre_mismatch_max_cosine_gap_milli={} max_l2_milli={} max_cosine_gap_milli={} max_exact_margin_milli={}",
                 stats.layer_drift_probe.samples,
                 stats.layer_drift_probe.layers,
                 stats.layer_drift_probe.mismatch_layers,
                 stats.layer_drift_probe.first_mismatch_layer,
+                stats.layer_drift_probe.pre_mismatch_max_l2_milli,
+                stats.layer_drift_probe.pre_mismatch_max_cosine_gap_milli,
                 stats.layer_drift_probe.max_l2_milli,
                 stats.layer_drift_probe.max_cosine_gap_milli,
                 stats.layer_drift_probe.max_exact_margin_milli
@@ -484,6 +486,8 @@ mod tests {
                 layers: 64,
                 mismatch_layers: 3,
                 first_mismatch_layer: 2,
+                pre_mismatch_max_l2_milli: 100,
+                pre_mismatch_max_cosine_gap_milli: 5,
                 max_l2_milli: 1_250,
                 max_cosine_gap_milli: 15,
                 max_exact_margin_milli: 900,
@@ -528,6 +532,8 @@ mod tests {
         assert!(suffix.contains("layers=64"));
         assert!(suffix.contains("mismatch_layers=3"));
         assert!(suffix.contains("first_mismatch_layer=2"));
+        assert!(suffix.contains("pre_mismatch_max_l2_milli=100"));
+        assert!(suffix.contains("pre_mismatch_max_cosine_gap_milli=5"));
         assert!(suffix.contains("max_l2_milli=1250"));
         assert!(suffix.contains("max_cosine_gap_milli=15"));
         assert!(suffix.contains("max_exact_margin_milli=900"));

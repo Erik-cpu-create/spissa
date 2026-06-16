@@ -378,11 +378,13 @@ fn format_aip_note(stats: rllm_runtime::RamaExperimentalSpeedStats) -> String {
         };
         let layer_drift_note = if stats.layer_drift_probe.samples > 0 {
             format!(
-                " aip_layer_drift_probe={} aip_layer_drift_layers={} aip_layer_drift_mismatch_layers={} aip_layer_drift_first_mismatch_layer={} aip_layer_drift_max_l2_milli={} aip_layer_drift_max_cosine_gap_milli={} aip_layer_drift_max_exact_margin_milli={}",
+                " aip_layer_drift_probe={} aip_layer_drift_layers={} aip_layer_drift_mismatch_layers={} aip_layer_drift_first_mismatch_layer={} aip_layer_drift_pre_mismatch_max_l2_milli={} aip_layer_drift_pre_mismatch_max_cosine_gap_milli={} aip_layer_drift_max_l2_milli={} aip_layer_drift_max_cosine_gap_milli={} aip_layer_drift_max_exact_margin_milli={}",
                 stats.layer_drift_probe.samples,
                 stats.layer_drift_probe.layers,
                 stats.layer_drift_probe.mismatch_layers,
                 stats.layer_drift_probe.first_mismatch_layer,
+                stats.layer_drift_probe.pre_mismatch_max_l2_milli,
+                stats.layer_drift_probe.pre_mismatch_max_cosine_gap_milli,
                 stats.layer_drift_probe.max_l2_milli,
                 stats.layer_drift_probe.max_cosine_gap_milli,
                 stats.layer_drift_probe.max_exact_margin_milli
@@ -803,6 +805,8 @@ mod tests {
                 layers: 64,
                 mismatch_layers: 3,
                 first_mismatch_layer: 2,
+                pre_mismatch_max_l2_milli: 100,
+                pre_mismatch_max_cosine_gap_milli: 5,
                 max_l2_milli: 1_250,
                 max_cosine_gap_milli: 15,
                 max_exact_margin_milli: 900,
@@ -853,6 +857,8 @@ mod tests {
         assert!(note.contains("aip_layer_drift_layers=64"));
         assert!(note.contains("aip_layer_drift_mismatch_layers=3"));
         assert!(note.contains("aip_layer_drift_first_mismatch_layer=2"));
+        assert!(note.contains("aip_layer_drift_pre_mismatch_max_l2_milli=100"));
+        assert!(note.contains("aip_layer_drift_pre_mismatch_max_cosine_gap_milli=5"));
         assert!(note.contains("aip_layer_drift_max_l2_milli=1250"));
         assert!(note.contains("aip_layer_drift_max_cosine_gap_milli=15"));
         assert!(note.contains("aip_layer_drift_max_exact_margin_milli=900"));
