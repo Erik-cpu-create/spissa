@@ -276,7 +276,7 @@ fn accumulate_q8_0_chunk(
             while batch_idx + 4 <= config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
                 let output_start = batch_idx * config.out_features;
-                accumulate_f32_dot_32_batch4(
+                accumulate_f32_dot_32_batch4_reevec(
                     &scaled,
                     &input[input_start..],
                     config.in_features,
@@ -447,7 +447,7 @@ fn accumulate_q8_0_chunk_multiply_into(
             let mut batch_idx = 0usize;
             while batch_idx + 4 <= config.batch {
                 let input_start = batch_idx * config.in_features + in_feature;
-                accumulate_f32_dot_32_batch4_into(
+                accumulate_f32_dot_32_batch4_into_reevec(
                     &scaled,
                     &input[input_start..],
                     config.in_features,
@@ -814,6 +814,7 @@ fn f32_dot_32(weights: &[f32; 32], input: &[f32]) -> f32 {
     (acc0 + acc1) + (acc2 + acc3)
 }
 
+#[allow(dead_code)]
 fn accumulate_f32_dot_32_batch4(
     weights: &[f32; 32],
     input: &[f32],
@@ -841,6 +842,70 @@ fn accumulate_f32_dot_32_batch4(
     output[output_stride * 3 + out_feature] = acc3;
 }
 
+fn accumulate_f32_dot_32_batch4_reevec(
+    weights: &[f32; 32],
+    input: &[f32],
+    input_stride: usize,
+    output: &mut [f32],
+    output_stride: usize,
+    out_feature: usize,
+) {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        return accumulate_f32_dot_32_batch4_neon(
+            weights,
+            input,
+            input_stride,
+            output,
+            output_stride,
+            out_feature,
+        );
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    accumulate_f32_dot_32_batch4(
+        weights,
+        input,
+        input_stride,
+        output,
+        output_stride,
+        out_feature,
+    );
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn accumulate_f32_dot_32_batch4_neon(
+    weights: &[f32; 32],
+    input: &[f32],
+    input_stride: usize,
+    output: &mut [f32],
+    output_stride: usize,
+    out_feature: usize,
+) {
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut idx = 0usize;
+    while idx < 32 {
+        let w = vld1q_f32(weights.as_ptr().add(idx));
+        let x0 = vld1q_f32(input.as_ptr().add(idx));
+        let x1 = vld1q_f32(input.as_ptr().add(input_stride + idx));
+        let x2 = vld1q_f32(input.as_ptr().add(input_stride * 2 + idx));
+        let x3 = vld1q_f32(input.as_ptr().add(input_stride * 3 + idx));
+        acc0 = vfmaq_f32(acc0, w, x0);
+        acc1 = vfmaq_f32(acc1, w, x1);
+        acc2 = vfmaq_f32(acc2, w, x2);
+        acc3 = vfmaq_f32(acc3, w, x3);
+        idx += 4;
+    }
+    output[out_feature] += vaddvq_f32(acc0);
+    output[output_stride + out_feature] += vaddvq_f32(acc1);
+    output[output_stride * 2 + out_feature] += vaddvq_f32(acc2);
+    output[output_stride * 3 + out_feature] += vaddvq_f32(acc3);
+}
+
+#[allow(dead_code)]
 fn accumulate_f32_dot_32_batch4_into(
     weights: &[f32; 32],
     input: &[f32],
@@ -865,6 +930,65 @@ fn accumulate_f32_dot_32_batch4_into(
     accumulators[accumulator_start + 1] = acc1;
     accumulators[accumulator_start + 2] = acc2;
     accumulators[accumulator_start + 3] = acc3;
+}
+
+fn accumulate_f32_dot_32_batch4_into_reevec(
+    weights: &[f32; 32],
+    input: &[f32],
+    input_stride: usize,
+    accumulators: &mut [f32],
+    accumulator_start: usize,
+) {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        return accumulate_f32_dot_32_batch4_into_neon(
+            weights,
+            input,
+            input_stride,
+            accumulators,
+            accumulator_start,
+        );
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    accumulate_f32_dot_32_batch4_into(
+        weights,
+        input,
+        input_stride,
+        accumulators,
+        accumulator_start,
+    );
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn accumulate_f32_dot_32_batch4_into_neon(
+    weights: &[f32; 32],
+    input: &[f32],
+    input_stride: usize,
+    accumulators: &mut [f32],
+    accumulator_start: usize,
+) {
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut idx = 0usize;
+    while idx < 32 {
+        let w = vld1q_f32(weights.as_ptr().add(idx));
+        let x0 = vld1q_f32(input.as_ptr().add(idx));
+        let x1 = vld1q_f32(input.as_ptr().add(input_stride + idx));
+        let x2 = vld1q_f32(input.as_ptr().add(input_stride * 2 + idx));
+        let x3 = vld1q_f32(input.as_ptr().add(input_stride * 3 + idx));
+        acc0 = vfmaq_f32(acc0, w, x0);
+        acc1 = vfmaq_f32(acc1, w, x1);
+        acc2 = vfmaq_f32(acc2, w, x2);
+        acc3 = vfmaq_f32(acc3, w, x3);
+        idx += 4;
+    }
+    accumulators[accumulator_start] += vaddvq_f32(acc0);
+    accumulators[accumulator_start + 1] += vaddvq_f32(acc1);
+    accumulators[accumulator_start + 2] += vaddvq_f32(acc2);
+    accumulators[accumulator_start + 3] += vaddvq_f32(acc3);
 }
 
 fn advance_multiply_state_to_row(
