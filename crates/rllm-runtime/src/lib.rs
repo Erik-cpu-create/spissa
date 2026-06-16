@@ -18,6 +18,7 @@ mod ops;
 mod planner;
 #[doc(hidden)]
 pub mod q8_kernel_lab;
+mod q8_profile;
 mod rolling;
 mod rotary;
 mod speed;
@@ -54,6 +55,10 @@ pub use ops::*;
 pub use planner::{
     build_runtime_plan, ModelShapeHints, PlanStatus, PlanStep, RuntimeMode, RuntimePlan,
     RuntimePlanConfig,
+};
+pub use q8_profile::{
+    q8_kernel_profile_enabled, q8_kernel_profile_snapshot_and_reset, record_q8_kernel_path,
+    Q8KernelPath, Q8KernelProfileRow, Q8KernelProfileSnapshot,
 };
 pub use rotary::{
     apply_gpt_neox_rotary_inplace, gpt_neox_rotary_dim, scaled_dot_product_attention_with_cache,

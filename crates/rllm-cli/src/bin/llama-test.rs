@@ -421,6 +421,37 @@ fn format_phase_profile_segment(
     )
 }
 
+fn format_q8_kernel_profile_suffix() -> String {
+    let Some(snapshot) = rllm_runtime::q8_kernel_profile_snapshot_and_reset() else {
+        return String::new();
+    };
+    if snapshot.rows.is_empty() {
+        return String::new();
+    }
+
+    let rows = snapshot
+        .rows
+        .iter()
+        .take(4)
+        .map(|row| {
+            format!(
+                "{} calls={} blocks={} rows={} batch_items={} elapsed={:.2}ms",
+                row.path,
+                row.calls,
+                row.blocks,
+                row.rows,
+                row.batch_items,
+                row.elapsed_ns as f64 / 1_000_000.0
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        " | Q8KernelProfile: kernel={} top={}",
+        snapshot.ree_kernel, rows
+    )
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.ctx == 0 {
@@ -529,8 +560,9 @@ fn main() -> Result<()> {
         } else {
             String::new()
         };
+        let q8_kernel_profile_suffix = format_q8_kernel_profile_suffix();
         println!(
-            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes{}{}{}{}]",
+            "\n[TTFT/Prefill: {:.2}s | Decode: {:.2} tok/s | E2E: {:.2} tok/s | Total: {} tokens | Context: {} tokens | Peak: {} bytes{}{}{}{}{}]",
             result.metrics.ttft_ms / 1000.0,
             result.metrics.decode_tok_s,
             result.metrics.end_to_end_tok_s,
@@ -540,7 +572,8 @@ fn main() -> Result<()> {
             rolling_suffix,
             aip_suffix,
             repetition_suffix,
-            phase_profile_suffix
+            phase_profile_suffix,
+            q8_kernel_profile_suffix
         );
         has_context = true;
         previous_assistant_ended = assistant_ended;
@@ -939,5 +972,41 @@ mod tests {
         assert!(suffix.contains("mlp_total=21.00ms"));
         assert!(suffix.contains("lm_head=10.00ms"));
         assert!(suffix.contains("layers=16"));
+    }
+
+    #[test]
+    fn q8_kernel_profile_suffix_is_empty_without_profile_rows() {
+        let _ = rllm_runtime::q8_kernel_profile_snapshot_and_reset();
+
+        assert_eq!(format_q8_kernel_profile_suffix(), "");
+    }
+
+    #[test]
+    fn q8_kernel_profile_suffix_reports_recorded_rows() {
+        let _ = rllm_runtime::q8_kernel_profile_snapshot_and_reset();
+        rllm_runtime::record_q8_kernel_path(
+            rllm_runtime::Q8KernelPath::ContiguousI8Dot,
+            2,
+            4,
+            0,
+            2,
+            std::time::Duration::from_micros(1500),
+        );
+        rllm_runtime::record_q8_kernel_path(
+            rllm_runtime::Q8KernelPath::Batch1CompleteMultiply,
+            1,
+            8,
+            1,
+            1,
+            std::time::Duration::from_micros(500),
+        );
+
+        let suffix = format_q8_kernel_profile_suffix();
+
+        assert!(suffix.contains("Q8KernelProfile: kernel=REETHINK-Q8-SHAPE-PROFILER"));
+        assert!(suffix.contains("contiguous_i8_dot calls=2 blocks=4"));
+        assert!(suffix.contains("batch1_complete_multiply calls=1 blocks=8 rows=1"));
+        assert!(suffix.contains("elapsed=1.50ms"));
+        assert_eq!(format_q8_kernel_profile_suffix(), "");
     }
 }
