@@ -245,7 +245,7 @@ fn accumulate_q8_0_chunk(
         .checked_mul(config.in_features)
         .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
     validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
-    if accumulate_q8_0_chunk_batch1_complete_rows(
+    if accumulate_q8_0_chunk_batch_complete_rows(
         input,
         output,
         q8_bytes,
@@ -291,7 +291,7 @@ fn accumulate_q8_0_chunk(
     Ok(())
 }
 
-fn accumulate_q8_0_chunk_batch1_complete_rows(
+fn accumulate_q8_0_chunk_batch_complete_rows(
     input: &[f32],
     output: &mut [f32],
     q8_bytes: &[u8],
@@ -304,32 +304,35 @@ fn accumulate_q8_0_chunk_batch1_complete_rows(
     else {
         return Ok(false);
     };
-    let row_end = first_row
-        .checked_add(row_count)
-        .ok_or_else(|| RuntimeError::Shape("Q8_0 row fast path row range overflow".to_string()))?;
+    let row_end = first_row.checked_add(row_count).ok_or_else(|| {
+        RuntimeError::Shape("Q8_0 batch row fast path row range overflow".to_string())
+    })?;
     if row_end > config.out_features {
         return Err(RuntimeError::InvalidTensorData(format!(
-            "weight tensor {weight_name} Q8_0 row fast path rows {first_row}..{row_end} exceed expected {}",
+            "weight tensor {weight_name} Q8_0 batch row fast path rows {first_row}..{row_end} exceed expected {}",
             config.out_features
         )));
     }
 
     for local_row in 0..row_count {
         let out_feature = first_row + local_row;
-        let mut acc = output[out_feature];
         let first_block = local_row * blocks_per_row;
-        for block_in_row in 0..blocks_per_row {
-            let block_offset = (first_block + block_in_row) * 34;
-            let scale = q8_0_block_scale(q8_bytes, block_offset);
-            let input_start = block_in_row * 32;
-            acc += scale
-                * q8_0_dot_i8_f32(
-                    &q8_bytes[block_offset + 2..block_offset + 34],
-                    &input[input_start..],
-                    32,
-                );
+        for batch_idx in 0..config.batch {
+            let mut acc = output[batch_idx * config.out_features + out_feature];
+            let input_base = batch_idx * config.in_features;
+            for block_in_row in 0..blocks_per_row {
+                let block_offset = (first_block + block_in_row) * 34;
+                let scale = q8_0_block_scale(q8_bytes, block_offset);
+                let input_start = input_base + block_in_row * 32;
+                acc += scale
+                    * q8_0_dot_i8_f32(
+                        &q8_bytes[block_offset + 2..block_offset + 34],
+                        &input[input_start..],
+                        32,
+                    );
+            }
+            output[batch_idx * config.out_features + out_feature] = acc;
         }
-        output[out_feature] = acc;
     }
 
     Ok(true)
@@ -410,6 +413,9 @@ fn accumulate_q8_0_chunk_multiply_into_batch1_complete_rows(
     state: &mut StreamingLinearMultiplyIntoState<'_>,
     weight_name: &str,
 ) -> Result<bool> {
+    if config.batch != 1 {
+        return Ok(false);
+    }
     let Some((first_row, row_count, blocks_per_row)) =
         q8_0_complete_row_span(q8_bytes, element_start, config)?
     else {
@@ -515,6 +521,9 @@ fn accumulate_q8_0_chunk_argmax_batch1_complete_rows(
     state: &mut StreamingLinearArgmaxState<'_>,
     weight_name: &str,
 ) -> Result<bool> {
+    if config.batch != 1 {
+        return Ok(false);
+    }
     let Some((first_row, row_count, blocks_per_row)) =
         q8_0_complete_row_span(q8_bytes, element_start, config)?
     else {
@@ -578,8 +587,7 @@ fn q8_0_complete_row_span(
     element_start: usize,
     config: StreamingLinearConfig,
 ) -> Result<Option<(usize, usize, usize)>> {
-    if config.batch != 1
-        || config.in_features == 0
+    if config.in_features == 0
         || !config.in_features.is_multiple_of(32)
         || !element_start.is_multiple_of(config.in_features)
     {
@@ -1439,9 +1447,12 @@ fn parallel_sparse_raw_16bit_linear_chunk_batch1(
     let element_end = element_start.checked_add(weight_elements).ok_or_else(|| {
         RuntimeError::Shape("parallel sparse raw chunk element range overflow".to_string())
     })?;
-    let expected = config.out_features.checked_mul(config.in_features).ok_or_else(|| {
-        RuntimeError::Shape("parallel sparse weight element count overflow".to_string())
-    })?;
+    let expected = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| {
+            RuntimeError::Shape("parallel sparse weight element count overflow".to_string())
+        })?;
     if element_end > expected {
         return Err(RuntimeError::InvalidTensorData(format!(
             "weight tensor {weight_name} parallel sparse chunk elements {element_start}..{element_end} exceed expected {expected}"
@@ -1593,9 +1604,12 @@ fn parallel_sparse_silu_gate_up_raw_16bit_chunk_batch1(
     let element_end = element_start.checked_add(weight_elements).ok_or_else(|| {
         RuntimeError::Shape("parallel sparse gate/up chunk element range overflow".to_string())
     })?;
-    let expected = config.out_features.checked_mul(config.in_features).ok_or_else(|| {
-        RuntimeError::Shape("parallel sparse gate/up element count overflow".to_string())
-    })?;
+    let expected = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| {
+            RuntimeError::Shape("parallel sparse gate/up element count overflow".to_string())
+        })?;
     if element_end > expected {
         return Err(RuntimeError::InvalidTensorData(format!(
             "weight tensor {weight_name} parallel sparse gate/up chunk elements {element_start}..{element_end} exceed expected {expected}"
@@ -1624,8 +1638,7 @@ fn parallel_sparse_silu_gate_up_raw_16bit_chunk_batch1(
             let mut up_acc = 0.0f32;
             for &in_feature in selected {
                 let x = input[in_feature];
-                gate_acc +=
-                    x * raw_16bit_weight_at(gate_bytes, local_row_base + in_feature, dtype);
+                gate_acc += x * raw_16bit_weight_at(gate_bytes, local_row_base + in_feature, dtype);
                 up_acc += x * raw_16bit_weight_at(up_bytes, local_row_base + in_feature, dtype);
             }
             *out_value = crate::silu(gate_acc) * up_acc;
@@ -1645,8 +1658,8 @@ fn parallel_sparse_silu_gate_up_raw_16bit_chunk_batch1(
                     let mut up_acc = 0.0f32;
                     for &in_feature in selected {
                         let x = input[in_feature];
-                        gate_acc += x
-                            * raw_16bit_weight_at(gate_bytes, local_row_base + in_feature, dtype);
+                        gate_acc +=
+                            x * raw_16bit_weight_at(gate_bytes, local_row_base + in_feature, dtype);
                         up_acc +=
                             x * raw_16bit_weight_at(up_bytes, local_row_base + in_feature, dtype);
                     }
