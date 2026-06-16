@@ -138,13 +138,14 @@ fn chunk_element_start_for_dtype(
     byte_offset: usize,
     weight_name: &str,
 ) -> Result<usize> {
-    if dtype == rllm_container::DType::Q4_0 {
-        if !byte_offset.is_multiple_of(18) {
+    if let Some(block_bytes) = quantized_block_bytes(dtype) {
+        if !byte_offset.is_multiple_of(block_bytes) {
             return Err(RuntimeError::InvalidTensorData(format!(
-                "weight tensor {weight_name} Q4_0 chunk stream reached unaligned byte offset {byte_offset}"
+                "weight tensor {weight_name} {:?} chunk stream reached unaligned byte offset {byte_offset}",
+                dtype
             )));
         }
-        Ok((byte_offset / 18) * 32)
+        Ok((byte_offset / block_bytes) * 32)
     } else {
         let dtype_size = dtype.size_bytes();
         if !byte_offset.is_multiple_of(dtype_size) {
@@ -156,15 +157,49 @@ fn chunk_element_start_for_dtype(
     }
 }
 
-fn dequantize_q4_0_chunk(chunk_id: u64, bytes: &[u8]) -> Result<Vec<f32>> {
-    if !bytes.len().is_multiple_of(18) {
+fn quantized_block_bytes(dtype: rllm_container::DType) -> Option<usize> {
+    match dtype {
+        rllm_container::DType::Q4_0 => Some(18),
+        rllm_container::DType::Q8_0 => Some(34),
+        _ => None,
+    }
+}
+
+fn quantized_elements_for_bytes(dtype: rllm_container::DType, bytes_len: usize) -> Result<usize> {
+    let block_bytes = quantized_block_bytes(dtype).ok_or_else(|| {
+        RuntimeError::InvalidTensorData(format!("{:?} is not a quantized block dtype", dtype))
+    })?;
+    if !bytes_len.is_multiple_of(block_bytes) {
         return Err(RuntimeError::InvalidTensorData(format!(
-            "quantized chunk {chunk_id} byte len {} is not aligned to Q4_0 block size 18",
-            bytes.len()
+            "{:?} byte len {} is not aligned to block size {}",
+            dtype, bytes_len, block_bytes
         )));
     }
-    let mut weights = vec![0.0f32; (bytes.len() / 18) * 32];
-    crate::dequantize::dequantize_q4_0(bytes, &mut weights);
+    Ok((bytes_len / block_bytes) * 32)
+}
+
+fn dequantize_quantized_chunk(
+    dtype: rllm_container::DType,
+    chunk_id: u64,
+    bytes: &[u8],
+) -> Result<Vec<f32>> {
+    let elements = quantized_elements_for_bytes(dtype, bytes.len()).map_err(|err| {
+        RuntimeError::InvalidTensorData(format!(
+            "quantized chunk {chunk_id} invalid {:?} data: {err}",
+            dtype
+        ))
+    })?;
+    let mut weights = vec![0.0f32; elements];
+    match dtype {
+        rllm_container::DType::Q4_0 => crate::dequantize::dequantize_q4_0(bytes, &mut weights),
+        rllm_container::DType::Q8_0 => crate::dequantize::dequantize_q8_0(bytes, &mut weights),
+        _ => {
+            return Err(RuntimeError::InvalidTensorData(format!(
+                "{:?} is not a quantized block dtype",
+                dtype
+            )));
+        }
+    }
     Ok(weights)
 }
 
@@ -212,7 +247,7 @@ pub fn streaming_linear_from_model(
             ))
         })?;
 
-        if tensor.dtype == rllm_container::DType::Q4_0 {
+        if tensor.dtype.is_quantized() {
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
                 if bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
@@ -223,13 +258,18 @@ pub fn streaming_linear_from_model(
                     )));
                 }
 
-                let scratch_bytes = (bytes.len() / 18)
-                    .checked_mul(32)
-                    .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
-                    .ok_or_else(|| RuntimeError::Shape("Q4_0 f32 scratch overflow".to_string()))?;
-                let scratch_label = format!("streaming Q4_0 f32 scratch chunk {}", chunk.chunk_id);
+                let scratch_bytes = quantized_elements_for_bytes(tensor.dtype, bytes.len())?
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        RuntimeError::Shape("quantized f32 scratch overflow".to_string())
+                    })?;
+                let scratch_label = format!(
+                    "streaming {:?} f32 scratch chunk {}",
+                    tensor.dtype, chunk.chunk_id
+                );
                 budget.reserve(scratch_bytes, scratch_label.clone())?;
-                let weights = match dequantize_q4_0_chunk(chunk.chunk_id, bytes) {
+                let weights = match dequantize_quantized_chunk(tensor.dtype, chunk.chunk_id, bytes)
+                {
                     Ok(values) => values,
                     Err(err) => {
                         budget.release(scratch_bytes, scratch_label)?;
@@ -409,7 +449,7 @@ pub fn streaming_tile_linear_from_model(
                     weight_name,
                 )
             })?;
-        } else if tensor.dtype == rllm_container::DType::Q4_0 {
+        } else if tensor.dtype.is_quantized() {
             model.with_decoded_chunk(chunk.chunk_id, budget, |quantized_bytes, budget| {
                 if quantized_bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
@@ -419,21 +459,25 @@ pub fn streaming_tile_linear_from_model(
                         expected_chunk_bytes
                     )));
                 }
-                let scratch_bytes = (quantized_bytes.len() / 18)
-                    .checked_mul(32)
-                    .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
-                    .ok_or_else(|| RuntimeError::Shape("Q4_0 f32 scratch overflow".to_string()))?;
+                let scratch_bytes =
+                    quantized_elements_for_bytes(tensor.dtype, quantized_bytes.len())?
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or_else(|| {
+                            RuntimeError::Shape("quantized f32 scratch overflow".to_string())
+                        })?;
                 let scratch_label =
                     format!("streaming dequantized f32 scratch chunk {}", chunk.chunk_id);
 
                 budget.reserve(scratch_bytes, scratch_label.clone())?;
-                let weights = match dequantize_q4_0_chunk(chunk.chunk_id, quantized_bytes) {
-                    Ok(values) => values,
-                    Err(err) => {
-                        budget.release(scratch_bytes, scratch_label)?;
-                        return Err(err);
-                    }
-                };
+                let weights =
+                    match dequantize_quantized_chunk(tensor.dtype, chunk.chunk_id, quantized_bytes)
+                    {
+                        Ok(values) => values,
+                        Err(err) => {
+                            budget.release(scratch_bytes, scratch_label)?;
+                            return Err(err);
+                        }
+                    };
 
                 let result = accumulate_weight_chunk(
                     input,
@@ -608,7 +652,7 @@ pub fn streaming_tile_linear_multiply_into_from_model(
                     weight_name,
                 )
             })?;
-        } else if tensor.dtype == rllm_container::DType::Q4_0 {
+        } else if tensor.dtype.is_quantized() {
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
                 if bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
@@ -619,16 +663,18 @@ pub fn streaming_tile_linear_multiply_into_from_model(
                     )));
                 }
 
-                let scratch_bytes = (bytes.len() / 18)
-                    .checked_mul(32)
-                    .and_then(|elements| elements.checked_mul(std::mem::size_of::<f32>()))
-                    .ok_or_else(|| RuntimeError::Shape("Q4_0 f32 scratch overflow".to_string()))?;
+                let scratch_bytes = quantized_elements_for_bytes(tensor.dtype, bytes.len())?
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| {
+                        RuntimeError::Shape("quantized f32 scratch overflow".to_string())
+                    })?;
                 let scratch_label = format!(
-                    "streaming multiply Q4_0 f32 scratch chunk {}",
-                    chunk.chunk_id
+                    "streaming multiply {:?} f32 scratch chunk {}",
+                    tensor.dtype, chunk.chunk_id
                 );
                 budget.reserve(scratch_bytes, scratch_label.clone())?;
-                let weights = match dequantize_q4_0_chunk(chunk.chunk_id, bytes) {
+                let weights = match dequantize_quantized_chunk(tensor.dtype, chunk.chunk_id, bytes)
+                {
                     Ok(values) => values,
                     Err(err) => {
                         budget.release(scratch_bytes, scratch_label)?;
@@ -2574,7 +2620,7 @@ pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
                     rolling.as_deref_mut(),
                 )
             })?;
-        } else if tensor.dtype == rllm_container::DType::Q4_0 {
+        } else if tensor.dtype.is_quantized() {
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
                 if bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
@@ -2584,15 +2630,16 @@ pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
                         expected_chunk_bytes
                     )));
                 }
-                let weights = dequantize_q4_0_chunk(chunk.chunk_id, bytes)?;
+                let weights = dequantize_quantized_chunk(tensor.dtype, chunk.chunk_id, bytes)?;
                 let scratch_bytes = weights
                     .len()
                     .checked_mul(std::mem::size_of::<f32>())
                     .ok_or_else(|| {
-                        RuntimeError::Shape("Q4_0 argmax f32 scratch overflow".to_string())
+                        RuntimeError::Shape("quantized argmax f32 scratch overflow".to_string())
                     })?;
                 let scratch_label = format!(
-                    "streaming Q4_0 argmax f32 scratch chunk {} elements {}..{}",
+                    "streaming {:?} argmax f32 scratch chunk {} elements {}..{}",
+                    tensor.dtype,
                     chunk.chunk_id,
                     element_start,
                     element_start + weights.len()

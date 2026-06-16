@@ -1009,7 +1009,7 @@ impl LazyRllmModel {
 }
 
 pub(crate) fn runtime_f32_bytes_for_tensor(tensor: &TensorMeta) -> Result<usize> {
-    let elements = if tensor.dtype == rllm_container::DType::Q4_0 {
+    let elements = if tensor.dtype.is_quantized() {
         tensor.shape.iter().product::<u64>()
     } else {
         let dtype_size = tensor.dtype.size_bytes() as u64;

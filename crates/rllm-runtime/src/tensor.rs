@@ -104,6 +104,18 @@ pub fn decode_to_f32(dtype: DType, bytes: &[u8]) -> Result<Vec<f32>> {
             crate::dequantize::dequantize_q4_0(bytes, &mut out);
             Ok(out)
         }
+        DType::Q8_0 => {
+            if !bytes.len().is_multiple_of(34) {
+                return Err(RuntimeError::InvalidTensorData(format!(
+                    "expected Q8_0 byte length divisible by 34, got {}",
+                    bytes.len()
+                )));
+            }
+            let num_blocks = bytes.len() / 34;
+            let mut out = vec![0.0f32; num_blocks * 32];
+            crate::dequantize::dequantize_q8_0(bytes, &mut out);
+            Ok(out)
+        }
     }
 }
 
