@@ -32,7 +32,7 @@ struct Args {
     #[arg(long, default_value_t = false)]
     profile_phases: bool,
 
-    /// Chat template used to format interactive turns: raw or llama3.
+    /// Chat template used to format interactive turns: raw, llama3, or chatml.
     #[arg(long, default_value = "raw")]
     chat_template: String,
 
