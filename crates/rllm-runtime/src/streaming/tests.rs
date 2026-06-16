@@ -649,6 +649,73 @@ mod tests {
         assert_eq!(output, vec![0.0, 0.0]);
     }
 
+    #[test]
+    fn q8_0_batch1_multiply_row_fast_path_accumulates_complete_rows() {
+        let mut row0 = [0i8; 32];
+        let mut row1 = [0i8; 32];
+        row0.fill(1);
+        row1.fill(2);
+        let mut q8 = q8_0_block_bytes(1.0, &row0);
+        q8.extend_from_slice(&q8_0_block_bytes(1.0, &row1));
+
+        let input = vec![1.0f32; 32];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 32,
+            out_features: 2,
+        };
+        let mut target = vec![2.0f32, 3.0];
+        let mut state = StreamingLinearMultiplyIntoState::new(&mut target, None, config);
+
+        let used_fast_path = accumulate_q8_0_chunk_multiply_into_batch1_complete_rows(
+            &input,
+            &q8,
+            0,
+            config,
+            &mut state,
+            "linear.q8.multiply.rows.weight",
+        )
+        .unwrap();
+        state
+            .finish(config, "linear.q8.multiply.rows.weight")
+            .unwrap();
+
+        assert!(used_fast_path);
+        assert_eq!(target, vec![64.0, 192.0]);
+    }
+
+    #[test]
+    fn q8_0_batch1_argmax_row_fast_path_accumulates_complete_rows() {
+        let mut row0 = [0i8; 32];
+        let mut row1 = [0i8; 32];
+        row0.fill(1);
+        row1.fill(2);
+        let mut q8 = q8_0_block_bytes(1.0, &row0);
+        q8.extend_from_slice(&q8_0_block_bytes(1.0, &row1));
+
+        let input = vec![1.0f32; 32];
+        let config = StreamingLinearConfig {
+            batch: 1,
+            in_features: 32,
+            out_features: 2,
+        };
+        let mut state = StreamingLinearArgmaxState::new(None);
+
+        let used_fast_path = accumulate_q8_0_chunk_argmax_batch1_complete_rows(
+            &input,
+            &q8,
+            0,
+            config,
+            &mut state,
+            "linear.q8.argmax.rows.weight",
+        )
+        .unwrap();
+        let best = state.finish(config, "linear.q8.argmax.rows.weight").unwrap();
+
+        assert!(used_fast_path);
+        assert_eq!(best, 1);
+    }
+
     fn add_f32_tensor(
         writer: &mut RllmWriter,
         tensor_id: u64,
