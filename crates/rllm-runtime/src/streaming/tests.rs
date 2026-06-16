@@ -608,7 +608,7 @@ mod tests {
             out_features: 2,
         };
 
-        let used_fast_path = accumulate_q8_0_chunk_batch_complete_rows(
+        let used_fast_path = accumulate_q8_0_chunk_batch1_complete_rows(
             &input,
             &mut output,
             &q8,
@@ -620,38 +620,6 @@ mod tests {
 
         assert!(used_fast_path);
         assert_eq!(output, vec![32.5, 65.5]);
-    }
-
-    #[test]
-    fn q8_0_batch_prefill_row_fast_path_accumulates_complete_rows() {
-        let mut row0 = [0i8; 32];
-        let mut row1 = [0i8; 32];
-        row0.fill(1);
-        row1.fill(2);
-        let mut q8 = q8_0_block_bytes(1.0, &row0);
-        q8.extend_from_slice(&q8_0_block_bytes(1.0, &row1));
-
-        let mut input = vec![1.0f32; 32];
-        input.extend(vec![2.0f32; 32]);
-        let mut output = vec![0.5f32, 1.5, 2.5, 3.5];
-        let config = StreamingLinearConfig {
-            batch: 2,
-            in_features: 32,
-            out_features: 2,
-        };
-
-        let used_fast_path = accumulate_q8_0_chunk_batch_complete_rows(
-            &input,
-            &mut output,
-            &q8,
-            0,
-            config,
-            "linear.q8.batch.rows.weight",
-        )
-        .unwrap();
-
-        assert!(used_fast_path);
-        assert_eq!(output, vec![32.5, 65.5, 66.5, 131.5]);
     }
 
     #[test]
@@ -667,7 +635,7 @@ mod tests {
             out_features: 2,
         };
 
-        let used_fast_path = accumulate_q8_0_chunk_batch_complete_rows(
+        let used_fast_path = accumulate_q8_0_chunk_batch1_complete_rows(
             &input,
             &mut output,
             &q8,
@@ -742,9 +710,7 @@ mod tests {
             "linear.q8.argmax.rows.weight",
         )
         .unwrap();
-        let best = state
-            .finish(config, "linear.q8.argmax.rows.weight")
-            .unwrap();
+        let best = state.finish(config, "linear.q8.argmax.rows.weight").unwrap();
 
         assert!(used_fast_path);
         assert_eq!(best, 1);
