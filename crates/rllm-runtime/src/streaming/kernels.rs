@@ -232,6 +232,239 @@ fn accumulate_weight_chunk(
     Ok(())
 }
 
+fn accumulate_q8_0_chunk(
+    input: &[f32],
+    output: &mut [f32],
+    q8_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    weight_name: &str,
+) -> Result<()> {
+    let weight_elements = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
+    validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
+
+    for block_idx in 0..q8_bytes.len() / 34 {
+        let block_global_start = element_start + block_idx * 32;
+        if block_global_start >= weight_elements {
+            break;
+        }
+        let block_offset = block_idx * 34;
+        let scale = q8_0_block_scale(q8_bytes, block_offset);
+        let qs = &q8_bytes[block_offset + 2..block_offset + 34];
+        let block_len = (weight_elements - block_global_start).min(32);
+        let out_feature = block_global_start / config.in_features;
+        let in_feature = block_global_start % config.in_features;
+
+        if in_feature + block_len <= config.in_features {
+            for batch_idx in 0..config.batch {
+                let input_start = batch_idx * config.in_features + in_feature;
+                let output_idx = batch_idx * config.out_features + out_feature;
+                output[output_idx] += scale * q8_0_dot_i8_f32(qs, &input[input_start..], block_len);
+            }
+        } else {
+            for (idx, &q) in qs.iter().take(block_len).enumerate() {
+                let global_idx = block_global_start + idx;
+                let out_feature = global_idx / config.in_features;
+                let in_feature = global_idx % config.in_features;
+                let weight = scale * (q as i8) as f32;
+                for batch_idx in 0..config.batch {
+                    output[batch_idx * config.out_features + out_feature] +=
+                        input[batch_idx * config.in_features + in_feature] * weight;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn accumulate_q8_0_chunk_multiply_into(
+    input: &[f32],
+    q8_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    state: &mut StreamingLinearMultiplyIntoState<'_>,
+    weight_name: &str,
+) -> Result<()> {
+    let weight_elements = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
+    validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
+
+    for block_idx in 0..q8_bytes.len() / 34 {
+        let block_global_start = element_start + block_idx * 32;
+        if block_global_start >= weight_elements {
+            break;
+        }
+        let block_offset = block_idx * 34;
+        let scale = q8_0_block_scale(q8_bytes, block_offset);
+        let qs = &q8_bytes[block_offset + 2..block_offset + 34];
+        let block_len = (weight_elements - block_global_start).min(32);
+        let out_feature = block_global_start / config.in_features;
+        let in_feature = block_global_start % config.in_features;
+
+        if in_feature + block_len <= config.in_features {
+            advance_multiply_state_to_row(state, out_feature, config, weight_name)?;
+            for batch_idx in 0..config.batch {
+                let input_start = batch_idx * config.in_features + in_feature;
+                state.current_acc[batch_idx] +=
+                    scale * q8_0_dot_i8_f32(qs, &input[input_start..], block_len);
+            }
+            if in_feature + block_len == config.in_features {
+                state.finish_current(config, weight_name)?;
+            }
+        } else {
+            for (idx, &q) in qs.iter().take(block_len).enumerate() {
+                let global_idx = block_global_start + idx;
+                let out_feature = global_idx / config.in_features;
+                let in_feature = global_idx % config.in_features;
+                advance_multiply_state_to_row(state, out_feature, config, weight_name)?;
+                let weight = scale * (q as i8) as f32;
+                for batch_idx in 0..config.batch {
+                    state.current_acc[batch_idx] +=
+                        input[batch_idx * config.in_features + in_feature] * weight;
+                }
+                if in_feature + 1 == config.in_features {
+                    state.finish_current(config, weight_name)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn accumulate_q8_0_chunk_argmax(
+    input: &[f32],
+    q8_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    state: &mut StreamingLinearArgmaxState<'_>,
+    weight_name: &str,
+) -> Result<()> {
+    let weight_elements = config
+        .out_features
+        .checked_mul(config.in_features)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
+    validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
+
+    for block_idx in 0..q8_bytes.len() / 34 {
+        let block_global_start = element_start + block_idx * 32;
+        if block_global_start >= weight_elements {
+            break;
+        }
+        let block_offset = block_idx * 34;
+        let scale = q8_0_block_scale(q8_bytes, block_offset);
+        let qs = &q8_bytes[block_offset + 2..block_offset + 34];
+        let block_len = (weight_elements - block_global_start).min(32);
+        let out_feature = block_global_start / config.in_features;
+        let in_feature = block_global_start % config.in_features;
+
+        if in_feature + block_len <= config.in_features {
+            advance_argmax_state_to_row(state, out_feature, config, weight_name)?;
+            state.current_acc += scale * q8_0_dot_i8_f32(qs, &input[in_feature..], block_len);
+            if in_feature + block_len == config.in_features {
+                state.finish_current(config, weight_name)?;
+            }
+        } else {
+            for (idx, &q) in qs.iter().take(block_len).enumerate() {
+                let global_idx = block_global_start + idx;
+                let out_feature = global_idx / config.in_features;
+                let in_feature = global_idx % config.in_features;
+                advance_argmax_state_to_row(state, out_feature, config, weight_name)?;
+                state.current_acc += input[in_feature] * scale * (q as i8) as f32;
+                if in_feature + 1 == config.in_features {
+                    state.finish_current(config, weight_name)?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_q8_0_chunk(
+    q8_bytes: &[u8],
+    element_start: usize,
+    weight_elements: usize,
+    weight_name: &str,
+) -> Result<()> {
+    if !q8_bytes.len().is_multiple_of(34) {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "Q8_0 stream for {weight_name} has byte len {} not aligned to 34-byte blocks",
+            q8_bytes.len()
+        )));
+    }
+    if element_start > weight_elements {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} Q8_0 chunk starts at element {element_start}, beyond expected {weight_elements}"
+        )));
+    }
+    Ok(())
+}
+
+fn q8_0_block_scale(q8_bytes: &[u8], block_offset: usize) -> f32 {
+    let scale_bits = u16::from_le_bytes([q8_bytes[block_offset], q8_bytes[block_offset + 1]]);
+    crate::tensor::fp16_to_f32(scale_bits)
+}
+
+fn q8_0_dot_i8_f32(qs: &[u8], input: &[f32], len: usize) -> f32 {
+    let mut acc = 0.0f32;
+    let mut idx = 0usize;
+    while idx + 4 <= len {
+        acc += (qs[idx] as i8) as f32 * input[idx]
+            + (qs[idx + 1] as i8) as f32 * input[idx + 1]
+            + (qs[idx + 2] as i8) as f32 * input[idx + 2]
+            + (qs[idx + 3] as i8) as f32 * input[idx + 3];
+        idx += 4;
+    }
+    while idx < len {
+        acc += (qs[idx] as i8) as f32 * input[idx];
+        idx += 1;
+    }
+    acc
+}
+
+fn advance_multiply_state_to_row(
+    state: &mut StreamingLinearMultiplyIntoState<'_>,
+    out_feature: usize,
+    config: StreamingLinearConfig,
+    weight_name: &str,
+) -> Result<()> {
+    while state.current_out_feature < out_feature {
+        state.finish_current(config, weight_name)?;
+    }
+    if state.current_out_feature != out_feature {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+            out_feature, state.current_out_feature
+        )));
+    }
+    Ok(())
+}
+
+fn advance_argmax_state_to_row(
+    state: &mut StreamingLinearArgmaxState<'_>,
+    out_feature: usize,
+    config: StreamingLinearConfig,
+    weight_name: &str,
+) -> Result<()> {
+    while state.current_out_feature < out_feature {
+        state.finish_current(config, weight_name)?;
+    }
+    if state.current_out_feature != out_feature {
+        return Err(RuntimeError::InvalidTensorData(format!(
+            "weight tensor {weight_name} streamed non-monotonic row {}, current {}",
+            out_feature, state.current_out_feature
+        )));
+    }
+    Ok(())
+}
+
 fn accumulate_fused_rle_chunk_u8(
     input: &[f32],
     output: &mut [f32],

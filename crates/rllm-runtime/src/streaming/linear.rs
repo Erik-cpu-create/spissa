@@ -247,7 +247,26 @@ pub fn streaming_linear_from_model(
             ))
         })?;
 
-        if tensor.dtype.is_quantized() {
+        if tensor.dtype == rllm_container::DType::Q8_0 {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_q8_0_chunk(
+                    input,
+                    &mut output,
+                    bytes,
+                    element_start,
+                    config,
+                    weight_name,
+                )
+            })?;
+        } else if tensor.dtype.is_quantized() {
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
                 if bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
@@ -444,6 +463,25 @@ pub fn streaming_tile_linear_from_model(
                     input,
                     &mut output,
                     compressed_bytes,
+                    element_start,
+                    config.linear,
+                    weight_name,
+                )
+            })?;
+        } else if tensor.dtype == rllm_container::DType::Q8_0 {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |quantized_bytes, _budget| {
+                if quantized_bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        quantized_bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_q8_0_chunk(
+                    input,
+                    &mut output,
+                    quantized_bytes,
                     element_start,
                     config.linear,
                     weight_name,
@@ -646,6 +684,25 @@ pub fn streaming_tile_linear_multiply_into_from_model(
                 accumulate_multiply_raw_fp16_chunk(
                     input,
                     compressed_bytes,
+                    element_start,
+                    config.linear,
+                    &mut state,
+                    weight_name,
+                )
+            })?;
+        } else if tensor.dtype == rllm_container::DType::Q8_0 {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_q8_0_chunk_multiply_into(
+                    input,
+                    bytes,
                     element_start,
                     config.linear,
                     &mut state,
@@ -2618,6 +2675,25 @@ pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
                     &mut state,
                     weight_name,
                     rolling.as_deref_mut(),
+                )
+            })?;
+        } else if tensor.dtype == rllm_container::DType::Q8_0 {
+            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+                if bytes.len() != expected_chunk_bytes {
+                    return Err(RuntimeError::InvalidTensorData(format!(
+                        "chunk {} decoded byte len {} does not match metadata {}",
+                        chunk.chunk_id,
+                        bytes.len(),
+                        expected_chunk_bytes
+                    )));
+                }
+                accumulate_q8_0_chunk_argmax(
+                    input,
+                    bytes,
+                    element_start,
+                    config.linear,
+                    &mut state,
+                    weight_name,
                 )
             })?;
         } else if tensor.dtype.is_quantized() {
