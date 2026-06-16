@@ -17,6 +17,13 @@ enum PackCodecPolicy {
     Huff,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackQuantizePolicy {
+    None,
+    Raw,
+    Q4_0,
+}
+
 fn sha256_array(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -57,6 +64,27 @@ impl PackCodecPolicy {
     }
 }
 
+impl PackQuantizePolicy {
+    fn parse(raw: Option<&str>) -> Result<Self> {
+        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            None | Some("") => Ok(Self::None),
+            Some("raw") => Ok(Self::Raw),
+            Some("q4_0" | "q4-0") => Ok(Self::Q4_0),
+            Some(other) => {
+                anyhow::bail!("unsupported --quantize {other:?}; expected one of: raw, q4_0")
+            }
+        }
+    }
+
+    fn is_q4_0(self) -> bool {
+        self == Self::Q4_0
+    }
+
+    fn allows_input_tile_sidecars(self) -> bool {
+        self != Self::Q4_0
+    }
+}
+
 pub fn run(
     input: &str,
     output: &str,
@@ -71,9 +99,11 @@ pub fn run(
     config: Option<&str>,
     tokenizer: Option<&str>,
     no_tokenizer: bool,
+    quantize: Option<&str>,
 ) -> Result<()> {
     let chunk_size_bytes = parse_size(chunk_size)?;
     let codec_policy = PackCodecPolicy::parse(codec_policy)?;
+    let quantize_policy = PackQuantizePolicy::parse(quantize)?;
     let range_checksum_size_bytes = match range_checksum_size.map(parse_size).transpose()? {
         Some(0) => anyhow::bail!("--range-checksum-size must be greater than zero"),
         other => other,
@@ -143,7 +173,7 @@ pub fn run(
         model_name: model_name.clone(),
         architecture,
         source_format: "safetensors".to_string(),
-        lossless: true,
+        lossless: !quantize_policy.is_q4_0(),
         default_context_length,
         tokenizer_type,
         created_by: "rllm-cli".to_string(),
@@ -179,7 +209,7 @@ pub fn run(
         );
 
         // Read tensor data
-        let tensor_data = reader.read_tensor(tensor_name)?;
+        let mut tensor_data = reader.read_tensor(tensor_name)?;
         let tensor_meta = reader.to_rllm_meta(tensor_name)?;
 
         // Update tensor ID
@@ -187,7 +217,35 @@ pub fn run(
         let tensor_id = next_tensor_id;
         next_tensor_id = next_tensor_id.saturating_add(1);
         meta.tensor_id = tensor_id;
-        let effective_chunk_size_bytes = if let Some(tile_elements) = tile_block_elements {
+
+        // Apply Q4_0 quantization if requested and applicable
+        let should_quantize = if quantize_policy.is_q4_0() {
+            tensor_name.contains(".weight")
+                && meta.shape.len() >= 2
+                && meta.shape.iter().product::<u64>() >= 128
+                && matches!(
+                    meta.dtype,
+                    rllm_container::DType::Fp16
+                        | rllm_container::DType::Bf16
+                        | rllm_container::DType::Fp32
+                )
+        } else {
+            false
+        };
+
+        if should_quantize {
+            println!("  Quantizing {} to Q4_0...", tensor_name);
+            let quantized = quantize_to_q4_0(&tensor_data, meta.dtype, &meta.shape)?;
+            meta.dtype = rllm_container::DType::Q4_0;
+            meta.original_size_bytes = quantized.len() as u64;
+            meta.original_sha256 = sha256_array(&quantized);
+            tensor_data = quantized;
+        }
+
+        let effective_chunk_size_bytes = if meta.dtype == rllm_container::DType::Q4_0 {
+            // Must be multiple of 18 (Q4_0 block size)
+            (chunk_size_bytes / 18) * 18
+        } else if let Some(tile_elements) = tile_block_elements {
             let dtype_size = meta.dtype.size_bytes();
             tile_elements.checked_mul(dtype_size).ok_or_else(|| {
                 anyhow::anyhow!(
@@ -266,11 +324,11 @@ pub fn run(
             total_compressed += encoded.data.len();
         }
 
-        let should_write_input_tile_sidecar = (llama_mlp_input_tiles
-            && is_llama_mlp_projection_weight(tensor_name))
-            || (llama_attention_input_tiles && is_llama_attention_projection_weight(tensor_name));
-        let should_write_input_tile_sidecar = should_write_input_tile_sidecar
-            || (llama_lm_head_input_tiles && is_llama_lm_head_weight(tensor_name));
+        let should_write_input_tile_sidecar = quantize_policy.allows_input_tile_sidecars()
+            && ((llama_mlp_input_tiles && is_llama_mlp_projection_weight(tensor_name))
+                || (llama_attention_input_tiles
+                    && is_llama_attention_projection_weight(tensor_name))
+                || (llama_lm_head_input_tiles && is_llama_lm_head_weight(tensor_name)));
         if should_write_input_tile_sidecar {
             let sidecar_tensor_id = next_tensor_id;
             next_tensor_id = next_tensor_id.saturating_add(1);
@@ -309,7 +367,9 @@ pub fn run(
             tile_block_aligned_tensors, tile_elements
         );
     }
-    if llama_mlp_input_tiles || llama_attention_input_tiles || llama_lm_head_input_tiles {
+    if quantize_policy.allows_input_tile_sidecars()
+        && (llama_mlp_input_tiles || llama_attention_input_tiles || llama_lm_head_input_tiles)
+    {
         println!(
             "Input-tile sidecars: {} tensor(s), {} chunk(s), {} feature range(s), {} feature(s) per chunk",
             input_tile_sidecar_tensors,
@@ -519,11 +579,20 @@ fn resolve_tokenizer_path(
     sibling.exists().then_some(sibling)
 }
 
+fn quantize_to_q4_0(
+    raw_data: &[u8],
+    dtype: rllm_container::DType,
+    shape: &[u64],
+) -> Result<Vec<u8>> {
+    rllm_runtime::quantize_to_q4_0(raw_data, dtype, shape).map_err(|e| anyhow::anyhow!(e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         input_tile_range_specs, input_tile_sidecar_bytes, is_llama_attention_projection_weight,
         is_llama_lm_head_weight, is_llama_mlp_projection_weight, PackCodecPolicy,
+        PackQuantizePolicy,
     };
 
     #[test]
@@ -551,6 +620,35 @@ mod tests {
     #[test]
     fn pack_codec_policy_rejects_unknown_values() {
         assert!(PackCodecPolicy::parse("zstd").is_err());
+    }
+
+    #[test]
+    fn pack_quantize_policy_accepts_raw_and_q4_0_aliases() {
+        assert_eq!(
+            PackQuantizePolicy::parse(None).unwrap(),
+            PackQuantizePolicy::None
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("")).unwrap(),
+            PackQuantizePolicy::None
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("raw")).unwrap(),
+            PackQuantizePolicy::Raw
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4_0")).unwrap(),
+            PackQuantizePolicy::Q4_0
+        );
+        assert_eq!(
+            PackQuantizePolicy::parse(Some("q4-0")).unwrap(),
+            PackQuantizePolicy::Q4_0
+        );
+    }
+
+    #[test]
+    fn pack_quantize_policy_rejects_unknown_values() {
+        assert!(PackQuantizePolicy::parse(Some("int4")).is_err());
     }
 
     #[test]

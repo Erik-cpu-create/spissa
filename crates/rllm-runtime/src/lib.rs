@@ -7,6 +7,7 @@
 
 #[path = "session.rs"]
 mod chat_session;
+mod dequantize;
 mod echo;
 mod error;
 mod lazy;
@@ -19,7 +20,7 @@ mod rolling;
 mod rotary;
 mod speed;
 mod streaming;
-mod tensor;
+pub mod tensor;
 mod tiny;
 mod tokenizer;
 mod trace;
@@ -29,6 +30,7 @@ pub use chat_session::{
     RamaSessionPhaseTimings, RamaSessionStep, RamaSessionTurnMetrics, RamaSessionTurnResult,
     RamaTransformerPhaseTimings,
 };
+pub use dequantize::{dequantize_q4_0, quantize_to_q4_0};
 pub use echo::{
     streaming_echo_transformer_decode_step_from_model,
     streaming_echo_transformer_generate_from_model, streaming_echo_transformer_prefill_from_model,

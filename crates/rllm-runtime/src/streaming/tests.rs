@@ -30,6 +30,17 @@ mod tests {
         fp16_bytes(values)
     }
 
+    fn q4_0_block_bytes(scale: f32, values: &[i8; 32]) -> Vec<u8> {
+        let mut bytes = vec![0u8; 18];
+        bytes[0..2].copy_from_slice(&crate::tensor::f32_to_fp16(scale).to_le_bytes());
+        for i in 0..16 {
+            let q0 = (values[i * 2] + 8) as u8;
+            let q1 = (values[i * 2 + 1] + 8) as u8;
+            bytes[2 + i] = (q0 & 0x0f) | ((q1 & 0x0f) << 4);
+        }
+        bytes
+    }
+
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("rllm-streaming-{name}-{}.rllm", std::process::id()))
     }
@@ -301,6 +312,58 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(err, RuntimeError::MemoryBudgetExceeded { .. }));
+        assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn streaming_tile_linear_dequantizes_q4_0_weight_block() {
+        let path = temp_path("tile-linear-q4-0");
+        let mut q = [0i8; 32];
+        q[0..16].fill(1);
+        q[16..32].fill(2);
+        let weight = q4_0_block_bytes(1.0, &q);
+
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "linear.q4.weight".to_string(),
+            shape: vec![2, 16],
+            dtype: DType::Q4_0,
+            original_size_bytes: weight.len() as u64,
+            compressed_size_bytes: weight.len() as u64,
+            original_sha256: sha256_array(&weight),
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer
+            .write_chunk(0, "rtc-raw-v1", &weight, &weight, 0)
+            .unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        let input = vec![1.0f32; 16];
+        let mut budget = MemoryBudget::new(512);
+
+        let actual = streaming_tile_linear_from_model(
+            &mut model,
+            "linear.q4.weight",
+            &input,
+            None,
+            StreamingTileLinearConfig {
+                linear: StreamingLinearConfig {
+                    batch: 1,
+                    in_features: 16,
+                    out_features: 2,
+                },
+                tile_elements: 8,
+            },
+            &mut budget,
+        )
+        .unwrap();
+
+        assert_eq!(actual, vec![16.0, 32.0]);
         assert_eq!(budget.current_bytes(), 0);
 
         std::fs::remove_file(&path).ok();
