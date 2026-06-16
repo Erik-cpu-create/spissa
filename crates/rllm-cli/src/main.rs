@@ -79,7 +79,7 @@ enum Commands {
         #[arg(long)]
         no_tokenizer: bool,
 
-        /// Optional quantization scheme (e.g., "q4_0"). Keep raw/unquantized if omitted.
+        /// Optional quantization scheme: raw, q4_0, or q4_0_keep_io. Keep raw/unquantized if omitted.
         #[arg(long)]
         quantize: Option<String>,
     },
