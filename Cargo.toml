@@ -35,3 +35,6 @@ env_logger = "0.11"
 
 # Memory-mapped I/O
 memmap2 = "0.9"
+
+# Low-level OS bindings (child rusage / peak RSS measurement)
+libc = "0.2"

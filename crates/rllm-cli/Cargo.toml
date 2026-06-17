@@ -23,3 +23,6 @@ rllm-container = { path = "../rllm-container" }
 rtc-codec = { path = "../rtc-codec" }
 rllm-import = { path = "../rllm-import" }
 rllm-runtime = { path = "../rllm-runtime" }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

@@ -249,8 +249,10 @@ cargo build --release
   --ctx 128 \
   --memory-budget 100mb
 
-# Repeatable Phase 7.6 release RSS benchmark matrix
-python3 scripts/phase76_release_rss_benchmark.py \
+# Repeatable release RSS benchmark matrix (native `rllm bench`, no Python)
+cargo build --release
+target/release/rllm bench release-rss \
+  --artifact models/pythia-70m-phase76-16mb.rllm \
   --tokens 1,4,8,16 \
   --ctx 128,512,1024 \
   --memory-budget 100mb
@@ -277,7 +279,8 @@ target/release/rllm pack ./models/pythia-70m/model.safetensors \
   --tile-block-elements 65536 \
   --config ./models/pythia-70m/config.json \
   --tokenizer ./models/pythia-70m/tokenizer.json
-python3 scripts/phase79c_low_ram_fast_benchmark.py \
+target/release/rllm bench low-ram-fast \
+  --artifact ./models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
   --skip-pack \
   --skip-verify \
   --rama-integrity verify-once \
@@ -285,17 +288,18 @@ python3 scripts/phase79c_low_ram_fast_benchmark.py \
   --ctx 128,512,1024 \
   --memory-budget 100mb
 
-# Phase 7.9D real long-prompt benchmark (actual input token counts)
-python3 scripts/phase79d_long_prompt_benchmark.py \
-  --skip-build \
+# Real long-prompt benchmark (actual input token counts; writes timing JSON under <out-dir>/timing)
+target/release/rllm bench long-prompt \
+  --artifact ./models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
   --input-tokens 1,128,512,1024 \
   --max-new-tokens 1,4,16 \
   --ctx 2048 \
   --rama-integrity verify-once \
   --memory-budget 100mb
 
-# Phase 7.9E RAMA chunked prefill timing/optimization benchmark
-python3 scripts/phase79e_prefill_timing_benchmark.py \
+# RAMA chunked prefill timing/optimization sweep
+target/release/rllm bench prefill-timing \
+  --artifact ./models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
   --input-tokens 512,1024 \
   --max-new-tokens 16 \
   --prefill-chunks full,64 \
@@ -303,47 +307,15 @@ python3 scripts/phase79e_prefill_timing_benchmark.py \
   --rama-integrity verify-once \
   --memory-budget 100mb
 
-# Phase 7.10B RAMA prefill homeostasis / post-rowspan matrix
-python3 scripts/phase79d_long_prompt_benchmark.py \
-  --skip-build \
-  --input-tokens 1,128,512,1024 \
-  --max-new-tokens 1,4,16 \
-  --ctx 2048 \
-  --rama-integrity verify-once \
-  --rama-timing-dir timing \
-  --memory-budget 100mb
-
-# Phase 7.10C deep prefill timing benchmark
-python3 scripts/phase79d_long_prompt_benchmark.py \
-  --skip-build \
+# Deep prefill timing matrix (used for the Phase 7.10B–E optimization passes).
+# Pass --out-dir to keep per-experiment CSV/Markdown/timing separate.
+target/release/rllm bench long-prompt \
+  --artifact ./models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
   --input-tokens 512,1024 \
   --max-new-tokens 16 \
   --ctx 2048 \
   --rama-integrity verify-once \
-  --rama-timing-dir timing \
-  --out-dir target/phase710c-deep-prefill-timing \
-  --memory-budget 100mb
-
-# Phase 7.10D MLP prefill row-reuse benchmark
-python3 scripts/phase79d_long_prompt_benchmark.py \
-  --skip-build \
-  --input-tokens 512,1024 \
-  --max-new-tokens 16 \
-  --ctx 2048 \
-  --rama-integrity verify-once \
-  --rama-timing-dir timing \
-  --out-dir target/phase710d-four-batch-optimized \
-  --memory-budget 100mb
-
-# Phase 7.10E attention row-slice timing/optimization benchmark
-python3 scripts/phase79d_long_prompt_benchmark.py \
-  --skip-build \
-  --input-tokens 512,1024 \
-  --max-new-tokens 16 \
-  --ctx 2048 \
-  --rama-integrity verify-once \
-  --rama-timing-dir timing \
-  --out-dir target/phase710e-attention-row-slice-optimized \
+  --out-dir target/long-prompt-optimized \
   --memory-budget 100mb
 
 # Phase 7.11A Pythia-160M GPT-NeoX/Pythia-family scale validation
@@ -359,19 +331,16 @@ target/release/rllm pack models/pythia-160m/model.safetensors \
 target/release/rllm verify \
   models/pythia-160m/model.safetensors \
   models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm
-python3 scripts/phase79d_long_prompt_benchmark.py \
-  --skip-build \
+target/release/rllm bench long-prompt \
   --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
   --input-tokens 1,128,512,1024 \
   --max-new-tokens 1,4,16 \
   --ctx 2048 \
   --rama-integrity verify-once \
-  --rama-timing-dir timing \
   --memory-budget 100mb
 
 # Phase 7.11B Pythia-160M prefill window / memory-budget sweep
-python3 scripts/phase79e_prefill_timing_benchmark.py \
-  --bin target/release/rllm \
+target/release/rllm bench prefill-timing \
   --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
   --out-dir target/phase711b-pythia160m/chunk-sweep \
   --input-tokens 512,1024 \
