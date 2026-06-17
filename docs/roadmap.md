@@ -189,7 +189,7 @@
 
 **Measured local Pythia-70M Phase 7.6 release benchmark matrix:**
 - Repacked artifact (`pythia-70m-phase76-16mb.rllm`, ignored local file): 120.46 MiB compressed, 16MiB chunks, persisted `gpt_neox` config + `hf-bpe` tokenizer metadata
-- Command: `python3 scripts/phase76_release_rss_benchmark.py --tokens 1,4,8,16 --ctx 128,512,1024 --memory-budget 100mb`
+- Command (originally the now-removed `scripts/phase76_release_rss_benchmark.py`; reproduce with the native port): `target/release/rllm bench release-rss --artifact models/pythia-70m-phase76-16mb.rllm --tokens 1,4,8,16 --ctx 128,512,1024 --memory-budget 100mb`
 - Matrix: 12/12 runs succeeded for `ctx=128/512/1024` and `max-new-tokens=1/4/8/16`
 - Output behavior after Phase 7.7 HF-fidelity fixes: prompt token `[12092]`, first generated token `[13]`, generated text starts `Hello,`; 16-token run produces `Hello, I'm trying to get the name of the phone number in the phone number`
 - Runtime range: 4.47–83.41s total, ~4.47–5.29s/token in release

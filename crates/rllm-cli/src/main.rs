@@ -242,6 +242,12 @@ enum Commands {
         runner: Option<String>,
     },
 
+    /// Run native benchmark matrices for `rllm run` (RSS, throughput, RAMA timing)
+    Bench {
+        #[command(subcommand)]
+        command: commands::bench::BenchCommand,
+    },
+
     /// Run a scripted persistent chat-session benchmark
     ChatSession {
         /// Path to .rllm file
@@ -405,6 +411,7 @@ fn main() -> Result<()> {
             candidate_name,
             runner,
         }),
+        Commands::Bench { command } => commands::bench::run(command),
         Commands::ChatSession {
             file,
             turns,

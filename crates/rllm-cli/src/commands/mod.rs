@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod benchmark;
 pub mod chat_session;
 pub mod chat_session_token;
