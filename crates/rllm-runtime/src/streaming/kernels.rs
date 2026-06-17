@@ -1229,22 +1229,123 @@ fn accumulate_f32_dot_32_output2_batch4_reebundle(
     output_stride: usize,
     first_out_feature: usize,
 ) {
-    accumulate_f32_dot_32_batch4_reevec(
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        return accumulate_f32_dot_32_output2_batch4_neon(
+            first,
+            second,
+            input,
+            input_stride,
+            output,
+            output_stride,
+            first_out_feature,
+        );
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    accumulate_f32_dot_32_output2_batch4_scalar(
         first,
+        second,
         input,
         input_stride,
         output,
         output_stride,
         first_out_feature,
     );
-    accumulate_f32_dot_32_batch4_reevec(
-        second,
-        input,
-        input_stride,
-        output,
-        output_stride,
-        first_out_feature + 1,
-    );
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn accumulate_f32_dot_32_output2_batch4_scalar(
+    first: &[f32; 32],
+    second: &[f32; 32],
+    input: &[f32],
+    input_stride: usize,
+    output: &mut [f32],
+    output_stride: usize,
+    first_out_feature: usize,
+) {
+    let mut first0 = output[first_out_feature];
+    let mut first1 = output[output_stride + first_out_feature];
+    let mut first2 = output[output_stride * 2 + first_out_feature];
+    let mut first3 = output[output_stride * 3 + first_out_feature];
+    let second_out_feature = first_out_feature + 1;
+    let mut second0 = output[second_out_feature];
+    let mut second1 = output[output_stride + second_out_feature];
+    let mut second2 = output[output_stride * 2 + second_out_feature];
+    let mut second3 = output[output_stride * 3 + second_out_feature];
+    let mut idx = 0usize;
+    while idx < 32 {
+        let x0 = input[idx];
+        let x1 = input[input_stride + idx];
+        let x2 = input[input_stride * 2 + idx];
+        let x3 = input[input_stride * 3 + idx];
+        let fw = first[idx];
+        let sw = second[idx];
+        first0 += fw * x0;
+        first1 += fw * x1;
+        first2 += fw * x2;
+        first3 += fw * x3;
+        second0 += sw * x0;
+        second1 += sw * x1;
+        second2 += sw * x2;
+        second3 += sw * x3;
+        idx += 1;
+    }
+    output[first_out_feature] = first0;
+    output[output_stride + first_out_feature] = first1;
+    output[output_stride * 2 + first_out_feature] = first2;
+    output[output_stride * 3 + first_out_feature] = first3;
+    output[second_out_feature] = second0;
+    output[output_stride + second_out_feature] = second1;
+    output[output_stride * 2 + second_out_feature] = second2;
+    output[output_stride * 3 + second_out_feature] = second3;
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn accumulate_f32_dot_32_output2_batch4_neon(
+    first: &[f32; 32],
+    second: &[f32; 32],
+    input: &[f32],
+    input_stride: usize,
+    output: &mut [f32],
+    output_stride: usize,
+    first_out_feature: usize,
+) {
+    let mut first0 = vdupq_n_f32(0.0);
+    let mut first1 = vdupq_n_f32(0.0);
+    let mut first2 = vdupq_n_f32(0.0);
+    let mut first3 = vdupq_n_f32(0.0);
+    let mut second0 = vdupq_n_f32(0.0);
+    let mut second1 = vdupq_n_f32(0.0);
+    let mut second2 = vdupq_n_f32(0.0);
+    let mut second3 = vdupq_n_f32(0.0);
+    let mut idx = 0usize;
+    while idx < 32 {
+        let x0 = vld1q_f32(input.as_ptr().add(idx));
+        let x1 = vld1q_f32(input.as_ptr().add(input_stride + idx));
+        let x2 = vld1q_f32(input.as_ptr().add(input_stride * 2 + idx));
+        let x3 = vld1q_f32(input.as_ptr().add(input_stride * 3 + idx));
+        let first_weights = vld1q_f32(first.as_ptr().add(idx));
+        let second_weights = vld1q_f32(second.as_ptr().add(idx));
+        first0 = vfmaq_f32(first0, first_weights, x0);
+        first1 = vfmaq_f32(first1, first_weights, x1);
+        first2 = vfmaq_f32(first2, first_weights, x2);
+        first3 = vfmaq_f32(first3, first_weights, x3);
+        second0 = vfmaq_f32(second0, second_weights, x0);
+        second1 = vfmaq_f32(second1, second_weights, x1);
+        second2 = vfmaq_f32(second2, second_weights, x2);
+        second3 = vfmaq_f32(second3, second_weights, x3);
+        idx += 4;
+    }
+    let second_out_feature = first_out_feature + 1;
+    output[first_out_feature] += vaddvq_f32(first0);
+    output[output_stride + first_out_feature] += vaddvq_f32(first1);
+    output[output_stride * 2 + first_out_feature] += vaddvq_f32(first2);
+    output[output_stride * 3 + first_out_feature] += vaddvq_f32(first3);
+    output[second_out_feature] += vaddvq_f32(second0);
+    output[output_stride + second_out_feature] += vaddvq_f32(second1);
+    output[output_stride * 2 + second_out_feature] += vaddvq_f32(second2);
+    output[output_stride * 3 + second_out_feature] += vaddvq_f32(second3);
 }
 
 #[cfg(target_arch = "aarch64")]
