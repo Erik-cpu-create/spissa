@@ -252,6 +252,24 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
             max_abs_diff: max_abs_diff(&output2_baseline, &output),
             speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
         });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 2, || {
+            reefuse_smmla_output2(
+                &q8_pair,
+                scale,
+                &input,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_output2".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&output2_baseline, &output),
+            speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
     }
 
     if config.batch == 1 {
@@ -292,6 +310,112 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
 
 /// Quantize each activation row to int8 with a per-row absmax scale. In a real
 /// prefill GEMM this runs once and is reused across every output feature, so the
+/// REEFUSE-Q8-I8MM-LAB: int8 matrix-multiply over one 32-element weight block for
+/// a 2x2 tile (2 token rows x 2 output rows) using ARM `smmla` (i8mm). Each `smmla`
+/// multiplies a 2x8 int8 by a 2x8 int8 into a 2x2 int32 accumulator
+/// (`Vd[i][j] += An[i]·Bm[j]`); four substeps cover the 32-element block. The four
+/// input pointers each address the block start and are post-incremented by 8.
+/// Returns `[t0·w0, t0·w1, t1·w0, t1·w1]` accumulated over the 32 elements.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+unsafe fn smmla_block32(
+    mut a0: *const i8,
+    mut a1: *const i8,
+    mut w0: *const i8,
+    mut w1: *const i8,
+) -> [i32; 4] {
+    use std::arch::asm;
+    let mut out = [0i32; 4];
+    asm!(
+        "movi v4.4s, #0",
+        "ld1 {{v0.d}}[0], [{a0}], #8",
+        "ld1 {{v0.d}}[1], [{a1}], #8",
+        "ld1 {{v1.d}}[0], [{w0}], #8",
+        "ld1 {{v1.d}}[1], [{w1}], #8",
+        "smmla v4.4s, v0.16b, v1.16b",
+        "ld1 {{v0.d}}[0], [{a0}], #8",
+        "ld1 {{v0.d}}[1], [{a1}], #8",
+        "ld1 {{v1.d}}[0], [{w0}], #8",
+        "ld1 {{v1.d}}[1], [{w1}], #8",
+        "smmla v4.4s, v0.16b, v1.16b",
+        "ld1 {{v0.d}}[0], [{a0}], #8",
+        "ld1 {{v0.d}}[1], [{a1}], #8",
+        "ld1 {{v1.d}}[0], [{w0}], #8",
+        "ld1 {{v1.d}}[1], [{w1}], #8",
+        "smmla v4.4s, v0.16b, v1.16b",
+        "ld1 {{v0.d}}[0], [{a0}], #8",
+        "ld1 {{v0.d}}[1], [{a1}], #8",
+        "ld1 {{v1.d}}[0], [{w0}], #8",
+        "ld1 {{v1.d}}[1], [{w1}], #8",
+        "smmla v4.4s, v0.16b, v1.16b",
+        "st1 {{v4.4s}}, [{out}]",
+        a0 = inout(reg) a0,
+        a1 = inout(reg) a1,
+        w0 = inout(reg) w0,
+        w1 = inout(reg) w1,
+        out = in(reg) out.as_mut_ptr(),
+        out("v0") _, out("v1") _, out("v4") _,
+    );
+    let _ = (a0, a1, w0, w1);
+    out
+}
+
+/// REEFUSE-Q8-I8MM-LAB output2: 2 output rows x batch via `smmla`, activations
+/// pre-quantized to int8 once (per-row scale), int32 accumulated per 32-block then
+/// scaled. Scalar fallback covers the odd token tail and non-i8mm CPUs.
+#[cfg(target_arch = "aarch64")]
+pub fn reefuse_smmla_output2(
+    q8_pair: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let (act_i8, act_scales) = quantize_rows_i8(input, batch, in_features);
+    let mut output = vec![0.0f32; batch * 2];
+    let row1_base = blocks_per_row * 34;
+    let use_i8mm = std::arch::is_aarch64_feature_detected!("i8mm");
+    let mut t = 0usize;
+    while t + 2 <= batch && use_i8mm {
+        let s_t = scale * act_scales[t];
+        let s_t1 = scale * act_scales[t + 1];
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let w0 = q8_pair[b * 34 + 2..].as_ptr() as *const i8;
+            let w1 = q8_pair[row1_base + b * 34 + 2..].as_ptr() as *const i8;
+            let a0 = act_i8[t * in_features + in_feat..].as_ptr();
+            let a1 = act_i8[(t + 1) * in_features + in_feat..].as_ptr();
+            let tile = unsafe { smmla_block32(a0, a1, w0, w1) };
+            output[t * 2] += s_t * tile[0] as f32;
+            output[t * 2 + 1] += s_t * tile[1] as f32;
+            output[(t + 1) * 2] += s_t1 * tile[2] as f32;
+            output[(t + 1) * 2 + 1] += s_t1 * tile[3] as f32;
+        }
+        t += 2;
+    }
+    // Scalar int8 tail (odd token or non-i8mm CPU).
+    while t < batch {
+        let s_t = scale * act_scales[t];
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let qs0 = &q8_pair[b * 34 + 2..b * 34 + 34];
+            let qs1 = &q8_pair[row1_base + b * 34 + 2..row1_base + b * 34 + 34];
+            let mut d0 = 0i32;
+            let mut d1 = 0i32;
+            for k in 0..32 {
+                let a = act_i8[t * in_features + in_feat + k] as i32;
+                d0 += (qs0[k] as i8 as i32) * a;
+                d1 += (qs1[k] as i8 as i32) * a;
+            }
+            output[t * 2] += s_t * d0 as f32;
+            output[t * 2 + 1] += s_t * d1 as f32;
+        }
+        t += 1;
+    }
+    output
+}
+
 /// quant cost is amortized; the microbench therefore quantizes outside the timed
 /// loop and times only the int8 dot.
 fn quantize_rows_i8(input: &[f32], batch: usize, in_features: usize) -> (Vec<i8>, Vec<f32>) {
@@ -1494,7 +1618,9 @@ mod tests {
             // The f32 variants are bit-exact against the baseline. `reedot_i8_vdot`
             // quantizes activations to int8, so it carries a small, bounded error
             // by design (the lossy-but-validated int8 path); allow a looser bound.
-            let tolerance = if result.variant == "reedot_i8_vdot" {
+            let tolerance = if result.variant == "reedot_i8_vdot"
+                || result.variant == "reefuse_smmla_output2"
+            {
                 0.05
             } else {
                 0.0001
