@@ -619,6 +619,22 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 (token_id, Some(logits))
             }
         };
+        // Parity-validation aid: the fused argmax path does not materialize full
+        // logits. When RLLM_FULL_LOGITS is set, recompute the full lm_head output
+        // (same kernel as the TopP path, so it reflects the int8-activation gate)
+        // for top-1/top-10 comparison. Default off — no effect on normal runs.
+        let logits = if logits.is_none() && full_logits_emit_enabled() {
+            Some(streaming_tile_linear_from_model(
+                self.model,
+                &self.prepared.lm_head_weight,
+                last_hidden,
+                None,
+                lm_head_config,
+                budget,
+            )?)
+        } else {
+            logits
+        };
         phase_timings.lm_head_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
         self.last_phase_timings = Some(phase_timings);
         self.last_experimental_speed_stats = Some(experimental_speed_stats);
@@ -629,6 +645,18 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             cached_context_len_after: self.context_len(),
         }))
     }
+}
+
+fn full_logits_emit_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("RLLM_FULL_LOGITS")
+                .ok()
+                .map(|v| v.trim().to_ascii_lowercase()),
+            Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        )
+    })
 }
 
 include!("drift_probe.rs");

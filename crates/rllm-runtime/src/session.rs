@@ -199,6 +199,9 @@ pub struct RamaSessionTurnResult {
     pub generated_token_ids: Vec<usize>,
     pub token_history: Vec<usize>,
     pub metrics: RamaSessionTurnMetrics,
+    /// Full-vocab logits from the prefill -> first generated token, when the
+    /// adapter emitted them. Deterministic comparison point for parity checks.
+    pub first_step_logits: Option<Vec<f32>>,
 }
 
 /// Model-specific adapter used by [`RamaChatSession`] to append tokens into a
@@ -350,6 +353,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     "chat session prefill did not emit first token".to_string(),
                 )
             })?;
+        let first_step_logits = first_step.logits.clone();
         if let Some(timings) = self.adapter.take_last_phase_timings() {
             prefill_phase_timings.add_assign(timings);
             phase_timings.add_assign(timings);
@@ -393,6 +397,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                     decode_phase_timings,
                     repetition_stats: RamaRepetitionStats::from_tokens(&generated_token_ids),
                 },
+                first_step_logits.clone(),
             ));
         }
 
@@ -459,6 +464,7 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
                 decode_phase_timings,
                 repetition_stats: RamaRepetitionStats::from_tokens(&generated_token_ids),
             },
+            first_step_logits,
         ))
     }
 
@@ -467,12 +473,14 @@ impl<A: RamaSessionAdapter> RamaChatSession<A> {
         input_token_ids: &[usize],
         generated_token_ids: Vec<usize>,
         metrics: RamaSessionTurnMetrics,
+        first_step_logits: Option<Vec<f32>>,
     ) -> RamaSessionTurnResult {
         RamaSessionTurnResult {
             input_token_ids: input_token_ids.to_vec(),
             generated_token_ids,
             token_history: self.token_history.clone(),
             metrics,
+            first_step_logits,
         }
     }
 }

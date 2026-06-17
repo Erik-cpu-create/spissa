@@ -51,6 +51,11 @@ struct Args {
     /// Runtime chunk integrity mode: strict, verify-once, or unchecked.
     #[arg(long, default_value = "verify-once")]
     rama_integrity: String,
+
+    /// Optional JSON output path for the first turn's prefill->first-token logits.
+    /// Used for parity comparison (e.g. f32 vs int8-activation matmul).
+    #[arg(long)]
+    logits_out: Option<String>,
 }
 
 fn parse_rama_integrity_mode(raw: &str) -> Result<RamaIntegrityMode> {
@@ -452,6 +457,21 @@ fn format_q8_kernel_profile_suffix() -> String {
     )
 }
 
+fn write_first_step_logits(path: &str, logits: &[f32], first_token: usize) -> Result<()> {
+    let mut body = String::with_capacity(logits.len() * 8 + 64);
+    body.push_str(&format!("{{\"first_token\":{first_token},\"logits\":["));
+    for (i, value) in logits.iter().enumerate() {
+        if i > 0 {
+            body.push(',');
+        }
+        body.push_str(&format!("{value}"));
+    }
+    body.push_str("]}");
+    std::fs::write(path, body)
+        .map_err(|err| anyhow::anyhow!("failed to write logits JSON {path}: {err}"))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.ctx == 0 {
@@ -547,6 +567,19 @@ fn main() -> Result<()> {
         )?;
 
         println!();
+        if let Some(path) = args.logits_out.as_deref() {
+            match result.first_step_logits.as_ref() {
+                Some(logits) => {
+                    let first_token = result.generated_token_ids.first().copied().unwrap_or(0);
+                    write_first_step_logits(path, logits, first_token)?;
+                    eprintln!(
+                        "first-step logits ({} values) written to {path}",
+                        logits.len()
+                    );
+                }
+                None => eprintln!("warning: --logits-out set but adapter emitted no logits"),
+            }
+        }
         let rolling_suffix = format_rolling_suffix(result.metrics.rolling_stats);
         let aip_suffix = format_aip_suffix(result.metrics.experimental_speed_stats);
         let repetition_suffix = format_repetition_suffix(result.metrics.repetition_stats);
