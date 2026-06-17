@@ -288,6 +288,33 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
             max_abs_diff: max_abs_diff(&output2_baseline, &output),
             speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
         });
+
+        // Packed-panel: pack act + weight outside the timed loop (same convention
+        // as reedot/quantize_rows_i8 — at runtime, weight pre-packs at prep time
+        // and act packs once per matmul, amortized across out_features).
+        let (act_i8, act_scales) = quantize_rows_i8(&input, config.batch, config.in_features);
+        let weight_panel = pack_weight_panel_pair_lab(&q8_pair, config.blocks_per_row);
+        let act_panel = pack_act_panel_pair_lab(&act_i8, config.batch, config.in_features);
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 2, || unsafe {
+            reefuse_smmla_panel_output2(
+                &weight_panel,
+                &q8_pair,
+                &act_panel,
+                &act_i8,
+                &act_scales,
+                scale,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output2".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&output2_baseline, &output),
+            speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
     }
 
     if config.batch == 1 {
@@ -523,6 +550,148 @@ pub unsafe fn reefuse_smmla_output2_inline(
         }
         t += 1;
     }
+    output
+}
+
+/// REEFUSE-Q8-I8MM-LAB packed-panel: pre-pack a single weight-row pair into
+/// contiguous int8 panels so the kernel can use 16-byte `vld1q` loads instead of
+/// 8-byte lane loads (R117's bottleneck). Per 32-element K-block: 4 segments of
+/// 16 bytes = [row0_K0..7 | row1_K0..7] contiguous. Skips the per-block fp16
+/// scale prefix (lab uses a single scalar `scale` parameter, matching the other
+/// output2 variants).
+#[cfg(target_arch = "aarch64")]
+fn pack_weight_panel_pair_lab(q8_pair: &[u8], blocks_per_row: usize) -> Vec<i8> {
+    let row1_base = blocks_per_row * 34;
+    let mut panel = vec![0i8; 2 * blocks_per_row * 32];
+    for b in 0..blocks_per_row {
+        for seg in 0..4 {
+            let dst = b * 64 + seg * 16;
+            let src_r0 = b * 34 + 2 + seg * 8;
+            let src_r1 = row1_base + b * 34 + 2 + seg * 8;
+            for k in 0..8 {
+                panel[dst + k] = q8_pair[src_r0 + k] as i8;
+                panel[dst + 8 + k] = q8_pair[src_r1 + k] as i8;
+            }
+        }
+    }
+    panel
+}
+
+/// Pack batch activations into pair-major panels so each kernel iteration loads
+/// 16 contiguous bytes `[t0_K0..7 | t1_K0..7]`. Odd-batch tail handled by the
+/// caller via scalar fallback over the raw `act_i8` (one row of ~1/55 of work).
+#[cfg(target_arch = "aarch64")]
+fn pack_act_panel_pair_lab(act_i8: &[i8], batch: usize, in_features: usize) -> Vec<i8> {
+    let pairs = batch / 2;
+    let blocks = in_features / 32;
+    let mut panel = vec![0i8; pairs * 2 * in_features];
+    for p in 0..pairs {
+        let r0 = p * 2;
+        let r1 = r0 + 1;
+        for b in 0..blocks {
+            for seg in 0..4 {
+                let dst = p * 2 * in_features + b * 64 + seg * 16;
+                let src_r0 = r0 * in_features + b * 32 + seg * 8;
+                let src_r1 = r1 * in_features + b * 32 + seg * 8;
+                for k in 0..8 {
+                    panel[dst + k] = act_i8[src_r0 + k];
+                    panel[dst + 8 + k] = act_i8[src_r1 + k];
+                }
+            }
+        }
+    }
+    panel
+}
+
+/// REEFUSE-Q8-I8MM-LAB packed-panel kernel: one matmul over a (batch x 2) output2
+/// shape using `smmla` with contiguous `vld1q` 16-byte loads from packed panels.
+/// Per K-block (32 lanes): 4 `vld1q` act + 4 `vld1q` weight + 4 `smmla` → 4
+/// int32x4 partial tiles accumulated into the register-resident f32 output.
+/// Each `smmla` produces a 2x2 tile `[t0*w0, t0*w1, t1*w0, t1*w1]` per K-segment;
+/// scaling applies `[s_t0, s_t0, s_t1, s_t1]` once per block via `vfmaq_f32`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+pub unsafe fn reefuse_smmla_panel_output2(
+    weight_panel: &[i8],
+    q8_pair: &[u8],
+    act_panel: &[i8],
+    act_i8: &[i8],
+    act_scales: &[f32],
+    weight_scale: f32,
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let mut output = vec![0f32; batch * 2];
+    let pairs = batch / 2;
+    let act_pair_stride = 2 * in_features;
+    let blocks = blocks_per_row;
+    let row1_base = blocks_per_row * 34;
+
+    for p in 0..pairs {
+        let t0 = p * 2;
+        let t1 = t0 + 1;
+        let s_t0 = weight_scale * act_scales[t0];
+        let s_t1 = weight_scale * act_scales[t1];
+        let scale_arr: [f32; 4] = [s_t0, s_t0, s_t1, s_t1];
+        let scale_vec = vld1q_f32(scale_arr.as_ptr());
+        let mut acc_f = vdupq_n_f32(0.0);
+        let act_pair_base = act_panel.as_ptr().add(p * act_pair_stride);
+
+        for b in 0..blocks {
+            let mut a_ptr = act_pair_base.add(b * 64);
+            let mut w_ptr = weight_panel.as_ptr().add(b * 64);
+            let tile_acc: int32x4_t;
+            std::arch::asm!(
+                "movi {acc:v}.4s, #0",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                acc = out(vreg) tile_acc,
+                a = inout(reg) a_ptr,
+                w = inout(reg) w_ptr,
+                out("v0") _,
+                out("v1") _,
+            );
+            let _ = (a_ptr, w_ptr);
+            acc_f = vfmaq_f32(acc_f, vcvtq_f32_s32(tile_acc), scale_vec);
+        }
+
+        output[t0 * 2] = vgetq_lane_f32(acc_f, 0);
+        output[t0 * 2 + 1] = vgetq_lane_f32(acc_f, 1);
+        output[t1 * 2] = vgetq_lane_f32(acc_f, 2);
+        output[t1 * 2 + 1] = vgetq_lane_f32(acc_f, 3);
+    }
+
+    // Odd batch tail (single row): scalar int8 dot from raw inputs.
+    if batch & 1 != 0 {
+        let t = batch - 1;
+        let s_t = weight_scale * act_scales[t];
+        for b in 0..blocks {
+            let in_feat = b * 32;
+            let qs0 = &q8_pair[b * 34 + 2..b * 34 + 34];
+            let qs1 = &q8_pair[row1_base + b * 34 + 2..row1_base + b * 34 + 34];
+            let mut d0 = 0i32;
+            let mut d1 = 0i32;
+            for k in 0..32 {
+                let a = act_i8[t * in_features + in_feat + k] as i32;
+                d0 += (qs0[k] as i8 as i32) * a;
+                d1 += (qs1[k] as i8 as i32) * a;
+            }
+            output[t * 2] += s_t * d0 as f32;
+            output[t * 2 + 1] += s_t * d1 as f32;
+        }
+    }
+
     output
 }
 
@@ -1731,6 +1900,7 @@ mod tests {
             let tolerance = if result.variant == "reedot_i8_vdot"
                 || result.variant == "reefuse_smmla_output2"
                 || result.variant == "reefuse_smmla_output2_inline"
+                || result.variant == "reefuse_smmla_panel_output2"
             {
                 0.05
             } else {
