@@ -270,6 +270,24 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
             max_abs_diff: max_abs_diff(&output2_baseline, &output),
             speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
         });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 2, || unsafe {
+            reefuse_smmla_output2_inline(
+                &q8_pair,
+                scale,
+                &input,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_output2_inline".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&output2_baseline, &output),
+            speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
     }
 
     if config.batch == 1 {
@@ -395,6 +413,98 @@ pub fn reefuse_smmla_output2(
         t += 2;
     }
     // Scalar int8 tail (odd token or non-i8mm CPU).
+    while t < batch {
+        let s_t = scale * act_scales[t];
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let qs0 = &q8_pair[b * 34 + 2..b * 34 + 34];
+            let qs1 = &q8_pair[row1_base + b * 34 + 2..row1_base + b * 34 + 34];
+            let mut d0 = 0i32;
+            let mut d1 = 0i32;
+            for k in 0..32 {
+                let a = act_i8[t * in_features + in_feat + k] as i32;
+                d0 += (qs0[k] as i8 as i32) * a;
+                d1 += (qs1[k] as i8 as i32) * a;
+            }
+            output[t * 2] += s_t * d0 as f32;
+            output[t * 2 + 1] += s_t * d1 as f32;
+        }
+        t += 1;
+    }
+    output
+}
+
+/// REEFUSE-Q8-I8MM-LAB inline: the R116 kernel restructured to remove the
+/// per-block overhead. The whole K loop lives in ONE `target_feature` function;
+/// the `smmla` asm is emitted inline per block (no function call), its 2x2 int32
+/// tile is read directly into a `vreg` operand (no memory round-trip), and the
+/// per-block scale + f32 accumulation use NEON intrinsics with the output tile
+/// kept register-resident across the block loop.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+pub unsafe fn reefuse_smmla_output2_inline(
+    q8_pair: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let (act_i8, act_scales) = quantize_rows_i8(input, batch, in_features);
+    let mut output = vec![0.0f32; batch * 2];
+    let row1_base = blocks_per_row * 34;
+    let mut t = 0usize;
+    while t + 2 <= batch {
+        let s_t = scale * act_scales[t];
+        let s_t1 = scale * act_scales[t + 1];
+        let scale_vec = vld1q_f32([s_t, s_t, s_t1, s_t1].as_ptr());
+        let mut acc_f = vdupq_n_f32(0.0);
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let mut a0 = act_i8.as_ptr().add(t * in_features + in_feat);
+            let mut a1 = act_i8.as_ptr().add((t + 1) * in_features + in_feat);
+            let mut w0 = q8_pair.as_ptr().add(b * 34 + 2) as *const i8;
+            let mut w1 = q8_pair.as_ptr().add(row1_base + b * 34 + 2) as *const i8;
+            let tile: int32x4_t;
+            std::arch::asm!(
+                "movi {acc:v}.4s, #0",
+                "ld1 {{v0.d}}[0], [{a0}], #8",
+                "ld1 {{v0.d}}[1], [{a1}], #8",
+                "ld1 {{v1.d}}[0], [{w0}], #8",
+                "ld1 {{v1.d}}[1], [{w1}], #8",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.d}}[0], [{a0}], #8",
+                "ld1 {{v0.d}}[1], [{a1}], #8",
+                "ld1 {{v1.d}}[0], [{w0}], #8",
+                "ld1 {{v1.d}}[1], [{w1}], #8",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.d}}[0], [{a0}], #8",
+                "ld1 {{v0.d}}[1], [{a1}], #8",
+                "ld1 {{v1.d}}[0], [{w0}], #8",
+                "ld1 {{v1.d}}[1], [{w1}], #8",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.d}}[0], [{a0}], #8",
+                "ld1 {{v0.d}}[1], [{a1}], #8",
+                "ld1 {{v1.d}}[0], [{w0}], #8",
+                "ld1 {{v1.d}}[1], [{w1}], #8",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                acc = out(vreg) tile,
+                a0 = inout(reg) a0,
+                a1 = inout(reg) a1,
+                w0 = inout(reg) w0,
+                w1 = inout(reg) w1,
+                out("v0") _,
+                out("v1") _,
+            );
+            let _ = (a0, a1, w0, w1);
+            acc_f = vfmaq_f32(acc_f, vcvtq_f32_s32(tile), scale_vec);
+        }
+        output[t * 2] = vgetq_lane_f32(acc_f, 0);
+        output[t * 2 + 1] = vgetq_lane_f32(acc_f, 1);
+        output[(t + 1) * 2] = vgetq_lane_f32(acc_f, 2);
+        output[(t + 1) * 2 + 1] = vgetq_lane_f32(acc_f, 3);
+        t += 2;
+    }
     while t < batch {
         let s_t = scale * act_scales[t];
         for b in 0..blocks_per_row {
@@ -1620,6 +1730,7 @@ mod tests {
             // by design (the lossy-but-validated int8 path); allow a looser bound.
             let tolerance = if result.variant == "reedot_i8_vdot"
                 || result.variant == "reefuse_smmla_output2"
+                || result.variant == "reefuse_smmla_output2_inline"
             {
                 0.05
             } else {
