@@ -256,6 +256,9 @@ fn accumulate_q8_0_chunk(
     let mut normal_batch4_kernel_elapsed = std::time::Duration::ZERO;
     let mut normal_batch4_kernel_calls = 0u64;
     let mut normal_batch4_kernel_items = 0u64;
+    let mut normal_output2_batch4_elapsed = std::time::Duration::ZERO;
+    let mut normal_output2_batch4_calls = 0u64;
+    let mut normal_output2_batch4_items = 0u64;
     let mut normal_tail_elapsed = std::time::Duration::ZERO;
     let mut normal_tail_calls = 0u64;
     let mut normal_tail_items = 0u64;
@@ -270,7 +273,12 @@ fn accumulate_q8_0_chunk(
         return Ok(());
     }
 
-    for block_idx in 0..q8_bytes.len() / 34 {
+    let q8_block_count = q8_bytes.len() / 34;
+    let mut consumed_as_output2_second = vec![false; q8_block_count];
+    for block_idx in 0..q8_block_count {
+        if consumed_as_output2_second[block_idx] {
+            continue;
+        }
         let block_global_start = element_start + block_idx * 32;
         if block_global_start >= weight_elements {
             break;
@@ -283,6 +291,82 @@ fn accumulate_q8_0_chunk(
         let in_feature = block_global_start % config.in_features;
 
         if config.batch > 1 && block_len == 32 && in_feature + block_len <= config.in_features {
+            if let Some((first_out_feature, second_block_idx)) = q8_output2_pair_offset(
+                block_idx,
+                q8_block_count,
+                element_start,
+                weight_elements,
+                config,
+            ) {
+                if second_block_idx != block_idx {
+                    let profile_start = profile_enabled.then(Instant::now);
+                    let scale_start = profile_enabled.then(Instant::now);
+                    let second_offset = second_block_idx * 34;
+                    let second_scale = q8_0_block_scale(q8_bytes, second_offset);
+                    let second_qs = &q8_bytes[second_offset + 2..second_offset + 34];
+                    let first_scaled = q8_0_scaled_block_reecast(qs, scale);
+                    let second_scaled = q8_0_scaled_block_reecast(second_qs, second_scale);
+                    consumed_as_output2_second[second_block_idx] = true;
+                    if let Some(scale_start) = scale_start {
+                        normal_scale_elapsed += scale_start.elapsed();
+                        normal_scale_calls += 2;
+                    }
+
+                    let mut batch_idx = 0usize;
+                    let batch4_start_idx = batch_idx;
+                    let batch4_start = profile_enabled.then(Instant::now);
+                    while batch_idx + 4 <= config.batch {
+                        let input_start = batch_idx * config.in_features + in_feature;
+                        let output_start = batch_idx * config.out_features;
+                        accumulate_f32_dot_32_output2_batch4_reebundle(
+                            &first_scaled,
+                            &second_scaled,
+                            &input[input_start..],
+                            config.in_features,
+                            &mut output[output_start..],
+                            config.out_features,
+                            first_out_feature,
+                        );
+                        batch_idx += 4;
+                    }
+                    if let Some(batch4_start) = batch4_start {
+                        let calls = ((batch_idx - batch4_start_idx) / 4) as u64;
+                        normal_output2_batch4_elapsed += batch4_start.elapsed();
+                        normal_output2_batch4_calls += calls;
+                        normal_output2_batch4_items += calls * 4;
+                    }
+
+                    let tail_start_idx = batch_idx;
+                    let tail_start = profile_enabled.then(Instant::now);
+                    while batch_idx < config.batch {
+                        let input_start = batch_idx * config.in_features + in_feature;
+                        let output_start = batch_idx * config.out_features;
+                        output[output_start + first_out_feature] +=
+                            f32_dot_32(&first_scaled, &input[input_start..]);
+                        output[output_start + first_out_feature + 1] +=
+                            f32_dot_32(&second_scaled, &input[input_start..]);
+                        batch_idx += 1;
+                    }
+                    if let Some(tail_start) = tail_start {
+                        let calls = (batch_idx - tail_start_idx) as u64;
+                        normal_tail_elapsed += tail_start.elapsed();
+                        normal_tail_calls += calls * 2;
+                        normal_tail_items += calls * 2;
+                    }
+                    if let Some(profile_start) = profile_start {
+                        record_q8_kernel_path(
+                            Q8KernelPath::BatchGt1Scaled,
+                            2,
+                            2,
+                            0,
+                            (config.batch * 2) as u64,
+                            profile_start.elapsed(),
+                        );
+                    }
+                    continue;
+                }
+            }
+
             let profile_start = profile_enabled.then(Instant::now);
             let scale_start = profile_enabled.then(Instant::now);
             let scaled = q8_0_scaled_block_reecast(qs, scale);
@@ -424,6 +508,14 @@ fn accumulate_q8_0_chunk(
             normal_batch4_kernel_elapsed,
         );
         record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalOutput2Batch4,
+            normal_output2_batch4_calls,
+            normal_output2_batch4_calls,
+            normal_output2_batch4_calls * 2,
+            normal_output2_batch4_items,
+            normal_output2_batch4_elapsed,
+        );
+        record_q8_kernel_path(
             Q8KernelPath::BatchGt1NormalTail,
             normal_tail_calls,
             normal_tail_calls,
@@ -434,6 +526,39 @@ fn accumulate_q8_0_chunk(
     }
 
     Ok(())
+}
+
+fn q8_output2_pair_offset(
+    block_idx: usize,
+    q8_block_count: usize,
+    element_start: usize,
+    weight_elements: usize,
+    config: StreamingLinearConfig,
+) -> Option<(usize, usize)> {
+    let block_global_start = element_start.checked_add(block_idx.checked_mul(32)?)?;
+    let out_feature = block_global_start / config.in_features;
+    let in_feature = block_global_start % config.in_features;
+    if in_feature + 32 > config.in_features {
+        return None;
+    }
+    if out_feature + 1 >= config.out_features {
+        return None;
+    }
+    let next_global_start = (out_feature + 1)
+        .checked_mul(config.in_features)?
+        .checked_add(in_feature)?;
+    if next_global_start + 32 > weight_elements || next_global_start < element_start {
+        return None;
+    }
+    let next_delta = next_global_start - element_start;
+    if next_delta % 32 != 0 {
+        return None;
+    }
+    let next_block_idx = next_delta / 32;
+    if next_block_idx >= q8_block_count {
+        return None;
+    }
+    Some((out_feature, next_block_idx))
 }
 
 fn accumulate_q8_0_chunk_batch1_complete_rows(
@@ -1092,6 +1217,33 @@ fn accumulate_f32_dot_32_batch4_reevec(
         output,
         output_stride,
         out_feature,
+    );
+}
+
+fn accumulate_f32_dot_32_output2_batch4_reebundle(
+    first: &[f32; 32],
+    second: &[f32; 32],
+    input: &[f32],
+    input_stride: usize,
+    output: &mut [f32],
+    output_stride: usize,
+    first_out_feature: usize,
+) {
+    accumulate_f32_dot_32_batch4_reevec(
+        first,
+        input,
+        input_stride,
+        output,
+        output_stride,
+        first_out_feature,
+    );
+    accumulate_f32_dot_32_batch4_reevec(
+        second,
+        input,
+        input_stride,
+        output,
+        output_stride,
+        first_out_feature + 1,
     );
 }
 
