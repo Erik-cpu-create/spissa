@@ -232,6 +232,141 @@ fn accumulate_weight_chunk(
     Ok(())
 }
 
+const Q8_ACTIVATION_ENV: &str = "RLLM_Q8_ACTIVATION";
+
+/// Opt-in (default off) int8-activation path for Q8 matmul parity validation.
+/// When enabled, activations are quantized to int8 per 32-element segment and the
+/// dot runs as int8×int8 (ARM `sdot`) instead of dequantizing the weight to f32.
+/// This is the REEBORN-Q8 direction gated behind `RLLM_Q8_ACTIVATION` so the exact
+/// f32 path stays default until token/logit parity is confirmed on a real model.
+fn q8_activation_path_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var(Q8_ACTIVATION_ENV)
+                .ok()
+                .map(|v| v.trim().to_ascii_lowercase()),
+            Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        )
+    })
+}
+
+#[cfg(target_arch = "aarch64")]
+fn q8_sdot_available() -> bool {
+    static AVAIL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAIL.get_or_init(|| std::arch::is_aarch64_feature_detected!("dotprod"))
+}
+
+/// Quantize 32 f32 activations to int8 with an absmax scale.
+fn quantize_seg32_i8(seg: &[f32]) -> ([i8; 32], f32) {
+    let mut amax = 0.0f32;
+    for &v in &seg[..32] {
+        let a = v.abs();
+        if a > amax {
+            amax = a;
+        }
+    }
+    let (scale, inv) = if amax > 0.0 {
+        (amax / 127.0, 127.0 / amax)
+    } else {
+        (0.0, 0.0)
+    };
+    let mut q = [0i8; 32];
+    for k in 0..32 {
+        q[k] = (seg[k] * inv).round().clamp(-127.0, 127.0) as i8;
+    }
+    (q, scale)
+}
+
+fn i8_dot32_scalar(w: &[u8], x: &[i8; 32]) -> i32 {
+    let mut acc = 0i32;
+    for k in 0..32 {
+        acc += (w[k] as i8 as i32) * (x[k] as i32);
+    }
+    acc
+}
+
+// Native ARM `sdot` over 32 int8 lanes via inline asm. The `vdotq_s32` intrinsic
+// is still nightly-gated (`stdarch_neon_dotprod`); `sdot` works on stable through
+// `asm!` + `target_feature(dotprod)`. Caller verifies dotprod via q8_sdot_available.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn i8_dot32_sdot(w: &[u8], x: &[i8; 32]) -> i32 {
+    use std::arch::asm;
+    let mut acc: i32;
+    asm!(
+        "movi v4.4s, #0",
+        "ld1 {{v0.16b, v1.16b}}, [{w}]",
+        "ld1 {{v2.16b, v3.16b}}, [{x}]",
+        "sdot v4.4s, v0.16b, v2.16b",
+        "sdot v4.4s, v1.16b, v3.16b",
+        "addv s4, v4.4s",
+        "fmov {acc:w}, s4",
+        w = in(reg) w.as_ptr(),
+        x = in(reg) x.as_ptr(),
+        acc = out(reg) acc,
+        out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+    );
+    acc
+}
+
+fn i8_dot32(w: &[u8], x: &[i8; 32]) -> i32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if q8_sdot_available() {
+            return unsafe { i8_dot32_sdot(w, x) };
+        }
+    }
+    i8_dot32_scalar(w, x)
+}
+
+/// Parity-validation int8-activation Q8 matmul. Accumulates exactly like the f32
+/// path (`output[row][out_feature] += ...`) but uses int8×int8 dot with per-row
+/// per-segment activation quantization. Boundary/partial blocks fall back to the
+/// exact f32 reecast dot.
+fn accumulate_q8_0_chunk_int8_activation(
+    input: &[f32],
+    output: &mut [f32],
+    q8_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    weight_elements: usize,
+) -> Result<()> {
+    let q8_block_count = q8_bytes.len() / 34;
+    for block_idx in 0..q8_block_count {
+        let block_global_start = element_start + block_idx * 32;
+        if block_global_start >= weight_elements {
+            break;
+        }
+        let block_offset = block_idx * 34;
+        let w_scale = q8_0_block_scale(q8_bytes, block_offset);
+        let wq = &q8_bytes[block_offset + 2..block_offset + 34];
+        let block_len = (weight_elements - block_global_start).min(32);
+        let out_feature = block_global_start / config.in_features;
+        let in_feature = block_global_start % config.in_features;
+
+        if block_len == 32 && in_feature + 32 <= config.in_features {
+            for row in 0..config.batch {
+                let seg = &input[row * config.in_features + in_feature..][..32];
+                let (aq, a_scale) = quantize_seg32_i8(seg);
+                let dot = i8_dot32(wq, &aq);
+                output[row * config.out_features + out_feature] += w_scale * a_scale * dot as f32;
+            }
+        } else {
+            let scaled = q8_0_scaled_block_reecast(wq, w_scale);
+            for row in 0..config.batch {
+                let input_start = row * config.in_features + in_feature;
+                let mut acc = 0.0f32;
+                for k in 0..block_len {
+                    acc += scaled[k] * input[input_start + k];
+                }
+                output[row * config.out_features + out_feature] += acc;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn accumulate_q8_0_chunk(
     input: &[f32],
     output: &mut [f32],
@@ -246,6 +381,16 @@ fn accumulate_q8_0_chunk(
         .checked_mul(config.in_features)
         .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
     validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
+    if q8_activation_path_enabled() {
+        return accumulate_q8_0_chunk_int8_activation(
+            input,
+            output,
+            q8_bytes,
+            element_start,
+            config,
+            weight_elements,
+        );
+    }
     let mut normal_scale_elapsed = std::time::Duration::ZERO;
     let mut normal_scale_calls = 0u64;
     let mut normal_batch4_elapsed = std::time::Duration::ZERO;
