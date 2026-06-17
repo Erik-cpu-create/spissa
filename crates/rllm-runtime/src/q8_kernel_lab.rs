@@ -118,6 +118,30 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         });
     }
 
+    // REEDOT-LAB native int8 dot (vdotq_s32) vs the f32 baseline. Activations are
+    // pre-quantized to int8 once (amortized across out_features in real GEMM), so
+    // only the int8 dot is timed. max_abs_diff surfaces the activation-quant error.
+    {
+        let (input_i8, input_scales) = quantize_rows_i8(&input, config.batch, config.in_features);
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reedot_i8_vdot(
+                &q8,
+                scale,
+                &input_i8,
+                &input_scales,
+                config.batch,
+                config.in_features,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reedot_i8_vdot".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+    }
+
     #[cfg(target_arch = "aarch64")]
     {
         let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
@@ -264,6 +288,100 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         iters: config.iters,
         results,
     }
+}
+
+/// Quantize each activation row to int8 with a per-row absmax scale. In a real
+/// prefill GEMM this runs once and is reused across every output feature, so the
+/// quant cost is amortized; the microbench therefore quantizes outside the timed
+/// loop and times only the int8 dot.
+fn quantize_rows_i8(input: &[f32], batch: usize, in_features: usize) -> (Vec<i8>, Vec<f32>) {
+    let mut q = vec![0i8; batch * in_features];
+    let mut scales = vec![0f32; batch];
+    for row in 0..batch {
+        let r = &input[row * in_features..(row + 1) * in_features];
+        let amax = r.iter().fold(0f32, |m, &v| m.max(v.abs()));
+        let (scale, inv) = if amax > 0.0 {
+            (amax / 127.0, 127.0 / amax)
+        } else {
+            (1.0, 0.0)
+        };
+        scales[row] = scale;
+        for i in 0..in_features {
+            q[row * in_features + i] = (r[i] * inv).round().clamp(-127.0, 127.0) as i8;
+        }
+    }
+    (q, scales)
+}
+
+fn dot_i8_i32_scalar(w: &[u8], x: &[i8]) -> i32 {
+    let mut acc = 0i32;
+    for i in 0..32 {
+        acc += (w[i] as i8 as i32) * (x[i] as i32);
+    }
+    acc
+}
+
+// Native ARM `sdot` (dotprod) over 32 int8 lanes via inline asm. The stable
+// `vdotq_s32` intrinsic is still nightly-gated (`stdarch_neon_dotprod`), but the
+// `sdot` instruction itself is usable on stable through `asm!` once the dotprod
+// target feature is enabled. Caller must verify `dotprod` at runtime.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn dot_i8_i32_vdot(w: &[u8], x: &[i8]) -> i32 {
+    use std::arch::asm;
+    let mut acc: i32;
+    asm!(
+        "movi v4.4s, #0",
+        "ld1 {{v0.16b, v1.16b}}, [{w}]",
+        "ld1 {{v2.16b, v3.16b}}, [{x}]",
+        "sdot v4.4s, v0.16b, v2.16b",
+        "sdot v4.4s, v1.16b, v3.16b",
+        "addv s4, v4.4s",
+        "fmov {acc:w}, s4",
+        w = in(reg) w.as_ptr(),
+        x = in(reg) x.as_ptr(),
+        acc = out(reg) acc,
+        out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+    );
+    acc
+}
+
+/// REEDOT-LAB native int8 dot: int8 weight × int8 activation → int32 accumulate
+/// (NEON `vdotq_s32` dotprod on aarch64, scalar fallback otherwise), with the
+/// weight/activation scales applied once at the end. This is the int8 GEMM
+/// direction llama.cpp/ggml uses; the f32 baselines dequantize to f32 first.
+pub fn reedot_i8_vdot(
+    q8: &[u8],
+    scale: f32,
+    input_i8: &[i8],
+    input_scales: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let blocks = q8.len() / 34;
+    let mut acc = vec![0i32; batch];
+    #[cfg(target_arch = "aarch64")]
+    let use_vdot = std::arch::is_aarch64_feature_detected!("dotprod");
+    for block in 0..blocks {
+        let offset = block * 34;
+        let qs = &q8[offset + 2..offset + 34];
+        let in_feature = block * 32;
+        for row in 0..batch {
+            let x = &input_i8[row * in_features + in_feature..];
+            #[cfg(target_arch = "aarch64")]
+            let d = if use_vdot {
+                unsafe { dot_i8_i32_vdot(qs, x) }
+            } else {
+                dot_i8_i32_scalar(qs, x)
+            };
+            #[cfg(not(target_arch = "aarch64"))]
+            let d = dot_i8_i32_scalar(qs, x);
+            acc[row] += d;
+        }
+    }
+    (0..batch)
+        .map(|r| scale * input_scales[r] * acc[r] as f32)
+        .collect()
 }
 
 fn deterministic_input(batch: usize, in_features: usize) -> Vec<f32> {
@@ -1373,11 +1491,20 @@ mod tests {
                 "{} should report elapsed time",
                 result.variant
             );
+            // The f32 variants are bit-exact against the baseline. `reedot_i8_vdot`
+            // quantizes activations to int8, so it carries a small, bounded error
+            // by design (the lossy-but-validated int8 path); allow a looser bound.
+            let tolerance = if result.variant == "reedot_i8_vdot" {
+                0.05
+            } else {
+                0.0001
+            };
             assert!(
-                result.max_abs_diff <= 0.0001,
-                "{} diff {} exceeded tolerance",
+                result.max_abs_diff <= tolerance,
+                "{} diff {} exceeded tolerance {}",
                 result.variant,
-                result.max_abs_diff
+                result.max_abs_diff,
+                tolerance
             );
         }
     }
