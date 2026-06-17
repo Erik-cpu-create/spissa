@@ -10,6 +10,7 @@ pub enum Q8KernelPath {
     BatchGt1NormalBatch4,
     BatchGt1NormalBatch4Setup,
     BatchGt1NormalBatch4Kernel,
+    BatchGt1NormalOutput2Batch4,
     BatchGt1NormalTail,
     BatchGt1MultiplyAdvance,
     BatchGt1MultiplyScale,
@@ -31,6 +32,7 @@ impl Q8KernelPath {
             Self::BatchGt1NormalBatch4 => "batch_gt1_normal_batch4",
             Self::BatchGt1NormalBatch4Setup => "batch_gt1_normal_batch4_setup",
             Self::BatchGt1NormalBatch4Kernel => "batch_gt1_normal_batch4_kernel",
+            Self::BatchGt1NormalOutput2Batch4 => "batch_gt1_normal_output2_batch4",
             Self::BatchGt1NormalTail => "batch_gt1_normal_tail",
             Self::BatchGt1MultiplyAdvance => "batch_gt1_multiply_advance",
             Self::BatchGt1MultiplyScale => "batch_gt1_multiply_scale",
@@ -183,6 +185,14 @@ mod tests {
             Duration::from_nanos(45),
         );
         record_q8_kernel_path(
+            Q8KernelPath::BatchGt1NormalOutput2Batch4,
+            2,
+            2,
+            2,
+            8,
+            Duration::from_nanos(35),
+        );
+        record_q8_kernel_path(
             Q8KernelPath::BatchGt1MultiplyFinish,
             2,
             2,
@@ -212,6 +222,10 @@ mod tests {
             .rows
             .iter()
             .any(|row| row.path == "batch_gt1_normal_batch4_kernel"));
+        assert!(snapshot
+            .rows
+            .iter()
+            .any(|row| row.path == "batch_gt1_normal_output2_batch4"));
         assert!(q8_kernel_profile_snapshot_and_reset().is_none());
     }
 }

@@ -650,6 +650,86 @@ mod tests {
     }
 
     #[test]
+    fn q8_0_output2_runtime_path_accumulates_adjacent_rows_exactly() {
+        let mut row0_block0 = [0i8; 32];
+        let mut row0_block1 = [0i8; 32];
+        let mut row1_block0 = [0i8; 32];
+        let mut row1_block1 = [0i8; 32];
+        row0_block0.fill(1);
+        row0_block1.fill(2);
+        row1_block0.fill(3);
+        row1_block1.fill(4);
+
+        let mut q8 = Vec::new();
+        q8.extend_from_slice(&q8_0_block_bytes(0.5, &row0_block0));
+        q8.extend_from_slice(&q8_0_block_bytes(0.5, &row0_block1));
+        q8.extend_from_slice(&q8_0_block_bytes(0.5, &row1_block0));
+        q8.extend_from_slice(&q8_0_block_bytes(0.5, &row1_block1));
+
+        let mut input = Vec::new();
+        for batch in 0..4 {
+            input.extend(std::iter::repeat_n((batch + 1) as f32, 32));
+            input.extend(std::iter::repeat_n((batch + 2) as f32, 32));
+        }
+        let mut output = vec![0.0f32; 8];
+        let config = StreamingLinearConfig {
+            batch: 4,
+            in_features: 64,
+            out_features: 2,
+        };
+
+        accumulate_q8_0_chunk(
+            &input,
+            &mut output,
+            &q8,
+            0,
+            config,
+            "linear.q8.output2.weight",
+        )
+        .unwrap();
+
+        assert_eq!(
+            output,
+            vec![80.0, 176.0, 128.0, 288.0, 176.0, 400.0, 224.0, 512.0,]
+        );
+    }
+
+    #[test]
+    fn q8_0_output2_runtime_path_declines_non_matching_input_blocks() {
+        let mut row0_block1 = [0i8; 32];
+        let mut row1_block0 = [0i8; 32];
+        row0_block1.fill(2);
+        row1_block0.fill(3);
+
+        let mut q8 = Vec::new();
+        q8.extend_from_slice(&q8_0_block_bytes(0.5, &row0_block1));
+        q8.extend_from_slice(&q8_0_block_bytes(0.5, &row1_block0));
+
+        let input = vec![1.0f32; 4 * 64];
+        let mut output = vec![0.0f32; 8];
+        let config = StreamingLinearConfig {
+            batch: 4,
+            in_features: 64,
+            out_features: 2,
+        };
+
+        accumulate_q8_0_chunk(
+            &input,
+            &mut output,
+            &q8,
+            32,
+            config,
+            "linear.q8.decline.weight",
+        )
+        .unwrap();
+
+        assert_eq!(
+            output,
+            vec![32.0, 48.0, 32.0, 48.0, 32.0, 48.0, 32.0, 48.0]
+        );
+    }
+
+    #[test]
     fn q8_0_scaled_block_applies_scale_once() {
         let mut q = [0i8; 32];
         for (idx, value) in q.iter_mut().enumerate() {
