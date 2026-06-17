@@ -367,6 +367,73 @@ fn accumulate_q8_0_chunk_int8_activation(
     Ok(())
 }
 
+/// Minimum batch rows per worker before the Q8 prefill matmul is parallelized.
+const MIN_ROWS_PER_PARALLEL_Q8_PREFILL: usize = 4;
+
+/// REEWEAVE-Q8-PREFILL: parallelize one already-decoded Q8 chunk across CPU cores
+/// by splitting the batch (prompt token) rows. Each worker owns a contiguous
+/// output row-slice (`split_at_mut`) and a contiguous input row-slice, shares the
+/// decoded weight bytes read-only, then runs the existing per-row-range kernel.
+/// Only engages for batch>1 (prefill); batch1 decode falls through to sequential.
+fn accumulate_q8_0_chunk_parallel(
+    input: &[f32],
+    output: &mut [f32],
+    q8_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    weight_name: &str,
+) -> Result<()> {
+    let threads = effective_runtime_threads(
+        std::env::var(RLLM_THREADS_ENV).ok().as_deref(),
+        available_runtime_threads(),
+    );
+    if threads <= 1 || config.batch < 2 * MIN_ROWS_PER_PARALLEL_Q8_PREFILL {
+        return accumulate_q8_0_chunk(input, output, q8_bytes, element_start, config, weight_name);
+    }
+    let workers = threads
+        .min(config.batch / MIN_ROWS_PER_PARALLEL_Q8_PREFILL)
+        .max(1);
+    let rows_per_worker = config.batch.div_ceil(workers);
+
+    let mut results: Vec<Result<()>> = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        let mut out_rest = &mut output[..];
+        let mut row_start = 0usize;
+        while row_start < config.batch {
+            let rows = rows_per_worker.min(config.batch - row_start);
+            let in_slice =
+                &input[row_start * config.in_features..(row_start + rows) * config.in_features];
+            let (out_slice, rest) = out_rest.split_at_mut(rows * config.out_features);
+            out_rest = rest;
+            let mut worker_config = config;
+            worker_config.batch = rows;
+            handles.push(scope.spawn(move || {
+                accumulate_q8_0_chunk(
+                    in_slice,
+                    out_slice,
+                    q8_bytes,
+                    element_start,
+                    worker_config,
+                    weight_name,
+                )
+            }));
+            row_start += rows;
+        }
+        for handle in handles {
+            results.push(handle.join().unwrap_or_else(|_| {
+                Err(RuntimeError::Shape(
+                    "parallel Q8 prefill worker panicked".to_string(),
+                ))
+            }));
+        }
+    });
+    for result in results {
+        result?;
+    }
+    Ok(())
+}
+
 fn accumulate_q8_0_chunk(
     input: &[f32],
     output: &mut [f32],

@@ -257,7 +257,7 @@ pub fn streaming_linear_from_model(
                         expected_chunk_bytes
                     )));
                 }
-                accumulate_q8_0_chunk(
+                accumulate_q8_0_chunk_parallel(
                     input,
                     &mut output,
                     bytes,
@@ -478,7 +478,7 @@ pub fn streaming_tile_linear_from_model(
                         expected_chunk_bytes
                     )));
                 }
-                accumulate_q8_0_chunk(
+                accumulate_q8_0_chunk_parallel(
                     input,
                     &mut output,
                     quantized_bytes,
