@@ -1,0 +1,37 @@
+{
+  "extraKnownMarketplaces": {
+    "superpowers-marketplace": {
+      "source": { "source": "github", "repo": "obra/superpowers-marketplace" }
+    }
+  },
+  "enabledPlugins": {
+    "superpowers@superpowers-marketplace": true
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/modular_code_guard.py\" 2>/dev/null || true",
+            "statusMessage": "modular-code-guard"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/modular_code_guard.py\" 2>/dev/null || true",
+            "if": "Bash(git commit*)",
+            "statusMessage": "modular-code-guard (commit scan)"
+          }
+        ]
+      }
+    ]
+  }
+}
