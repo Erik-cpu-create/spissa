@@ -51,6 +51,9 @@ pub use loader::{FullDecodeModel, FullDecodeStats};
 pub use memory::MemoryBudget;
 pub use models::gpt_neox::*;
 pub use models::llama::*;
+// Gemma items are reached via the `rllm_runtime::models::gemma::*` path (like
+// the llama-test binary imports llama) to avoid ambiguous glob re-exports of the
+// shared `api`/`generate`/`model` submodule names at the crate root.
 pub use ops::*;
 pub use planner::{
     build_runtime_plan, ModelShapeHints, PlanStatus, PlanStep, RuntimeMode, RuntimePlan,

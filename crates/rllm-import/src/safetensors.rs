@@ -67,9 +67,18 @@ struct HuggingFaceModelConfig {
     sliding_window_pattern: Option<u64>,
     rope_local_base_freq: Option<f32>,
     hidden_activation: Option<String>,
+    /// Linear RoPE-scaling for global layers, e.g. Gemma 3
+    /// `{"factor": 8.0, "rope_type": "linear"}`.
+    rope_scaling: Option<RopeScalingConfig>,
     /// Multimodal checkpoints (e.g. Gemma 3 4B = `Gemma3ForConditionalGeneration`)
     /// nest the language-model architecture params under `text_config`.
     text_config: Option<Box<HuggingFaceModelConfig>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RopeScalingConfig {
+    factor: Option<f32>,
+    rope_type: Option<String>,
 }
 
 pub fn read_model_config_metadata(path: impl AsRef<Path>) -> Result<ModelConfigMetadata> {
@@ -112,6 +121,19 @@ pub fn model_config_metadata_from_json_str(json: &str) -> Result<ModelConfigMeta
         sliding_window_pattern: dims.sliding_window_pattern,
         rope_local_base_freq: dims.rope_local_base_freq,
         hidden_activation: dims.hidden_activation.clone(),
+        // Only linear scaling is captured (Gemma 3 family); other rope_type
+        // values are left as `None` so the runtime falls back to unscaled rope.
+        rope_scaling_factor: dims
+            .rope_scaling
+            .as_ref()
+            .filter(|scaling| {
+                scaling
+                    .rope_type
+                    .as_deref()
+                    .map(|kind| kind.eq_ignore_ascii_case("linear"))
+                    .unwrap_or(false)
+            })
+            .and_then(|scaling| scaling.factor),
     })
 }
 
@@ -489,5 +511,28 @@ mod tests {
         assert_eq!(m.rope_local_base_freq, Some(10_000.0));
         assert_eq!(m.query_pre_attn_scalar, Some(256.0));
         assert_eq!(m.rms_norm_eps, Some(1e-6));
+        // linear rope-scaling factor for the global layers
+        assert_eq!(m.rope_scaling_factor, Some(8.0));
+    }
+
+    #[test]
+    fn parses_linear_rope_scaling_factor_and_ignores_non_linear() {
+        let linear = model_config_metadata_from_json_str(
+            r#"{"model_type":"gemma3","rope_scaling":{"factor":8.0,"rope_type":"linear"}}"#,
+        )
+        .unwrap();
+        assert_eq!(linear.rope_scaling_factor, Some(8.0));
+
+        // A non-linear rope_type (e.g. yarn/llama3) must not be captured as a
+        // plain linear divisor — leave it None so the runtime stays unscaled.
+        let non_linear = model_config_metadata_from_json_str(
+            r#"{"model_type":"llama","rope_scaling":{"factor":8.0,"rope_type":"llama3"}}"#,
+        )
+        .unwrap();
+        assert_eq!(non_linear.rope_scaling_factor, None);
+
+        let absent =
+            model_config_metadata_from_json_str(r#"{"model_type":"llama"}"#).unwrap();
+        assert_eq!(absent.rope_scaling_factor, None);
     }
 }
