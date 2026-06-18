@@ -1942,6 +1942,7 @@ mod tests {
             rms_norm_eps: None,
             rope_theta: None,
             tie_word_embeddings: None,
+            ..Default::default()
         });
         let mut writer = RllmWriter::new(path, meta).unwrap();
         let mut tensor_id = 0u64;

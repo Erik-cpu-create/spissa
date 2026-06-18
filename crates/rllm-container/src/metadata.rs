@@ -201,6 +201,12 @@ pub struct ModelConfigMetadata {
     /// MLP activation (e.g. `gelu_pytorch_tanh` for Gemma, `silu` for LLaMA).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_activation: Option<String>,
+    /// Linear RoPE-scaling factor for the global (non-sliding) layers
+    /// (Gemma 3: `rope_scaling.factor = 8.0`, `rope_type = "linear"` → positions
+    /// divided by this factor before computing the global rotary angle). Local
+    /// layers are unscaled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rope_scaling_factor: Option<f32>,
 }
 
 /// Minimal tokenizer vocabulary/config metadata persisted in `.rllm` global metadata.
@@ -403,6 +409,7 @@ mod tests {
             rms_norm_eps: None,
             rope_theta: None,
             tie_word_embeddings: None,
+            ..Default::default()
         });
 
         let json = serde_json::to_string(&meta).unwrap();
