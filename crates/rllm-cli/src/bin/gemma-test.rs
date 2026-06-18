@@ -73,6 +73,34 @@ fn write_first_step_logits(path: &str, logits: &[f32], first_token: usize) -> Re
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use rllm_import::tokenizer_metadata_from_json_str;
+    use rllm_runtime::RllmTokenizer;
+
+    /// Validate the metaspace tokenizer path against the REAL Gemma 3
+    /// tokenizer.json (needs the local download). Run:
+    /// `cargo test -p rllm-cli --bin gemma-test -- --ignored --nocapture real_gemma_tokenizer`
+    #[test]
+    #[ignore]
+    fn real_gemma_tokenizer_encodes_with_metaspace_and_bos() {
+        let json =
+            std::fs::read_to_string("../../models/gemma-3-4b-it/tokenizer.json").unwrap();
+        let meta = tokenizer_metadata_from_json_str(&json).unwrap();
+        assert_eq!(meta.pre_tokenizer.as_deref(), Some("metaspace"));
+        assert_eq!(meta.add_bos_token, Some(true));
+        assert_eq!(meta.bos_token_id, Some(2));
+        let tok = RllmTokenizer::from_metadata(&meta).unwrap();
+
+        let ids = tok.encode("The capital of France is").unwrap();
+        eprintln!("encode(\"The capital of France is\") = {ids:?}");
+        // BOS(2) + faithful SentencePiece (no dummy prefix): leading word "The"
+        // has no metaspace; subsequent words carry ▁.
+        assert_eq!(ids, vec![2, 818, 5279, 529, 7001, 563]);
+        assert_eq!(tok.decode(&ids[1..]).unwrap(), "The capital of France is");
+    }
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.ctx == 0 || args.max_new_tokens == 0 {

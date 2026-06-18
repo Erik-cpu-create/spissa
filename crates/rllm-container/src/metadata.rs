@@ -232,6 +232,15 @@ pub struct TokenizerMetadata {
     pub bos_token_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eos_token_id: Option<u64>,
+    /// Pre-tokenization scheme. `"byte_level"` (GPT-2 `Ġ`/`Ċ`, the default for
+    /// back-compat) or `"metaspace"` (SentencePiece `▁` spaces, used by Gemma).
+    /// Drives both encode pre-tokenization and decode surface rendering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_tokenizer: Option<String>,
+    /// Whether `encode` prepends `bos_token_id` (SentencePiece-style models such
+    /// as Gemma set `add_bos_token = true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_bos_token: Option<bool>,
 }
 
 /// Global metadata for the model
@@ -449,6 +458,7 @@ mod tests {
             unk_token_id: Some(2),
             bos_token_id: None,
             eos_token_id: None,
+            ..Default::default()
         });
 
         let json = serde_json::to_string(&meta).unwrap();
