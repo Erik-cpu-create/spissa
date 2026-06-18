@@ -320,6 +320,410 @@ fn i8_dot32(w: &[u8], x: &[i8; 32]) -> i32 {
     i8_dot32_scalar(w, x)
 }
 
+// ---- REEFUSE-Q8-I8MM-PANEL: runtime promotion of the R118 lab kernel ----
+//
+// Strategy: when the chunk is row-aligned, `batch >= 2`, and the CPU has i8mm,
+// process pairs of adjacent output rows via a packed-panel `smmla` kernel.
+// Activation is quantized + packed once per matmul (cached thread-local; key by
+// pointer + fingerprint, same shape as R112). Weight pairs pack into local
+// scratch per chunk. Per-block weight + activation scales match R111's per-block
+// convention (parity-validated). Falls back to the existing R111 naive int8-dot
+// path for batch=1, non-i8mm CPUs, non-row-aligned chunks, and odd rows.
+
+#[cfg(target_arch = "aarch64")]
+fn q8_i8mm_available() -> bool {
+    static AVAIL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAIL.get_or_init(|| std::arch::is_aarch64_feature_detected!("i8mm"))
+}
+
+/// Quantize activations to int8 per 32-element K-block, with per-row per-block
+/// absmax scale. Layout: `q[row * in_features + b * 32 + k]`,
+/// `scales[row * blocks_per_row + b]`.
+fn quantize_input_q8_blocks(
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> (Vec<i8>, Vec<f32>) {
+    let blocks_per_row = in_features / 32;
+    let mut q = vec![0i8; batch * in_features];
+    let mut scales = vec![0.0f32; batch * blocks_per_row];
+    for row in 0..batch {
+        for b in 0..blocks_per_row {
+            let off = row * in_features + b * 32;
+            let mut amax = 0.0f32;
+            for k in 0..32 {
+                let a = input[off + k].abs();
+                if a > amax {
+                    amax = a;
+                }
+            }
+            let (scale, inv) = if amax > 0.0 {
+                (amax / 127.0, 127.0 / amax)
+            } else {
+                (0.0, 0.0)
+            };
+            scales[row * blocks_per_row + b] = scale;
+            for k in 0..32 {
+                q[off + k] = (input[off + k] * inv).round().clamp(-127.0, 127.0) as i8;
+            }
+        }
+    }
+    (q, scales)
+}
+
+/// Pack pairs of batch (token) rows into pair-major panels for `smmla`. Per pair
+/// per K-block: 4 segments of 16 contiguous bytes `[t0_K0..7 | t1_K0..7]`.
+/// Odd-batch tail is left unpacked; the kernel falls back to the raw `act_i8`.
+fn pack_act_panel_pairs(act_i8: &[i8], batch: usize, in_features: usize) -> Vec<i8> {
+    let pairs = batch / 2;
+    let blocks = in_features / 32;
+    let mut panel = vec![0i8; pairs * 2 * in_features];
+    for p in 0..pairs {
+        let r0 = p * 2;
+        let r1 = r0 + 1;
+        for b in 0..blocks {
+            for seg in 0..4 {
+                let dst = p * 2 * in_features + b * 64 + seg * 16;
+                let src0 = r0 * in_features + b * 32 + seg * 8;
+                let src1 = r1 * in_features + b * 32 + seg * 8;
+                for k in 0..8 {
+                    panel[dst + k] = act_i8[src0 + k];
+                    panel[dst + 8 + k] = act_i8[src1 + k];
+                }
+            }
+        }
+    }
+    panel
+}
+
+struct Q8PanelActCache {
+    ptr: usize,
+    len: usize,
+    batch: usize,
+    in_features: usize,
+    fingerprint: u64,
+    act_i8: Vec<i8>,
+    act_panel: Vec<i8>,
+    act_scales: Vec<f32>,
+}
+
+thread_local! {
+    static Q8_PANEL_ACT_CACHE: std::cell::RefCell<Option<Q8PanelActCache>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn q8_act_fingerprint(input: &[f32]) -> u64 {
+    let n = input.len();
+    let sample = |i: usize| input[i].to_bits() as u64;
+    sample(0).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ sample(n / 3).rotate_left(17)
+        ^ sample(2 * n / 3).rotate_left(31)
+        ^ sample(n - 1).rotate_left(47)
+        ^ (n as u64)
+}
+
+/// Cache the quantized + panel-packed activation by (ptr, len, shape, content
+/// fingerprint) so a single matmul amortizes the quant+pack work across all
+/// chunks. Same design as R112's `with_quantized_activations`, extended with the
+/// pair-major panel and the per-block scale layout R119 needs.
+fn with_q8_panel_activations<R>(
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+    f: impl FnOnce(&[i8], &[i8], &[f32]) -> R,
+) -> R {
+    let ptr = input.as_ptr() as usize;
+    let len = input.len();
+    let fp = q8_act_fingerprint(input);
+    Q8_PANEL_ACT_CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        let hit = cache.as_ref().is_some_and(|c| {
+            c.ptr == ptr
+                && c.len == len
+                && c.batch == batch
+                && c.in_features == in_features
+                && c.fingerprint == fp
+        });
+        if !hit {
+            let (act_i8, act_scales) = quantize_input_q8_blocks(input, batch, in_features);
+            let act_panel = pack_act_panel_pairs(&act_i8, batch, in_features);
+            *cache = Some(Q8PanelActCache {
+                ptr,
+                len,
+                batch,
+                in_features,
+                fingerprint: fp,
+                act_i8,
+                act_panel,
+                act_scales,
+            });
+        }
+        let entry = cache.as_ref().unwrap();
+        f(&entry.act_i8, &entry.act_panel, &entry.act_scales)
+    })
+}
+
+/// Pack one weight-row pair from the q8 chunk into a contiguous panel and read
+/// the two per-block fp16 scales (one per row). Same layout as
+/// `pack_act_panel_pairs` (4 segments of 16 bytes per K-block).
+fn pack_q8_weight_pair(
+    q8_bytes: &[u8],
+    base_r0: usize,
+    base_r1: usize,
+    blocks_per_row: usize,
+    panel: &mut [i8],
+    w_scales: &mut [f32],
+) {
+    for b in 0..blocks_per_row {
+        let off0 = base_r0 + b * 34;
+        let off1 = base_r1 + b * 34;
+        w_scales[b * 2] = q8_0_block_scale(q8_bytes, off0);
+        w_scales[b * 2 + 1] = q8_0_block_scale(q8_bytes, off1);
+        for seg in 0..4 {
+            let dst = b * 64 + seg * 16;
+            let src0 = off0 + 2 + seg * 8;
+            let src1 = off1 + 2 + seg * 8;
+            for k in 0..8 {
+                panel[dst + k] = q8_bytes[src0 + k] as i8;
+                panel[dst + 8 + k] = q8_bytes[src1 + k] as i8;
+            }
+        }
+    }
+}
+
+/// REEFUSE-Q8-I8MM-PANEL inner kernel: accumulate `output[t][out_feature..+2]`
+/// for all batch rows `t` against one output-pair worth of packed weight, using
+/// `smmla` + per-block per-row scale folded into a register-resident f32 output.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+unsafe fn smmla_accumulate_output_pair(
+    weight_panel: &[i8],
+    w_scales: &[f32], // 2 per block: [s_w0, s_w1, ...]
+    act_panel: &[i8],
+    act_i8: &[i8],
+    act_scales: &[f32], // batch * blocks_per_row
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+    output: &mut [f32],
+    out_features: usize,
+    out_feature: usize,
+) {
+    let pairs = batch / 2;
+    let act_pair_stride = 2 * in_features;
+    for p in 0..pairs {
+        let t0 = p * 2;
+        let t1 = t0 + 1;
+        let act_pair_base = act_panel.as_ptr().add(p * act_pair_stride);
+        // Accumulate the 2x2 tile into scalars across the K-block loop. A
+        // loop-carried `float32x4_t` across the inline `asm!` proved fragile (the
+        // asm's vector clobbers collided with the carried accumulator register and
+        // corrupted it); scalars are safe and the f32 accumulate cost is
+        // negligible next to the smmla.
+        let mut o00 = 0.0f32;
+        let mut o01 = 0.0f32;
+        let mut o10 = 0.0f32;
+        let mut o11 = 0.0f32;
+        for b in 0..blocks_per_row {
+            let s_w0 = w_scales[b * 2];
+            let s_w1 = w_scales[b * 2 + 1];
+            let s_a0 = act_scales[t0 * blocks_per_row + b];
+            let s_a1 = act_scales[t1 * blocks_per_row + b];
+            let mut a_ptr = act_pair_base.add(b * 64);
+            let mut w_ptr = weight_panel.as_ptr().add(b * 64);
+            // Read the int32 tile through a proper `out(vreg)` operand (NOT via an
+            // `st1` to a pointer passed as `in(reg)` — that hides the memory write
+            // from the compiler and is UB, which manifested as an optimization-
+            // dependent heisenbug). Convert to lanes with a NEON store in Rust.
+            let tile_acc: int32x4_t;
+            std::arch::asm!(
+                "movi {acc:v}.4s, #0",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                acc = out(vreg) tile_acc,
+                a = inout(reg) a_ptr,
+                w = inout(reg) w_ptr,
+                out("v0") _,
+                out("v1") _,
+            );
+            let _ = (a_ptr, w_ptr);
+            let mut tile = [0i32; 4];
+            vst1q_s32(tile.as_mut_ptr(), tile_acc);
+            // smmla lanes: [t0*w0, t0*w1, t1*w0, t1*w1]
+            o00 += s_w0 * s_a0 * tile[0] as f32;
+            o01 += s_w1 * s_a0 * tile[1] as f32;
+            o10 += s_w0 * s_a1 * tile[2] as f32;
+            o11 += s_w1 * s_a1 * tile[3] as f32;
+        }
+        output[t0 * out_features + out_feature] += o00;
+        output[t0 * out_features + out_feature + 1] += o01;
+        output[t1 * out_features + out_feature] += o10;
+        output[t1 * out_features + out_feature + 1] += o11;
+    }
+    // Odd-batch tail: token row (batch-1) is not part of any pair. Compute its
+    // contribution against this output-pair via a scalar int8 dot using the raw
+    // act_i8 and the packed weight panel (which already has both row 0 and row 1
+    // of the output-pair interleaved).
+    if batch & 1 != 0 {
+        let t = batch - 1;
+        let mut o0 = 0.0f32;
+        let mut o1 = 0.0f32;
+        for b in 0..blocks_per_row {
+            let s_w0 = w_scales[b * 2];
+            let s_w1 = w_scales[b * 2 + 1];
+            let s_a = act_scales[t * blocks_per_row + b];
+            let mut d0 = 0i32;
+            let mut d1 = 0i32;
+            let w_base = weight_panel.as_ptr().add(b * 64);
+            for seg in 0..4usize {
+                for k in 0..8usize {
+                    let a = act_i8[t * in_features + b * 32 + seg * 8 + k] as i32;
+                    let w0 = *w_base.add(seg * 16 + k) as i32;
+                    let w1 = *w_base.add(seg * 16 + 8 + k) as i32;
+                    d0 += a * w0;
+                    d1 += a * w1;
+                }
+            }
+            o0 += s_w0 * s_a * d0 as f32;
+            o1 += s_w1 * s_a * d1 as f32;
+        }
+        output[t * out_features + out_feature] += o0;
+        output[t * out_features + out_feature + 1] += o1;
+    }
+}
+
+/// Scalar int8 dot for one weight row × all batch rows (handles odd-batch and
+/// odd-output-row tails, partial chunks, and non-i8mm CPUs).
+fn scalar_int8_row(
+    q8_bytes: &[u8],
+    base_r: usize,
+    act_i8: &[i8],
+    act_scales: &[f32],
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+    output: &mut [f32],
+    out_features: usize,
+    out_feature: usize,
+) {
+    for b in 0..blocks_per_row {
+        let off = base_r + b * 34;
+        let s_w = q8_0_block_scale(q8_bytes, off);
+        let in_feat = b * 32;
+        for row in 0..batch {
+            let aoff = row * in_features + in_feat;
+            let s_a = act_scales[row * blocks_per_row + b];
+            let mut acc = 0i32;
+            for k in 0..32 {
+                acc += (q8_bytes[off + 2 + k] as i8 as i32) * (act_i8[aoff + k] as i32);
+            }
+            output[row * out_features + out_feature] += s_w * s_a * acc as f32;
+        }
+    }
+}
+
+/// Try the R118 packed-panel `smmla` fast path. Returns `Ok(true)` if the chunk
+/// was fully processed via the panel kernel; `Ok(false)` means caller should fall
+/// back to the existing path.
+fn accumulate_q8_0_chunk_panel_smmla(
+    input: &[f32],
+    output: &mut [f32],
+    q8_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+) -> Result<bool> {
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = (input, output, q8_bytes, element_start, config);
+        return Ok(false);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if !q8_i8mm_available() || config.batch < 2 || config.in_features < 32 {
+            return Ok(false);
+        }
+        if !config.in_features.is_multiple_of(32) {
+            return Ok(false);
+        }
+        if !element_start.is_multiple_of(config.in_features) {
+            return Ok(false);
+        }
+        let blocks_per_row = config.in_features / 32;
+        let q8_block_count = q8_bytes.len() / 34;
+        if q8_block_count == 0 || !q8_block_count.is_multiple_of(blocks_per_row) {
+            return Ok(false);
+        }
+        let n_rows = q8_block_count / blocks_per_row;
+        let out_start = element_start / config.in_features;
+        if out_start + n_rows > config.out_features {
+            return Ok(false);
+        }
+        with_q8_panel_activations(input, config.batch, config.in_features, |act_i8, act_panel, act_scales| {
+            // Local weight panel scratch reused across output pairs.
+            let mut weight_panel = vec![0i8; 2 * config.in_features];
+            let mut w_scales = vec![0.0f32; 2 * blocks_per_row];
+            let mut r = 0;
+            while r + 2 <= n_rows {
+                let base_r0 = r * blocks_per_row * 34;
+                let base_r1 = (r + 1) * blocks_per_row * 34;
+                pack_q8_weight_pair(
+                    q8_bytes,
+                    base_r0,
+                    base_r1,
+                    blocks_per_row,
+                    &mut weight_panel,
+                    &mut w_scales,
+                );
+                // SAFETY: q8_i8mm_available verified above.
+                unsafe {
+                    smmla_accumulate_output_pair(
+                        &weight_panel,
+                        &w_scales,
+                        act_panel,
+                        act_i8,
+                        act_scales,
+                        config.batch,
+                        config.in_features,
+                        blocks_per_row,
+                        output,
+                        config.out_features,
+                        out_start + r,
+                    );
+                }
+                r += 2;
+            }
+            // Odd last output row in chunk: scalar int8.
+            if r < n_rows {
+                let base_r = r * blocks_per_row * 34;
+                scalar_int8_row(
+                    q8_bytes,
+                    base_r,
+                    act_i8,
+                    act_scales,
+                    config.batch,
+                    config.in_features,
+                    blocks_per_row,
+                    output,
+                    config.out_features,
+                    out_start + r,
+                );
+            }
+            Ok::<(), RuntimeError>(())
+        })?;
+        Ok(true)
+    }
+}
+
 /// Parity-validation int8-activation Q8 matmul. Accumulates exactly like the f32
 /// path (`output[row][out_feature] += ...`) but uses int8×int8 dot with per-row
 /// per-segment activation quantization. Boundary/partial blocks fall back to the
@@ -449,6 +853,19 @@ fn accumulate_q8_0_chunk(
         .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
     validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
     if q8_activation_path_enabled() {
+        // Diagnostic: RLLM_Q8_PANEL=0 disables R119 panel path; useful to confirm
+        // the existing R111 parity baseline still holds and isolate panel bugs.
+        let panel_enabled = std::env::var("RLLM_Q8_PANEL")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            != Some("0".to_string());
+        if panel_enabled
+            && accumulate_q8_0_chunk_panel_smmla(input, output, q8_bytes, element_start, config)?
+        {
+            return Ok(());
+        }
         return accumulate_q8_0_chunk_int8_activation(
             input,
             output,
@@ -2987,4 +3404,228 @@ fn accumulate_multiply_raw_fp16_chunk_batch1_row_blocked(
     }
 
     Ok(())
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod r119_panel_tests {
+    use super::*;
+
+    // Build a deterministic Q8_0 weight chunk: out_rows × in_features, each
+    // 32-block = 2-byte fp16 scale (0.125) + 32 i8.
+    pub fn make_q8_pub(out_rows: usize, in_features: usize) -> Vec<u8> { make_q8(out_rows, in_features) }
+    fn make_q8(out_rows: usize, in_features: usize) -> Vec<u8> {
+        let bpr = in_features / 32;
+        let mut bytes = Vec::new();
+        for o in 0..out_rows {
+            for b in 0..bpr {
+                bytes.extend_from_slice(&crate::tensor::f32_to_fp16(0.125).to_le_bytes());
+                for k in 0..32 {
+                    let q = (((o * 7 + b * 5 + k * 3) as i16 % 17) - 8) as i8;
+                    bytes.push(q as u8);
+                }
+            }
+        }
+        bytes
+    }
+
+    pub fn make_input_pub(batch: usize, in_features: usize) -> Vec<f32> { make_input(batch, in_features) }
+    fn make_input(batch: usize, in_features: usize) -> Vec<f32> {
+        (0..batch * in_features)
+            .map(|i| (i as f32 % 91.0) * 0.00390625 - 0.17)
+            .collect()
+    }
+
+    fn run_panel_vs_r111(batch: usize, in_features: usize, out_features: usize) {
+        if !q8_i8mm_available() {
+            return;
+        }
+        let q8 = make_q8(out_features, in_features);
+        let input = make_input(batch, in_features);
+        let config = StreamingLinearConfig {
+            batch,
+            in_features,
+            out_features,
+        };
+        let we = out_features * in_features;
+
+        let mut out_ref = vec![0.0f32; batch * out_features];
+        accumulate_q8_0_chunk_int8_activation(&input, &mut out_ref, &q8, 0, config, we).unwrap();
+
+        let mut out_panel = vec![0.0f32; batch * out_features];
+        let used =
+            accumulate_q8_0_chunk_panel_smmla(&input, &mut out_panel, &q8, 0, config).unwrap();
+        assert!(used, "panel path should engage for batch={batch}");
+
+        let mut max_diff = 0.0f32;
+        let mut worst = (0, 0);
+        for t in 0..batch {
+            for o in 0..out_features {
+                let d = (out_ref[t * out_features + o] - out_panel[t * out_features + o]).abs();
+                if d > max_diff {
+                    max_diff = d;
+                    worst = (t, o);
+                }
+            }
+        }
+        assert!(
+            max_diff < 1e-3,
+            "panel vs r111 mismatch batch={batch} out={out_features}: max_diff={max_diff} at row {} col {} (ref={} panel={})",
+            worst.0,
+            worst.1,
+            out_ref[worst.0 * out_features + worst.1],
+            out_panel[worst.0 * out_features + worst.1],
+        );
+    }
+
+    #[test]
+    fn panel_matches_r111_even_batch_even_out() {
+        run_panel_vs_r111(4, 64, 4);
+    }
+
+    #[test]
+    fn panel_matches_r111_odd_batch() {
+        run_panel_vs_r111(3, 64, 4);
+    }
+
+    #[test]
+    fn panel_matches_r111_odd_out() {
+        run_panel_vs_r111(4, 64, 3);
+    }
+
+    #[test]
+    fn panel_matches_r111_odd_both() {
+        run_panel_vs_r111(5, 64, 5);
+    }
+
+    #[test]
+    fn panel_matches_r111_realistic_shape() {
+        run_panel_vs_r111(55, 2048, 8);
+    }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod r119_panel_multichunk_tests {
+    use super::*;
+    use super::r119_panel_tests::*;
+
+    // Process a full matmul as several row-chunks (each chunk = a sub-range of
+    // output rows at its own element_start), comparing panel vs R111.
+    fn run_multichunk(batch: usize, in_features: usize, out_features: usize, chunk_rows: usize) {
+        if !q8_i8mm_available() {
+            return;
+        }
+        let bpr = in_features / 32;
+        let q8_full = make_q8_pub(out_features, in_features);
+        let input = make_input_pub(batch, in_features);
+        let config = StreamingLinearConfig { batch, in_features, out_features };
+
+        let mut out_ref = vec![0.0f32; batch * out_features];
+        let mut out_panel = vec![0.0f32; batch * out_features];
+
+        let we = out_features * in_features;
+        let mut row = 0;
+        while row < out_features {
+            let rows = chunk_rows.min(out_features - row);
+            let elem_start = row * in_features;
+            let byte_start = row * bpr * 34;
+            let byte_end = (row + rows) * bpr * 34;
+            let chunk = &q8_full[byte_start..byte_end];
+
+            accumulate_q8_0_chunk_int8_activation(&input, &mut out_ref, chunk, elem_start, config, we).unwrap();
+            let used = accumulate_q8_0_chunk_panel_smmla(&input, &mut out_panel, chunk, elem_start, config).unwrap();
+            assert!(used, "panel should engage chunk at row {row}");
+            row += rows;
+        }
+
+        let mut max_diff = 0.0f32;
+        let mut worst = (0, 0);
+        for t in 0..batch {
+            for o in 0..out_features {
+                let d = (out_ref[t * out_features + o] - out_panel[t * out_features + o]).abs();
+                if d > max_diff { max_diff = d; worst = (t, o); }
+            }
+        }
+        assert!(max_diff < 1e-3,
+            "multichunk panel vs r111 mismatch b={batch} out={out_features} chunk_rows={chunk_rows}: max_diff={max_diff} at row {} col {} (ref={} panel={})",
+            worst.0, worst.1, out_ref[worst.0*out_features+worst.1], out_panel[worst.0*out_features+worst.1]);
+    }
+
+    #[test]
+    fn multichunk_even_chunk_rows() { run_multichunk(55, 2048, 8, 4); }
+    #[test]
+    fn multichunk_odd_chunk_rows() { run_multichunk(55, 2048, 8, 3); }
+    #[test]
+    fn multichunk_single_row_chunks() { run_multichunk(55, 2048, 6, 1); }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod r119_panel_realchunk_tests {
+    use super::*;
+    use super::r119_panel_tests::*;
+
+    // Replicate the real q_proj chunk pattern: batch=53, in=2048, out=2048,
+    // chunks of 481,481,481,481,124 output rows.
+    fn run_pattern(batch: usize, in_features: usize, out_features: usize, chunk_pattern: &[usize]) {
+        if !q8_i8mm_available() { return; }
+        assert_eq!(chunk_pattern.iter().sum::<usize>(), out_features);
+        let bpr = in_features / 32;
+        let q8_full = make_q8_pub(out_features, in_features);
+        let input = make_input_pub(batch, in_features);
+        let config = StreamingLinearConfig { batch, in_features, out_features };
+        let we = out_features * in_features;
+
+        let mut out_ref = vec![0.0f32; batch * out_features];
+        let mut out_panel = vec![0.0f32; batch * out_features];
+        let mut row = 0;
+        for &rows in chunk_pattern {
+            let elem_start = row * in_features;
+            let chunk = &q8_full[row * bpr * 34..(row + rows) * bpr * 34];
+            accumulate_q8_0_chunk_int8_activation(&input, &mut out_ref, chunk, elem_start, config, we).unwrap();
+            let used = accumulate_q8_0_chunk_panel_smmla(&input, &mut out_panel, chunk, elem_start, config).unwrap();
+            assert!(used, "panel should engage chunk at row {row} rows {rows}");
+            row += rows;
+        }
+        let mut max_diff = 0.0f32; let mut worst = (0usize, 0usize);
+        for t in 0..batch { for o in 0..out_features {
+            let d = (out_ref[t*out_features+o]-out_panel[t*out_features+o]).abs();
+            if d > max_diff { max_diff = d; worst = (t,o); }
+        }}
+        assert!(max_diff < 1e-3,
+            "REAL pattern mismatch b={batch} out={out_features}: max_diff={max_diff} at row {} col {} (ref={} panel={})",
+            worst.0, worst.1, out_ref[worst.0*out_features+worst.1], out_panel[worst.0*out_features+worst.1]);
+    }
+
+    #[test]
+    fn real_qproj_b53() { run_pattern(53, 2048, 2048, &[481,481,481,481,124]); }
+    #[test]
+    fn real_kvproj_b53() { run_pattern(53, 2048, 512, &[481, 31]); }
+}
+
+#[cfg(all(test, target_arch = "aarch64"))]
+mod r119_panel_in8192_tests {
+    use super::*;
+    use super::r119_panel_tests::*;
+
+    fn run(batch: usize, in_features: usize, out_features: usize) {
+        if !q8_i8mm_available() { return; }
+        let q8 = make_q8_pub(out_features, in_features);
+        let input = make_input_pub(batch, in_features);
+        let config = StreamingLinearConfig { batch, in_features, out_features };
+        let we = out_features * in_features;
+        let mut out_ref = vec![0.0f32; batch * out_features];
+        accumulate_q8_0_chunk_int8_activation(&input, &mut out_ref, &q8, 0, config, we).unwrap();
+        let mut out_panel = vec![0.0f32; batch * out_features];
+        let used = accumulate_q8_0_chunk_panel_smmla(&input, &mut out_panel, &q8, 0, config).unwrap();
+        assert!(used);
+        let mut md = 0.0f32; let mut worst=(0,0);
+        for t in 0..batch { for o in 0..out_features {
+            let d=(out_ref[t*out_features+o]-out_panel[t*out_features+o]).abs();
+            if d>md { md=d; worst=(t,o); }
+        }}
+        assert!(md < 1e-3, "in={in_features} mismatch: max_diff={md} at row {} col {} (ref={} panel={})",
+            worst.0, worst.1, out_ref[worst.0*out_features+worst.1], out_panel[worst.0*out_features+worst.1]);
+    }
+
+    #[test] fn down_in8192() { run(53, 8192, 4); }
+    #[test] fn down_in8192_realistic() { run(53, 8192, 64); }
 }
