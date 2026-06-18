@@ -2,11 +2,11 @@ use crate::models::gemma::generate::{streaming_gemma_transformer_block, GemmaBlo
 use crate::models::gemma::model::*;
 use crate::rotary::KvCache;
 use crate::{
-    lm_head_logits_parallel,
+    bf16_to_f32, lm_head_logits_parallel, lm_head_logits_parallel_bf16,
     ops::{embedding_lookup, rms_norm, sample_argmax, sample_top_p},
     LazyRllmModel, MemoryBudget, Result, RuntimeError, StreamingSamplingConfig,
 };
-use rllm_container::ModelConfigMetadata;
+use rllm_container::{DType, ModelConfigMetadata};
 
 /// Gemma 3 fixed family default for the global-layer linear RoPE divisor
 /// (`rope_scaling.factor`). Used only when the packed metadata predates the
@@ -201,10 +201,22 @@ pub fn gemma_generate_from_model(
         caches.push(KvCache::new(build.num_key_value_heads, build.head_dim, build.max_seq_len)?);
     }
 
-    // Tied embeddings: decode embed_tokens once and reuse the same f32 buffer
-    // for input lookup (scaled by sqrt(hidden)) and the LM head (unscaled).
-    let embedding = model.decode_tensor(&prepared.embedding_weight, budget)?.data;
-    let vocab_size = embedding.len() / hidden;
+    // Tied embeddings. Materializing the 262208×2560 table as f32 costs 2.68 GB
+    // resident — which evicts the q8 weights on an 8 GB device (the decode/RAM
+    // bottleneck). Instead read the bf16 table DIRECTLY from the mmap (zero-copy)
+    // and dequant-on-the-fly for both the input lookup and the LM head. Fall back
+    // to a one-time f32 decode only if the embedding isn't a contiguous bf16 raw
+    // tensor (e.g. a different codec/dtype).
+    let embed_meta = model.tensor(&prepared.embedding_weight)?.clone();
+    let vocab_size = embed_meta.shape.first().copied().unwrap_or(0) as usize;
+    let embed_id = embed_meta.tensor_id;
+    let bf16_direct = embed_meta.dtype == DType::Bf16
+        && model.with_raw_tensor(embed_id, |_| Ok::<(), RuntimeError>(()))?.is_some();
+    let embedding_f32: Option<Vec<f32>> = if bf16_direct {
+        None
+    } else {
+        Some(model.decode_tensor(&prepared.embedding_weight, budget)?.data)
+    };
 
     // For parity we keep the first decode step's logits (the prefill → first
     // predicted token over the raw prompt), which is the most directly
@@ -219,10 +231,15 @@ pub fn gemma_generate_from_model(
         let seq_len = current_tokens.len();
         let position_offset = token_ids.len() - seq_len;
 
-        let mut hidden_states = embedding_lookup(&embedding, vocab_size, hidden, current_tokens)?;
-        for value in hidden_states.iter_mut() {
-            *value *= build.embed_scale;
-        }
+        let mut hidden_states = gemma_embed_input(
+            model,
+            embedding_f32.as_deref(),
+            embed_id,
+            current_tokens,
+            vocab_size,
+            hidden,
+            build.embed_scale,
+        )?;
 
         let layers_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
         for (i, names) in prepared.layers.iter().enumerate() {
@@ -252,9 +269,16 @@ pub fn gemma_generate_from_model(
         hidden_states = rms_norm(&hidden_states, &prepared.final_layernorm, seq_len, hidden, build.rms_norm_eps)?;
 
         let last_hidden = &hidden_states[(seq_len - 1) * hidden..];
-        // R131: parallel LM-head GEMV over the 262k-row vocabulary (bit-identical
-        // to the previous scalar loop, but spread across all available cores).
-        let logits = lm_head_logits_parallel(last_hidden, &embedding, vocab_size, hidden);
+        // R131: parallel LM-head GEMV over the 262k-row vocabulary (bf16-direct
+        // from mmap, or f32 fallback).
+        let logits = gemma_lm_head(
+            model,
+            embedding_f32.as_deref(),
+            embed_id,
+            last_hidden,
+            vocab_size,
+            hidden,
+        )?;
 
         let next_token = match build.sampling {
             StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
@@ -280,5 +304,84 @@ pub fn gemma_generate_from_model(
         context_echo_bytes,
         logits: first_step_logits,
     })
+}
+
+/// Input embedding lookup scaled by `embed_scale` — from a resident f32 table
+/// (fallback) or bf16-direct from the mmap (default; no 2.68 GB f32 alloc).
+fn gemma_embed_input(
+    model: &mut LazyRllmModel,
+    embedding_f32: Option<&[f32]>,
+    embed_id: u64,
+    token_ids: &[usize],
+    vocab_size: usize,
+    hidden: usize,
+    embed_scale: f32,
+) -> Result<Vec<f32>> {
+    if let Some(emb) = embedding_f32 {
+        let mut h = embedding_lookup(emb, vocab_size, hidden, token_ids)?;
+        for value in h.iter_mut() {
+            *value *= embed_scale;
+        }
+        return Ok(h);
+    }
+    model
+        .with_raw_tensor(embed_id, |bf16| {
+            gemma_embed_lookup_bf16(bf16, token_ids, hidden, vocab_size, embed_scale)
+        })?
+        .ok_or_else(|| {
+            RuntimeError::InvalidTensorData("bf16 embedding became non-contiguous".to_string())
+        })
+}
+
+/// Tied LM head — f32 table (fallback) or bf16-direct from the mmap (default).
+fn gemma_lm_head(
+    model: &mut LazyRllmModel,
+    embedding_f32: Option<&[f32]>,
+    embed_id: u64,
+    last_hidden: &[f32],
+    vocab_size: usize,
+    hidden: usize,
+) -> Result<Vec<f32>> {
+    if let Some(emb) = embedding_f32 {
+        return Ok(lm_head_logits_parallel(last_hidden, emb, vocab_size, hidden));
+    }
+    model
+        .with_raw_tensor(embed_id, |bf16| {
+            Ok::<_, RuntimeError>(lm_head_logits_parallel_bf16(
+                last_hidden,
+                bf16,
+                vocab_size,
+                hidden,
+            ))
+        })?
+        .ok_or_else(|| {
+            RuntimeError::InvalidTensorData("bf16 embedding became non-contiguous".to_string())
+        })
+}
+
+/// Gather `token_ids` rows from the bf16 embedding table (mmap bytes), dequant
+/// bf16→f32, scaled by `embed_scale`. Row-major, 2 bytes/element.
+fn gemma_embed_lookup_bf16(
+    bf16: &[u8],
+    token_ids: &[usize],
+    hidden: usize,
+    vocab_size: usize,
+    embed_scale: f32,
+) -> Result<Vec<f32>> {
+    let mut out = Vec::with_capacity(token_ids.len() * hidden);
+    for &token in token_ids {
+        if token >= vocab_size {
+            return Err(RuntimeError::Shape(format!(
+                "token id {token} out of range for vocab {vocab_size}"
+            )));
+        }
+        let row_base = token * hidden * 2;
+        for h in 0..hidden {
+            let off = row_base + h * 2;
+            let bits = u16::from_le_bytes([bf16[off], bf16[off + 1]]);
+            out.push(bf16_to_f32(bits) * embed_scale);
+        }
+    }
+    Ok(out)
 }
 

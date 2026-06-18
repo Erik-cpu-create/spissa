@@ -156,6 +156,28 @@ mod tests {
     }
 
     #[test]
+    fn lm_head_bf16_direct_matches_f32_upcast_bit_for_bit() {
+        // The bf16-direct LM head (reads bf16 from mmap, dequants per element) must
+        // equal the f32 path fed the exact bf16→f32 upcast of the same weights.
+        let hidden = 5usize;
+        let vocab = 37usize;
+        let last_hidden: Vec<f32> = (0..hidden).map(|h| (h as f32 * 0.41 - 0.6).cos()).collect();
+
+        let bf16_bits: Vec<u16> = (0..vocab * hidden)
+            .map(|i| (((i as f32 * 0.017 - 0.3).sin() * 0.5).to_bits() >> 16) as u16)
+            .collect();
+        let mut bf16_bytes = Vec::with_capacity(bf16_bits.len() * 2);
+        for b in &bf16_bits {
+            bf16_bytes.extend_from_slice(&b.to_le_bytes());
+        }
+        let f32_weight: Vec<f32> = bf16_bits.iter().map(|&b| crate::tensor::bf16_to_f32(b)).collect();
+
+        let from_bf16 = lm_head_logits_parallel_bf16(&last_hidden, &bf16_bytes, vocab, hidden);
+        let from_f32 = lm_head_logits_parallel(&last_hidden, &f32_weight, vocab, hidden);
+        assert_eq!(from_bf16, from_f32, "bf16-direct LM head must equal the f32-upcast path");
+    }
+
+    #[test]
     fn r132_parallel_batch1_q8_rows_match_serial_bit_for_bit() {
         // in_features=64 → 2 blocks/row; out_features=20 > 2*MIN_ROWS_PER_PARALLEL_Q8_PREFILL
         // so the parallel split engages on multi-core hosts.
