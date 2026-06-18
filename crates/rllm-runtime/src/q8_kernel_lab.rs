@@ -315,6 +315,112 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
             max_abs_diff: max_abs_diff(&output2_baseline, &output),
             speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
         });
+
+        // ILP test (R123): output4 produces 4 output rows with 2 independent
+        // smmla accumulator chains. Honest comparison = the SAME 4 rows via the
+        // current output2 panel run twice. Both pack outside the timed loop.
+        let q8_quad = deterministic_q8_row_quad_blocks(config.blocks_per_row);
+        let quad_pair_bytes = config.blocks_per_row * 2 * 34;
+        let weight_panel0 = pack_weight_panel_pair_lab(&q8_quad[..quad_pair_bytes], config.blocks_per_row);
+        let weight_panel1 = pack_weight_panel_pair_lab(&q8_quad[quad_pair_bytes..], config.blocks_per_row);
+
+        // Reference 4-row output = baseline on each pair, interleaved [t][w0..w3].
+        let ref_p0 = baseline_i8_dot32_output2_batch4(
+            &q8_quad[..quad_pair_bytes], scale, &input, config.batch, config.in_features, config.blocks_per_row,
+        );
+        let ref_p1 = baseline_i8_dot32_output2_batch4(
+            &q8_quad[quad_pair_bytes..], scale, &input, config.batch, config.in_features, config.blocks_per_row,
+        );
+        let mut ref4 = vec![0f32; config.batch * 4];
+        for t in 0..config.batch {
+            ref4[t * 4] = ref_p0[t * 2];
+            ref4[t * 4 + 1] = ref_p0[t * 2 + 1];
+            ref4[t * 4 + 2] = ref_p1[t * 2];
+            ref4[t * 4 + 3] = ref_p1[t * 2 + 1];
+        }
+
+        // Honest 4-row baseline: the current panel kernel run twice.
+        let (output2x2_ns, _o) = time_variant(config.iters, config.batch * 4, || unsafe {
+            let a = reefuse_smmla_panel_output2(
+                &weight_panel0, &q8_quad[..quad_pair_bytes], &act_panel, &act_i8, &act_scales,
+                scale, config.batch, config.in_features, config.blocks_per_row,
+            );
+            let b = reefuse_smmla_panel_output2(
+                &weight_panel1, &q8_quad[quad_pair_bytes..], &act_panel, &act_i8, &act_scales,
+                scale, config.batch, config.in_features, config.blocks_per_row,
+            );
+            [a, b].concat()
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output2_x2(4rows)".to_string(),
+            elapsed_ns: output2x2_ns,
+            checksum: 0.0,
+            max_abs_diff: 0.0,
+            speedup_vs_baseline: 1.0,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 4, || unsafe {
+            reefuse_smmla_panel_output4(
+                &weight_panel0, &weight_panel1, &q8_quad, &act_panel, &act_i8, &act_scales,
+                scale, config.batch, config.in_features, config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&ref4, &output),
+            speedup_vs_baseline: output2x2_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        // output8: 4 independent accumulator chains. Honest 8-row baseline = the
+        // current output2 panel run four times.
+        let q8_oct = deterministic_q8_row_oct_blocks(config.blocks_per_row);
+        let pb = config.blocks_per_row * 2 * 34;
+        let wp: Vec<Vec<i8>> = (0..4)
+            .map(|i| pack_weight_panel_pair_lab(&q8_oct[i * pb..(i + 1) * pb], config.blocks_per_row))
+            .collect();
+        // Reference 8-row output via baseline on each pair, interleaved.
+        let mut ref8 = vec![0f32; config.batch * 8];
+        for i in 0..4 {
+            let rp = baseline_i8_dot32_output2_batch4(
+                &q8_oct[i * pb..(i + 1) * pb], scale, &input, config.batch, config.in_features, config.blocks_per_row,
+            );
+            for t in 0..config.batch {
+                ref8[t * 8 + i * 2] = rp[t * 2];
+                ref8[t * 8 + i * 2 + 1] = rp[t * 2 + 1];
+            }
+        }
+        let (output2x4_ns, _o) = time_variant(config.iters, config.batch * 8, || unsafe {
+            let mut v = Vec::new();
+            for i in 0..4 {
+                v.push(reefuse_smmla_panel_output2(
+                    &wp[i], &q8_oct[i * pb..(i + 1) * pb], &act_panel, &act_i8, &act_scales,
+                    scale, config.batch, config.in_features, config.blocks_per_row,
+                ));
+            }
+            v.concat()
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output2_x4(8rows)".to_string(),
+            elapsed_ns: output2x4_ns,
+            checksum: 0.0,
+            max_abs_diff: 0.0,
+            speedup_vs_baseline: 1.0,
+        });
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 8, || unsafe {
+            reefuse_smmla_panel_output8(
+                &wp[0], &wp[1], &wp[2], &wp[3], &q8_oct, &act_panel, &act_i8, &act_scales,
+                scale, config.batch, config.in_features, config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output8".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&ref8, &output),
+            speedup_vs_baseline: output2x4_ns as f64 / elapsed_ns.max(1) as f64,
+        });
     }
 
     if config.batch == 1 {
@@ -695,6 +801,280 @@ pub unsafe fn reefuse_smmla_panel_output2(
     output
 }
 
+/// REEFUSE-Q8-I8MM-LAB output4: process FOUR output rows (two weight row-pairs)
+/// per batch-pair with TWO independent `smmla` accumulator tiles sharing the
+/// activation load. The two tiles form independent dependency chains, so the
+/// CPU overlaps the ~3-cycle `smmla` latency (output2 serializes 4 `smmla` into
+/// one accumulator). The activation `v0` is loaded once per K-segment and reused
+/// for both weight panels, halving activation loads vs running output2 twice.
+/// Returns `batch * 4` laid out `[t][w0,w1,w2,w3]`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+pub unsafe fn reefuse_smmla_panel_output4(
+    weight_panel0: &[i8], // rows (o0,o1) packed pair-major
+    weight_panel1: &[i8], // rows (o2,o3) packed pair-major
+    q8_quad: &[u8],       // 4 rows of raw q8 blocks, for the odd-batch tail
+    act_panel: &[i8],
+    act_i8: &[i8],
+    act_scales: &[f32],
+    weight_scale: f32,
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let mut output = vec![0f32; batch * 4];
+    let pairs = batch / 2;
+    let act_pair_stride = 2 * in_features;
+    let blocks = blocks_per_row;
+    let row_base = blocks_per_row * 34;
+
+    for p in 0..pairs {
+        let t0 = p * 2;
+        let t1 = t0 + 1;
+        let s_t0 = weight_scale * act_scales[t0];
+        let s_t1 = weight_scale * act_scales[t1];
+        let scale_arr: [f32; 4] = [s_t0, s_t0, s_t1, s_t1];
+        let scale_vec = vld1q_f32(scale_arr.as_ptr());
+        let mut acc_f0 = vdupq_n_f32(0.0);
+        let mut acc_f1 = vdupq_n_f32(0.0);
+        let act_pair_base = act_panel.as_ptr().add(p * act_pair_stride);
+
+        for b in 0..blocks {
+            let mut a_ptr = act_pair_base.add(b * 64);
+            let mut w0_ptr = weight_panel0.as_ptr().add(b * 64);
+            let mut w1_ptr = weight_panel1.as_ptr().add(b * 64);
+            let tile0: int32x4_t;
+            let tile1: int32x4_t;
+            // Two independent accumulator chains (acc0/acc1). Each K-segment loads
+            // the shared activation into v0, then issues one smmla per weight
+            // panel — the two smmla are independent and pipeline together.
+            std::arch::asm!(
+                "movi {acc0:v}.4s, #0",
+                "movi {acc1:v}.4s, #0",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "smmla {acc0:v}.4s, v0.16b, v1.16b",
+                "smmla {acc1:v}.4s, v0.16b, v2.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "smmla {acc0:v}.4s, v0.16b, v1.16b",
+                "smmla {acc1:v}.4s, v0.16b, v2.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "smmla {acc0:v}.4s, v0.16b, v1.16b",
+                "smmla {acc1:v}.4s, v0.16b, v2.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "smmla {acc0:v}.4s, v0.16b, v1.16b",
+                "smmla {acc1:v}.4s, v0.16b, v2.16b",
+                acc0 = out(vreg) tile0,
+                acc1 = out(vreg) tile1,
+                a = inout(reg) a_ptr,
+                w0 = inout(reg) w0_ptr,
+                w1 = inout(reg) w1_ptr,
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+            );
+            let _ = (a_ptr, w0_ptr, w1_ptr);
+            acc_f0 = vfmaq_f32(acc_f0, vcvtq_f32_s32(tile0), scale_vec);
+            acc_f1 = vfmaq_f32(acc_f1, vcvtq_f32_s32(tile1), scale_vec);
+        }
+
+        // tile0 = [t0*w0, t0*w1, t1*w0, t1*w1]; tile1 = [t0*w2, t0*w3, t1*w2, t1*w3]
+        output[t0 * 4] = vgetq_lane_f32(acc_f0, 0);
+        output[t0 * 4 + 1] = vgetq_lane_f32(acc_f0, 1);
+        output[t0 * 4 + 2] = vgetq_lane_f32(acc_f1, 0);
+        output[t0 * 4 + 3] = vgetq_lane_f32(acc_f1, 1);
+        output[t1 * 4] = vgetq_lane_f32(acc_f0, 2);
+        output[t1 * 4 + 1] = vgetq_lane_f32(acc_f0, 3);
+        output[t1 * 4 + 2] = vgetq_lane_f32(acc_f1, 2);
+        output[t1 * 4 + 3] = vgetq_lane_f32(acc_f1, 3);
+    }
+
+    // Odd batch tail (single row): scalar int8 dot from raw inputs, all 4 outputs.
+    if batch & 1 != 0 {
+        let t = batch - 1;
+        let s_t = weight_scale * act_scales[t];
+        for b in 0..blocks {
+            let in_feat = b * 32;
+            let qs0 = &q8_quad[b * 34 + 2..b * 34 + 34];
+            let qs1 = &q8_quad[row_base + b * 34 + 2..row_base + b * 34 + 34];
+            let qs2 = &q8_quad[2 * row_base + b * 34 + 2..2 * row_base + b * 34 + 34];
+            let qs3 = &q8_quad[3 * row_base + b * 34 + 2..3 * row_base + b * 34 + 34];
+            let mut d0 = 0i32;
+            let mut d1 = 0i32;
+            let mut d2 = 0i32;
+            let mut d3 = 0i32;
+            for k in 0..32 {
+                let a = act_i8[t * in_features + in_feat + k] as i32;
+                d0 += (qs0[k] as i8 as i32) * a;
+                d1 += (qs1[k] as i8 as i32) * a;
+                d2 += (qs2[k] as i8 as i32) * a;
+                d3 += (qs3[k] as i8 as i32) * a;
+            }
+            output[t * 4] += s_t * d0 as f32;
+            output[t * 4 + 1] += s_t * d1 as f32;
+            output[t * 4 + 2] += s_t * d2 as f32;
+            output[t * 4 + 3] += s_t * d3 as f32;
+        }
+    }
+
+    output
+}
+
+/// REEFUSE-Q8-I8MM-LAB output8: EIGHT output rows (four weight row-pairs) per
+/// batch-pair with FOUR independent `smmla` accumulator tiles, the activation
+/// `v0` loaded once per K-segment and reused across all four weight panels.
+/// Four independent dependency chains maximize overlap of the `smmla` latency,
+/// and activation loads are amortized 4x. Returns `batch * 8` as `[t][w0..w7]`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn reefuse_smmla_panel_output8(
+    wp0: &[i8],
+    wp1: &[i8],
+    wp2: &[i8],
+    wp3: &[i8],
+    q8_oct: &[u8], // 8 rows of raw q8 blocks, for the odd-batch tail
+    act_panel: &[i8],
+    act_i8: &[i8],
+    act_scales: &[f32],
+    weight_scale: f32,
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let mut output = vec![0f32; batch * 8];
+    let pairs = batch / 2;
+    let act_pair_stride = 2 * in_features;
+    let blocks = blocks_per_row;
+
+    for p in 0..pairs {
+        let t0 = p * 2;
+        let t1 = t0 + 1;
+        let s_t0 = weight_scale * act_scales[t0];
+        let s_t1 = weight_scale * act_scales[t1];
+        let scale_arr: [f32; 4] = [s_t0, s_t0, s_t1, s_t1];
+        let scale_vec = vld1q_f32(scale_arr.as_ptr());
+        let mut acc_f0 = vdupq_n_f32(0.0);
+        let mut acc_f1 = vdupq_n_f32(0.0);
+        let mut acc_f2 = vdupq_n_f32(0.0);
+        let mut acc_f3 = vdupq_n_f32(0.0);
+        let act_pair_base = act_panel.as_ptr().add(p * act_pair_stride);
+
+        for b in 0..blocks {
+            let mut a_ptr = act_pair_base.add(b * 64);
+            let mut w0p = wp0.as_ptr().add(b * 64);
+            let mut w1p = wp1.as_ptr().add(b * 64);
+            let mut w2p = wp2.as_ptr().add(b * 64);
+            let mut w3p = wp3.as_ptr().add(b * 64);
+            let tile0: int32x4_t;
+            let tile1: int32x4_t;
+            let tile2: int32x4_t;
+            let tile3: int32x4_t;
+            std::arch::asm!(
+                "movi {a0:v}.4s, #0",
+                "movi {a1:v}.4s, #0",
+                "movi {a2:v}.4s, #0",
+                "movi {a3:v}.4s, #0",
+                // 4 K-segments; v0 = shared activation, v1..v4 = the 4 weight panels.
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                a0 = out(vreg) tile0,
+                a1 = out(vreg) tile1,
+                a2 = out(vreg) tile2,
+                a3 = out(vreg) tile3,
+                a = inout(reg) a_ptr,
+                w0 = inout(reg) w0p,
+                w1 = inout(reg) w1p,
+                w2 = inout(reg) w2p,
+                w3 = inout(reg) w3p,
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+                out("v3") _,
+                out("v4") _,
+            );
+            let _ = (a_ptr, w0p, w1p, w2p, w3p);
+            acc_f0 = vfmaq_f32(acc_f0, vcvtq_f32_s32(tile0), scale_vec);
+            acc_f1 = vfmaq_f32(acc_f1, vcvtq_f32_s32(tile1), scale_vec);
+            acc_f2 = vfmaq_f32(acc_f2, vcvtq_f32_s32(tile2), scale_vec);
+            acc_f3 = vfmaq_f32(acc_f3, vcvtq_f32_s32(tile3), scale_vec);
+        }
+
+        // tileN = [t0*w(2N), t0*w(2N+1), t1*w(2N), t1*w(2N+1)]
+        for (n, accf) in [acc_f0, acc_f1, acc_f2, acc_f3].into_iter().enumerate() {
+            output[t0 * 8 + n * 2] = vgetq_lane_f32(accf, 0);
+            output[t0 * 8 + n * 2 + 1] = vgetq_lane_f32(accf, 1);
+            output[t1 * 8 + n * 2] = vgetq_lane_f32(accf, 2);
+            output[t1 * 8 + n * 2 + 1] = vgetq_lane_f32(accf, 3);
+        }
+    }
+
+    // Odd batch tail (single row): scalar int8 dot from raw inputs, all 8 outputs.
+    if batch & 1 != 0 {
+        let t = batch - 1;
+        let s_t = weight_scale * act_scales[t];
+        let row_base = blocks_per_row * 34;
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let mut d = [0i32; 8];
+            for (o, dacc) in d.iter_mut().enumerate() {
+                let qs = &q8_oct[o * row_base + b * 34 + 2..o * row_base + b * 34 + 34];
+                let mut acc = 0i32;
+                for k in 0..32 {
+                    acc += (qs[k] as i8 as i32) * (act_i8[t * in_features + in_feat + k] as i32);
+                }
+                *dacc = acc;
+            }
+            for (o, dv) in d.iter().enumerate() {
+                output[t * 8 + o] += s_t * *dv as f32;
+            }
+        }
+    }
+
+    output
+}
+
 /// quant cost is amortized; the microbench therefore quantizes outside the timed
 /// loop and times only the int8 dot.
 fn quantize_rows_i8(input: &[f32], batch: usize, in_features: usize) -> (Vec<i8>, Vec<f32>) {
@@ -808,6 +1188,34 @@ fn deterministic_q8_blocks(blocks_per_row: usize) -> Vec<u8> {
 fn deterministic_q8_row_pair_blocks(blocks_per_row: usize) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(blocks_per_row * 2 * 34);
     for row in 0..2 {
+        for block in 0..blocks_per_row {
+            bytes.extend_from_slice(&crate::tensor::f32_to_fp16(0.125).to_le_bytes());
+            for idx in 0..32 {
+                let q = ((((row + 1) * 11 + block * 7 + idx * 3) as i16 % 17) - 8) as i8;
+                bytes.push(q as u8);
+            }
+        }
+    }
+    bytes
+}
+
+fn deterministic_q8_row_oct_blocks(blocks_per_row: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(blocks_per_row * 8 * 34);
+    for row in 0..8 {
+        for block in 0..blocks_per_row {
+            bytes.extend_from_slice(&crate::tensor::f32_to_fp16(0.125).to_le_bytes());
+            for idx in 0..32 {
+                let q = ((((row + 1) * 11 + block * 7 + idx * 3) as i16 % 17) - 8) as i8;
+                bytes.push(q as u8);
+            }
+        }
+    }
+    bytes
+}
+
+fn deterministic_q8_row_quad_blocks(blocks_per_row: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(blocks_per_row * 4 * 34);
+    for row in 0..4 {
         for block in 0..blocks_per_row {
             bytes.extend_from_slice(&crate::tensor::f32_to_fp16(0.125).to_le_bytes());
             for idx in 0..32 {
@@ -1847,6 +2255,26 @@ fn max_abs_diff(left: &[f32], right: &[f32]) -> f32 {
 mod tests {
     use super::*;
 
+    /// R123 ILP microbench: realistic prefill-shape panel timings. Run with:
+    /// `cargo test -p rllm-runtime --release q8_kernel_lab::tests::r123_output4_microbench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn r123_output4_microbench() {
+        let report = run_suite(Q8KernelBenchConfig::default());
+        println!("\n== R123 panel ILP microbench (batch={} in={} iters={}) ==", report.batch, report.in_features, report.iters);
+        for r in &report.results {
+            if r.variant.contains("panel") || r.variant.contains("reebundle") {
+                println!(
+                    "{:<40} {:>10.3} ms   diff={:.5}   {:.3}x",
+                    r.variant,
+                    r.elapsed_ns as f64 / 1e6,
+                    r.max_abs_diff,
+                    r.speedup_vs_baseline,
+                );
+            }
+        }
+    }
+
     #[test]
     fn q8_kernel_lab_reports_required_ree_variants() {
         let report = run_suite(Q8KernelBenchConfig {
@@ -1901,6 +2329,10 @@ mod tests {
                 || result.variant == "reefuse_smmla_output2"
                 || result.variant == "reefuse_smmla_output2_inline"
                 || result.variant == "reefuse_smmla_panel_output2"
+                || result.variant == "reefuse_smmla_panel_output4"
+                || result.variant == "reefuse_smmla_panel_output2_x2(4rows)"
+                || result.variant == "reefuse_smmla_panel_output8"
+                || result.variant == "reefuse_smmla_panel_output2_x4(8rows)"
             {
                 0.05
             } else {
