@@ -125,6 +125,23 @@ fn main() -> Result<()> {
         .as_ref()
         .and_then(|meta| meta.eos_token_id);
 
+    // Gemma instruction-tuned models end a turn with `<end_of_turn>` as well as
+    // `<eos>` (HF generation_config lists eos_token_id = [1, 106]). The packed
+    // metadata only carries one eos id, so also resolve `<end_of_turn>` from the
+    // tokenizer and treat both as stop tokens; without this the decode loop runs
+    // to --max-new-tokens and pads the output with repeated `<end_of_turn>`.
+    let mut stop_token_ids: Vec<usize> = Vec::new();
+    if let Some(eos) = eos_token_id {
+        stop_token_ids.push(eos as usize);
+    }
+    if let Some(eot) =
+        tokenizer.as_ref().and_then(|t| t.token_id_for_raw_token("<end_of_turn>"))
+    {
+        if !stop_token_ids.contains(&eot) {
+            stop_token_ids.push(eot);
+        }
+    }
+
     let prompt_token_ids = if let Some(prompt) = args.prompt.as_deref() {
         let tokenizer = tokenizer
             .as_ref()
@@ -171,7 +188,7 @@ fn main() -> Result<()> {
     let started = Instant::now();
     let mut decoded_so_far = String::new();
     let mut on_token = |token: usize| -> bool {
-        if Some(token as u64) == eos_token_id {
+        if stop_token_ids.contains(&token) {
             return false;
         }
         if let Some(tokenizer) = tokenizer.as_ref() {
@@ -197,7 +214,15 @@ fn main() -> Result<()> {
 
     println!();
     if let Some(tokenizer) = tokenizer.as_ref() {
-        let text = tokenizer.decode(&result.generated_token_ids)?;
+        // Hide stop tokens (e.g. `<end_of_turn>`) from the rendered text; the raw
+        // ids below still show them so the stop reason stays visible for debugging.
+        let visible: Vec<usize> = result
+            .generated_token_ids
+            .iter()
+            .copied()
+            .filter(|id| !stop_token_ids.contains(id))
+            .collect();
+        let text = tokenizer.decode(&visible)?;
         println!("\n--- generated ({} tokens) ---", result.generated_token_ids.len());
         println!("{text}");
     }
