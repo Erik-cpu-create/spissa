@@ -447,6 +447,50 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
             max_abs_diff: max_abs_diff(&baseline_batch1_output, &scaled_batch1_output),
             speedup_vs_baseline: baseline_batch1_ns as f64 / scaled_batch1_ns.max(1) as f64,
         });
+
+        // R128b: 4-row int8 sdot — per-row-per-block baseline (R128a structure)
+        // vs single-asm 4-row ILP (independent chains + shared activation load).
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            let blocks = config.blocks_per_row;
+            let q8_quad = deterministic_q8_row_quad_blocks(blocks);
+            // Per-32-block int8 quantization of the activation (runtime convention).
+            let mut a_i8 = vec![0i8; config.in_features];
+            let mut a_scales = vec![0f32; blocks];
+            for b in 0..blocks {
+                let seg = &input[b * 32..b * 32 + 32];
+                let amax = seg.iter().fold(0f32, |m, &v| m.max(v.abs()));
+                let (sc, inv) = if amax > 0.0 {
+                    (amax / 127.0, 127.0 / amax)
+                } else {
+                    (0.0, 0.0)
+                };
+                a_scales[b] = sc;
+                for k in 0..32 {
+                    a_i8[b * 32 + k] = (seg[k] * inv).round().clamp(-127.0, 127.0) as i8;
+                }
+            }
+            let (base_ns, base_out) = time_variant(config.iters, 4, || unsafe {
+                r128_x4_baseline(&q8_quad, scale, &a_i8, &a_scales, blocks)
+            });
+            results.push(Q8KernelBenchResult {
+                variant: "r128_x4_baseline_sdot".to_string(),
+                elapsed_ns: base_ns,
+                checksum: checksum(&base_out),
+                max_abs_diff: 0.0,
+                speedup_vs_baseline: 1.0,
+            });
+            let (ilp_ns, ilp_out) = time_variant(config.iters, 4, || unsafe {
+                r128_x4_ilp(&q8_quad, scale, &a_i8, &a_scales, blocks)
+            });
+            results.push(Q8KernelBenchResult {
+                variant: "r128_x4_ilp_sdot".to_string(),
+                elapsed_ns: ilp_ns,
+                checksum: checksum(&ilp_out),
+                max_abs_diff: max_abs_diff(&base_out, &ilp_out),
+                speedup_vs_baseline: base_ns as f64 / ilp_ns.max(1) as f64,
+            });
+        }
     }
 
     Q8KernelBenchReport {
@@ -1779,6 +1823,115 @@ pub fn reflow_i8_scaled_batch4(
         }
     }
     output
+}
+
+/// R128b lab: single-block int8 sdot (32 lanes) → reduced scalar. Mirrors the
+/// runtime `i8_dot32` (ld + 2 sdot + reduce) used per block per row by R128a.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn r128_sdot_block(w: *const u8, a: *const i8) -> i32 {
+    use std::arch::asm;
+    let t: int32x4_t;
+    asm!(
+        "movi {t:v}.4s, #0",
+        "ld1 {{v0.16b, v1.16b}}, [{a}]",
+        "ld1 {{v2.16b, v3.16b}}, [{w}]",
+        "sdot {t:v}.4s, v2.16b, v0.16b",
+        "sdot {t:v}.4s, v3.16b, v1.16b",
+        t = out(vreg) t,
+        a = in(reg) a,
+        w = in(reg) w,
+        out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+    );
+    vaddvq_s32(t)
+}
+
+/// R128b BASELINE: 4 output rows, per-row per-block sdot (the R128a structure).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+pub unsafe fn r128_x4_baseline(
+    q8_quad: &[u8],
+    weight_scale: f32,
+    a_i8: &[i8],
+    a_scales: &[f32],
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let row_stride = blocks_per_row * 34;
+    let mut acc = [0.0f32; 4];
+    for j in 0..4 {
+        for b in 0..blocks_per_row {
+            let w = q8_quad.as_ptr().add(j * row_stride + b * 34 + 2);
+            let a = a_i8.as_ptr().add(b * 32);
+            let dot = r128_sdot_block(w, a);
+            acc[j] += weight_scale * a_scales[b] * dot as f32;
+        }
+    }
+    acc.to_vec()
+}
+
+/// R128b ILP: 4 output rows in ONE asm block per K-block — 4 independent sdot
+/// accumulator chains, the activation block loaded ONCE (v0/v1) and shared. The
+/// four chains pipeline to hide sdot latency; reduce each in Rust (vaddvq_s32),
+/// scale per block. Same math as the baseline, reordered for ILP + load reuse.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+pub unsafe fn r128_x4_ilp(
+    q8_quad: &[u8],
+    weight_scale: f32,
+    a_i8: &[i8],
+    a_scales: &[f32],
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    use std::arch::asm;
+    let row_stride = blocks_per_row * 34;
+    let mut acc = [0.0f32; 4];
+    for b in 0..blocks_per_row {
+        let a = a_i8.as_ptr().add(b * 32);
+        let w0 = q8_quad.as_ptr().add(b * 34 + 2);
+        let w1 = q8_quad.as_ptr().add(row_stride + b * 34 + 2);
+        let w2 = q8_quad.as_ptr().add(2 * row_stride + b * 34 + 2);
+        let w3 = q8_quad.as_ptr().add(3 * row_stride + b * 34 + 2);
+        let t0: int32x4_t;
+        let t1: int32x4_t;
+        let t2: int32x4_t;
+        let t3: int32x4_t;
+        asm!(
+            "movi {a0:v}.4s, #0",
+            "movi {a1:v}.4s, #0",
+            "movi {a2:v}.4s, #0",
+            "movi {a3:v}.4s, #0",
+            "ld1 {{v0.16b, v1.16b}}, [{a}]",
+            "ld1 {{v2.16b, v3.16b}}, [{w0}]",
+            "sdot {a0:v}.4s, v2.16b, v0.16b",
+            "sdot {a0:v}.4s, v3.16b, v1.16b",
+            "ld1 {{v4.16b, v5.16b}}, [{w1}]",
+            "sdot {a1:v}.4s, v4.16b, v0.16b",
+            "sdot {a1:v}.4s, v5.16b, v1.16b",
+            "ld1 {{v6.16b, v7.16b}}, [{w2}]",
+            "sdot {a2:v}.4s, v6.16b, v0.16b",
+            "sdot {a2:v}.4s, v7.16b, v1.16b",
+            "ld1 {{v16.16b, v17.16b}}, [{w3}]",
+            "sdot {a3:v}.4s, v16.16b, v0.16b",
+            "sdot {a3:v}.4s, v17.16b, v1.16b",
+            a0 = out(vreg) t0,
+            a1 = out(vreg) t1,
+            a2 = out(vreg) t2,
+            a3 = out(vreg) t3,
+            a = in(reg) a,
+            w0 = in(reg) w0,
+            w1 = in(reg) w1,
+            w2 = in(reg) w2,
+            w3 = in(reg) w3,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+            out("v5") _, out("v6") _, out("v7") _, out("v16") _, out("v17") _,
+        );
+        let sa = a_scales[b];
+        acc[0] += weight_scale * sa * vaddvq_s32(t0) as f32;
+        acc[1] += weight_scale * sa * vaddvq_s32(t1) as f32;
+        acc[2] += weight_scale * sa * vaddvq_s32(t2) as f32;
+        acc[3] += weight_scale * sa * vaddvq_s32(t3) as f32;
+    }
+    acc.to_vec()
 }
 
 pub fn baseline_i8_dot32_batch1_row(
