@@ -1673,23 +1673,17 @@ fn accumulate_q8_0_chunk_batch1_complete_rows(
     }
 
     let profile_start = profile_enabled.then(Instant::now);
-    for local_row in 0..row_count {
-        let out_feature = first_row + local_row;
-        let mut acc = output[out_feature];
-        let first_block = local_row * blocks_per_row;
-        for block_in_row in 0..blocks_per_row {
-            let block_offset = (first_block + block_in_row) * 34;
-            let scale = q8_0_block_scale(q8_bytes, block_offset);
-            let input_start = block_in_row * 32;
-            acc += scale
-                * q8_0_dot_i8_f32(
-                    &q8_bytes[block_offset + 2..block_offset + 34],
-                    &input[input_start..],
-                    32,
-                );
-        }
-        output[out_feature] = acc;
-    }
+    // R132: each output row is an independent dot product, so split the row
+    // range across worker threads. Bit-identical to the serial loop (each row
+    // keeps the same block-order f32 accumulation); only row ownership changes.
+    // Arch-neutral (`std::thread`), so it lifts Intel/x86 batch=1 decode — which
+    // otherwise ran single-threaded scalar — as well as ARM.
+    q8_0_batch1_complete_rows_parallel(
+        input,
+        &mut output[first_row..row_end],
+        q8_bytes,
+        blocks_per_row,
+    );
     if let Some(profile_start) = profile_start {
         record_q8_kernel_path(
             Q8KernelPath::Batch1CompleteLinear,
@@ -1702,6 +1696,74 @@ fn accumulate_q8_0_chunk_batch1_complete_rows(
     }
 
     Ok(true)
+}
+
+/// Compute a contiguous block of complete Q8_0 rows for batch=1, accumulating
+/// into `out_slice` (one entry per row). `base_row` is the row index of
+/// `out_slice[0]` within the chunk, used to locate each row's Q8_0 blocks. This
+/// is the single source of the per-row block-order accumulation that the
+/// parallel split below must stay bit-identical to.
+fn q8_0_batch1_complete_rows_range(
+    input: &[f32],
+    out_slice: &mut [f32],
+    q8_bytes: &[u8],
+    base_row: usize,
+    blocks_per_row: usize,
+) {
+    for (local_offset, out) in out_slice.iter_mut().enumerate() {
+        let first_block = (base_row + local_offset) * blocks_per_row;
+        let mut acc = *out;
+        for block_in_row in 0..blocks_per_row {
+            let block_offset = (first_block + block_in_row) * 34;
+            let scale = q8_0_block_scale(q8_bytes, block_offset);
+            let input_start = block_in_row * 32;
+            acc += scale
+                * q8_0_dot_i8_f32(
+                    &q8_bytes[block_offset + 2..block_offset + 34],
+                    &input[input_start..],
+                    32,
+                );
+        }
+        *out = acc;
+    }
+}
+
+/// R132: parallelize the batch=1 complete-rows Q8_0 GEMV across output rows.
+/// Rows are independent, so each worker owns a disjoint row range and writes a
+/// disjoint slice of `out_span`; the result is bit-identical to the serial path.
+/// Honors `RLLM_THREADS`; serial fallback for one core or few rows (where the
+/// thread-spawn cost would not pay off).
+fn q8_0_batch1_complete_rows_parallel(
+    input: &[f32],
+    out_span: &mut [f32],
+    q8_bytes: &[u8],
+    blocks_per_row: usize,
+) {
+    let row_count = out_span.len();
+    let threads = effective_runtime_threads(
+        std::env::var(RLLM_THREADS_ENV).ok().as_deref(),
+        available_runtime_threads(),
+    );
+    if threads <= 1 || row_count < 2 * MIN_ROWS_PER_PARALLEL_Q8_PREFILL {
+        q8_0_batch1_complete_rows_range(input, out_span, q8_bytes, 0, blocks_per_row);
+        return;
+    }
+    let workers = threads.min(row_count / MIN_ROWS_PER_PARALLEL_Q8_PREFILL).max(1);
+    let rows_per_worker = row_count.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut rest = &mut out_span[..];
+        let mut base_row = 0usize;
+        while base_row < row_count {
+            let rows = rows_per_worker.min(row_count - base_row);
+            let (chunk, tail) = rest.split_at_mut(rows);
+            rest = tail;
+            let worker_base = base_row;
+            scope.spawn(move || {
+                q8_0_batch1_complete_rows_range(input, chunk, q8_bytes, worker_base, blocks_per_row);
+            });
+            base_row += rows;
+        }
+    });
 }
 
 fn accumulate_q8_0_chunk_multiply_into(
