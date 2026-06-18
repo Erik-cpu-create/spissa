@@ -602,6 +602,159 @@ unsafe fn smmla_accumulate_output_pair(
     }
 }
 
+/// REEFUSE-Q8-I8MM-PANEL output-octet kernel (R124): accumulate EIGHT output rows
+/// (`out_feature..+8`) for all batch rows against four packed weight row-pairs,
+/// using FOUR independent `smmla` accumulator tiles per K-block. The activation
+/// `v0` is loaded once per K-segment and reused across all four weight panels.
+/// Four independent chains hide the ~3-cycle `smmla` latency that the single-tile
+/// `output_pair` stalls on (lab R123: ~1.46x). Per-block per-row weight scales are
+/// folded in scalar post-`smmla`, identical to `smmla_accumulate_output_pair`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn smmla_accumulate_output_octet(
+    wp: &[&[i8]; 4],     // four weight panels, rows (0,1)(2,3)(4,5)(6,7)
+    ws: &[&[f32]; 4],    // four scale arrays, 2 per block each
+    act_panel: &[i8],
+    act_i8: &[i8],
+    act_scales: &[f32], // batch * blocks_per_row
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+    output: &mut [f32],
+    out_features: usize,
+    out_feature: usize,
+) {
+    let pairs = batch / 2;
+    let act_pair_stride = 2 * in_features;
+    for p in 0..pairs {
+        let t0 = p * 2;
+        let t1 = t0 + 1;
+        let act_pair_base = act_panel.as_ptr().add(p * act_pair_stride);
+        // acc[token_in_pair][out_row_in_octet]
+        let mut acc0 = [0.0f32; 8];
+        let mut acc1 = [0.0f32; 8];
+        for b in 0..blocks_per_row {
+            let mut a_ptr = act_pair_base.add(b * 64);
+            let mut w0p = wp[0].as_ptr().add(b * 64);
+            let mut w1p = wp[1].as_ptr().add(b * 64);
+            let mut w2p = wp[2].as_ptr().add(b * 64);
+            let mut w3p = wp[3].as_ptr().add(b * 64);
+            let tile0: int32x4_t;
+            let tile1: int32x4_t;
+            let tile2: int32x4_t;
+            let tile3: int32x4_t;
+            // Four independent accumulator tiles (acc0..acc3); v0 = shared
+            // activation, v1..v4 = the four weight panels. Read each tile through a
+            // typed `out(vreg)` operand (never an `st1` via an `in(reg)` pointer —
+            // that hides the write from the compiler and is UB; see R119).
+            std::arch::asm!(
+                "movi {a0:v}.4s, #0",
+                "movi {a1:v}.4s, #0",
+                "movi {a2:v}.4s, #0",
+                "movi {a3:v}.4s, #0",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                a0 = out(vreg) tile0,
+                a1 = out(vreg) tile1,
+                a2 = out(vreg) tile2,
+                a3 = out(vreg) tile3,
+                a = inout(reg) a_ptr,
+                w0 = inout(reg) w0p,
+                w1 = inout(reg) w1p,
+                w2 = inout(reg) w2p,
+                w3 = inout(reg) w3p,
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+                out("v3") _,
+                out("v4") _,
+            );
+            let _ = (a_ptr, w0p, w1p, w2p, w3p);
+            let s_a0 = act_scales[t0 * blocks_per_row + b];
+            let s_a1 = act_scales[t1 * blocks_per_row + b];
+            let tiles = [tile0, tile1, tile2, tile3];
+            for (n, tile_acc) in tiles.into_iter().enumerate() {
+                let mut tile = [0i32; 4];
+                vst1q_s32(tile.as_mut_ptr(), tile_acc);
+                let s_w0 = ws[n][b * 2];
+                let s_w1 = ws[n][b * 2 + 1];
+                // tile lanes: [t0*w0, t0*w1, t1*w0, t1*w1] for this panel's 2 rows.
+                acc0[n * 2] += s_w0 * s_a0 * tile[0] as f32;
+                acc0[n * 2 + 1] += s_w1 * s_a0 * tile[1] as f32;
+                acc1[n * 2] += s_w0 * s_a1 * tile[2] as f32;
+                acc1[n * 2 + 1] += s_w1 * s_a1 * tile[3] as f32;
+            }
+        }
+        for orow in 0..8 {
+            output[t0 * out_features + out_feature + orow] += acc0[orow];
+            output[t1 * out_features + out_feature + orow] += acc1[orow];
+        }
+    }
+    // Odd-batch tail: last token row, all 8 output rows, scalar int8 from the
+    // packed weight panels (each panel holds two output rows interleaved).
+    if batch & 1 != 0 {
+        let t = batch - 1;
+        for n in 0..4 {
+            let mut o0 = 0.0f32;
+            let mut o1 = 0.0f32;
+            for b in 0..blocks_per_row {
+                let s_w0 = ws[n][b * 2];
+                let s_w1 = ws[n][b * 2 + 1];
+                let s_a = act_scales[t * blocks_per_row + b];
+                let w_base = wp[n].as_ptr().add(b * 64);
+                let mut d0 = 0i32;
+                let mut d1 = 0i32;
+                for seg in 0..4usize {
+                    for k in 0..8usize {
+                        let a = act_i8[t * in_features + b * 32 + seg * 8 + k] as i32;
+                        d0 += a * *w_base.add(seg * 16 + k) as i32;
+                        d1 += a * *w_base.add(seg * 16 + 8 + k) as i32;
+                    }
+                }
+                o0 += s_w0 * s_a * d0 as f32;
+                o1 += s_w1 * s_a * d1 as f32;
+            }
+            output[t * out_features + out_feature + n * 2] += o0;
+            output[t * out_features + out_feature + n * 2 + 1] += o1;
+        }
+    }
+}
+
 /// Scalar int8 dot for one weight row × all batch rows (handles odd-batch and
 /// odd-output-row tails, partial chunks, and non-i8mm CPUs).
 fn scalar_int8_row(
@@ -669,10 +822,60 @@ fn accumulate_q8_0_chunk_panel_smmla(
             return Ok(false);
         }
         with_q8_panel_activations(input, config.batch, config.in_features, |act_i8, act_panel, act_scales| {
-            // Local weight panel scratch reused across output pairs.
+            // Octet (R124): 4 weight panels + 4 scale arrays, reused per octet.
+            let mut wpv: [Vec<i8>; 4] =
+                std::array::from_fn(|_| vec![0i8; 2 * config.in_features]);
+            let mut wsv: [Vec<f32>; 4] =
+                std::array::from_fn(|_| vec![0.0f32; 2 * blocks_per_row]);
+            // Pair-remainder scratch.
             let mut weight_panel = vec![0i8; 2 * config.in_features];
             let mut w_scales = vec![0.0f32; 2 * blocks_per_row];
             let mut r = 0;
+            // Output-octet ILP fast path (8 output rows, 4 independent smmla chains).
+            while r + 8 <= n_rows {
+                for q in 0..4 {
+                    let base_r0 = (r + q * 2) * blocks_per_row * 34;
+                    let base_r1 = (r + q * 2 + 1) * blocks_per_row * 34;
+                    pack_q8_weight_pair(
+                        q8_bytes,
+                        base_r0,
+                        base_r1,
+                        blocks_per_row,
+                        &mut wpv[q],
+                        &mut wsv[q],
+                    );
+                }
+                let wp = [
+                    wpv[0].as_slice(),
+                    wpv[1].as_slice(),
+                    wpv[2].as_slice(),
+                    wpv[3].as_slice(),
+                ];
+                let ws = [
+                    wsv[0].as_slice(),
+                    wsv[1].as_slice(),
+                    wsv[2].as_slice(),
+                    wsv[3].as_slice(),
+                ];
+                // SAFETY: q8_i8mm_available verified above.
+                unsafe {
+                    smmla_accumulate_output_octet(
+                        &wp,
+                        &ws,
+                        act_panel,
+                        act_i8,
+                        act_scales,
+                        config.batch,
+                        config.in_features,
+                        blocks_per_row,
+                        output,
+                        config.out_features,
+                        out_start + r,
+                    );
+                }
+                r += 8;
+            }
+            // Pair remainder (0..3 output pairs).
             while r + 2 <= n_rows {
                 let base_r0 = r * blocks_per_row * 34;
                 let base_r1 = (r + 1) * blocks_per_row * 34;
@@ -3500,6 +3703,28 @@ mod r119_panel_tests {
     #[test]
     fn panel_matches_r111_realistic_shape() {
         run_panel_vs_r111(55, 2048, 8);
+    }
+
+    // R124 octet boundaries: exercise output-octet + pair-remainder + odd-row
+    // tails for both even and odd batch. out_features chosen to hit each split:
+    // 8=1 octet; 10=octet+pair; 11=octet+pair+odd; 17=2 octets+odd; 22=2oct+3pair.
+    #[test]
+    fn octet_even_batch_boundaries() {
+        for out in [8, 9, 10, 11, 12, 15, 16, 17, 22, 24] {
+            run_panel_vs_r111(54, 256, out);
+        }
+    }
+
+    #[test]
+    fn octet_odd_batch_boundaries() {
+        for out in [8, 9, 10, 11, 12, 15, 16, 17, 22, 24] {
+            run_panel_vs_r111(53, 256, out);
+        }
+    }
+
+    #[test]
+    fn octet_realistic_multi_octet() {
+        run_panel_vs_r111(53, 2048, 64);
     }
 }
 
