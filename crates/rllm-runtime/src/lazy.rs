@@ -43,6 +43,7 @@ pub struct LazyRllmModel {
     verified_compressed_chunks: HashSet<u64>,
     verified_compressed_chunk_ranges: HashSet<(u64, u64, u64)>,
     verified_original_chunks: HashSet<u64>,
+    verified_tensors: HashSet<u64>,
 }
 
 impl LazyRllmModel {
@@ -111,7 +112,62 @@ impl LazyRllmModel {
             verified_compressed_chunks: HashSet::new(),
             verified_compressed_chunk_ranges: HashSet::new(),
             verified_original_chunks: HashSet::new(),
+            verified_tensors: HashSet::new(),
         })
+    }
+
+    /// Expose a whole tensor's raw bytes as ONE contiguous zero-copy mmap slice,
+    /// for the q8 decode fast-path that bypasses per-chunk dispatch.
+    ///
+    /// Returns `Ok(None)` (caller falls back to the chunk path) unless the tensor
+    /// is stored as a contiguous run of identity-codec (`rtc-raw-v1`) chunks. The
+    /// slice is integrity-checked once against the tensor checksum (honoring the
+    /// integrity mode); a mismatch also yields `None` so the verified chunk path
+    /// takes over rather than failing the call.
+    pub fn with_raw_tensor<R>(
+        &mut self,
+        tensor_id: u64,
+        f: impl FnOnce(&[u8]) -> Result<R>,
+    ) -> Result<Option<R>> {
+        let (first, total) = {
+            let chunks = match self.chunks_by_tensor.get(&tensor_id) {
+                Some(chunks) if !chunks.is_empty() => chunks,
+                _ => return Ok(None),
+            };
+            let first = chunks[0].file_offset;
+            let mut cursor = first;
+            for chunk in chunks {
+                if chunk.codec_id != "rtc-raw-v1"
+                    || chunk.compressed_size != chunk.uncompressed_size
+                    || chunk.file_offset != cursor
+                {
+                    return Ok(None);
+                }
+                cursor = cursor.saturating_add(chunk.compressed_size);
+            }
+            (first, cursor - first)
+        };
+
+        let verify = self.integrity_mode != RamaIntegrityMode::Unchecked
+            && !self.verified_tensors.contains(&tensor_id);
+
+        let result = {
+            let slice = self.reader.read_span(first, total)?;
+            if verify {
+                let tensor_meta = match self.tensors_by_id.get(&tensor_id) {
+                    Some(meta) => meta,
+                    None => return Ok(None),
+                };
+                if verify_tensor_checksum(tensor_meta, slice).is_err() {
+                    return Ok(None);
+                }
+            }
+            f(slice)?
+        };
+        if verify && self.integrity_mode == RamaIntegrityMode::VerifyOnce {
+            self.verified_tensors.insert(tensor_id);
+        }
+        Ok(Some(result))
     }
 
     pub fn path(&self) -> &Path {

@@ -224,6 +224,7 @@ pub fn gemma_generate_from_model(
             *value *= build.embed_scale;
         }
 
+        let layers_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
         for (i, names) in prepared.layers.iter().enumerate() {
             hidden_states = streaming_gemma_transformer_block(
                 model,
@@ -239,6 +240,13 @@ pub fn gemma_generate_from_model(
                 budget,
                 Some(&mut caches[i]),
             )?;
+        }
+        if let Some(t) = layers_started {
+            eprintln!(
+                "[gemma-profile] step {step} seq_len={seq_len}: {} layers {:.0}ms",
+                prepared.layers.len(),
+                t.elapsed().as_secs_f64() * 1000.0
+            );
         }
 
         hidden_states = rms_norm(&hidden_states, &prepared.final_layernorm, seq_len, hidden, build.rms_norm_eps)?;
