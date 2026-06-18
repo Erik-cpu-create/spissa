@@ -2,6 +2,18 @@ use crate::{Result, RuntimeError};
 use rllm_container::TokenizerMetadata;
 use std::collections::HashMap;
 
+/// SentencePiece metaspace marker (U+2581) used by Gemma for spaces.
+const METASPACE: char = '▁';
+
+/// Pre-tokenization / surface scheme. `ByteLevel` is GPT-2 style (`Ġ` spaces,
+/// `Ċ` newlines); `Metaspace` is SentencePiece style (`▁` spaces, `<0xNN>`
+/// byte fallback), used by Gemma.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreTokenizerScheme {
+    ByteLevel,
+    Metaspace,
+}
+
 #[derive(Debug, Clone)]
 pub struct RllmTokenizer {
     id_to_token: Vec<String>,
@@ -11,6 +23,8 @@ pub struct RllmTokenizer {
     special_token_candidates: Vec<(String, usize)>,
     encode_candidates: Vec<(String, usize)>,
     unk_token_id: Option<usize>,
+    scheme: PreTokenizerScheme,
+    add_bos_id: Option<usize>,
 }
 
 impl RllmTokenizer {
@@ -36,10 +50,20 @@ impl RllmTokenizer {
             }
         }
 
+        let scheme = match metadata.pre_tokenizer.as_deref() {
+            Some("metaspace") => PreTokenizerScheme::Metaspace,
+            _ => PreTokenizerScheme::ByteLevel,
+        };
+        let add_bos_id = if metadata.add_bos_token == Some(true) {
+            metadata.bos_token_id.and_then(|id| usize::try_from(id).ok())
+        } else {
+            None
+        };
+
         let id_to_text: Vec<String> = metadata
             .id_to_token
             .iter()
-            .map(|token| token_to_text_surface(token))
+            .map(|token| token_to_text_surface(token, scheme))
             .collect();
         let token_to_id: HashMap<String, usize> = metadata
             .id_to_token
@@ -53,11 +77,13 @@ impl RllmTokenizer {
             .enumerate()
             .map(|(rank, (left, right))| ((left.clone(), right.clone()), rank))
             .collect();
+        // Byte-fallback tokens (`<0xNN>`) syntactically look like specials but
+        // must never be matched against raw input text — exclude them.
         let mut special_token_candidates: Vec<(String, usize)> = metadata
             .id_to_token
             .iter()
             .enumerate()
-            .filter(|(_, token)| is_raw_special_token(token))
+            .filter(|(_, token)| is_raw_special_token(token) && byte_fallback_value(token).is_none())
             .map(|(id, token)| (token.clone(), id))
             .collect();
         special_token_candidates.sort_by(|(left_text, left_id), (right_text, right_id)| {
@@ -87,6 +113,8 @@ impl RllmTokenizer {
             special_token_candidates,
             encode_candidates,
             unk_token_id,
+            scheme,
+            add_bos_id,
         })
     }
 
@@ -106,14 +134,19 @@ impl RllmTokenizer {
                 "prompt text must not be empty".to_string(),
             ));
         }
-        if !self.bpe_ranks.is_empty() {
-            return self.encode_bpe(text);
+        let mut token_ids = Vec::new();
+        if let Some(bos) = self.add_bos_id {
+            token_ids.push(bos);
         }
-        self.encode_greedy(text)
+        if self.bpe_ranks.is_empty() {
+            self.encode_greedy(text, &mut token_ids)?;
+        } else {
+            self.encode_bpe(text, &mut token_ids)?;
+        }
+        Ok(token_ids)
     }
 
-    fn encode_greedy(&self, text: &str) -> Result<Vec<usize>> {
-        let mut token_ids = Vec::new();
+    fn encode_greedy(&self, text: &str, token_ids: &mut Vec<usize>) -> Result<()> {
         let mut offset = 0usize;
         while offset < text.len() {
             let remaining = &text[offset..];
@@ -156,11 +189,10 @@ impl RllmTokenizer {
                 "tokenizer could not encode text starting at byte {offset}: {preview:?}"
             )));
         }
-        Ok(token_ids)
+        Ok(())
     }
 
-    fn encode_bpe(&self, text: &str) -> Result<Vec<usize>> {
-        let mut token_ids = Vec::new();
+    fn encode_bpe(&self, text: &str, token_ids: &mut Vec<usize>) -> Result<()> {
         let mut offset = 0usize;
         while offset < text.len() {
             let remaining = &text[offset..];
@@ -187,17 +219,25 @@ impl RllmTokenizer {
                     "invalid empty BPE tokenizer segment".to_string(),
                 ));
             }
-            for pretoken in byte_level_pretokens(segment) {
-                token_ids.extend(self.bpe_piece_ids(&pretoken)?);
+            match self.scheme {
+                PreTokenizerScheme::ByteLevel => {
+                    for pretoken in byte_level_pretokens(segment) {
+                        self.bpe_piece_ids(&pretoken, token_ids)?;
+                    }
+                }
+                PreTokenizerScheme::Metaspace => {
+                    let encoded = segment.replace(' ', "▁");
+                    self.bpe_piece_ids(&encoded, token_ids)?;
+                }
             }
             offset += segment.len();
         }
-        Ok(token_ids)
+        Ok(())
     }
 
-    fn bpe_piece_ids(&self, encoded: &str) -> Result<Vec<usize>> {
+    fn bpe_piece_ids(&self, encoded: &str, token_ids: &mut Vec<usize>) -> Result<()> {
         if encoded.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         let mut parts: Vec<String> = encoded.chars().map(|ch| ch.to_string()).collect();
         loop {
@@ -217,42 +257,110 @@ impl RllmTokenizer {
             parts.splice(merge_index..=merge_index + 1, [merged]);
         }
 
-        let mut ids = Vec::with_capacity(parts.len());
         for part in parts {
             if let Some(id) = self.token_to_id.get(&part) {
-                ids.push(*id);
+                token_ids.push(*id);
+            } else if self.scheme == PreTokenizerScheme::Metaspace
+                && self.push_byte_fallback(&part, token_ids)
+            {
+                // handled: decomposed into `<0xNN>` byte tokens
             } else if let Some(unk_token_id) = self.unk_token_id {
-                ids.push(unk_token_id);
+                token_ids.push(unk_token_id);
             } else {
                 return Err(RuntimeError::InvalidTensorData(format!(
                     "BPE token {part:?} is not present in tokenizer vocab"
                 )));
             }
         }
-        Ok(ids)
+        Ok(())
+    }
+
+    /// SentencePiece byte fallback: decompose an out-of-vocab piece into its
+    /// UTF-8 bytes and map each to a `<0xNN>` token. Returns false (no tokens
+    /// pushed) if any byte token is missing from the vocab.
+    fn push_byte_fallback(&self, part: &str, token_ids: &mut Vec<usize>) -> bool {
+        let mut byte_ids = Vec::with_capacity(part.len());
+        for byte in part.bytes() {
+            match self.token_to_id.get(&format!("<0x{byte:02X}>")) {
+                Some(id) => byte_ids.push(*id),
+                None => return false,
+            }
+        }
+        token_ids.extend(byte_ids);
+        true
     }
 
     pub fn decode(&self, token_ids: &[usize]) -> Result<String> {
+        match self.scheme {
+            PreTokenizerScheme::ByteLevel => self.decode_byte_level(token_ids),
+            PreTokenizerScheme::Metaspace => self.decode_metaspace(token_ids),
+        }
+    }
+
+    fn decode_byte_level(&self, token_ids: &[usize]) -> Result<String> {
         let mut text = String::new();
         for &token_id in token_ids {
-            let token = self.id_to_text.get(token_id).ok_or_else(|| {
-                RuntimeError::InvalidTensorData(format!(
-                    "token id {token_id} is outside tokenizer vocab size {}",
-                    self.id_to_text.len()
-                ))
-            })?;
-            text.push_str(token);
+            text.push_str(&self.surface(token_id)?);
         }
         Ok(text)
     }
+
+    /// Decode SentencePiece output: reassemble runs of `<0xNN>` byte-fallback
+    /// tokens into UTF-8 before rendering, and map `▁` back to spaces.
+    fn decode_metaspace(&self, token_ids: &[usize]) -> Result<String> {
+        let mut text = String::new();
+        let mut byte_run: Vec<u8> = Vec::new();
+        for &token_id in token_ids {
+            let raw = self.id_to_token.get(token_id).ok_or_else(|| {
+                RuntimeError::InvalidTensorData(format!(
+                    "token id {token_id} is outside tokenizer vocab size {}",
+                    self.id_to_token.len()
+                ))
+            })?;
+            if let Some(byte) = byte_fallback_value(raw) {
+                byte_run.push(byte);
+                continue;
+            }
+            if !byte_run.is_empty() {
+                text.push_str(&String::from_utf8_lossy(&byte_run));
+                byte_run.clear();
+            }
+            text.push_str(&self.surface(token_id)?);
+        }
+        if !byte_run.is_empty() {
+            text.push_str(&String::from_utf8_lossy(&byte_run));
+        }
+        Ok(text)
+    }
+
+    fn surface(&self, token_id: usize) -> Result<&str> {
+        self.id_to_text.get(token_id).map(String::as_str).ok_or_else(|| {
+            RuntimeError::InvalidTensorData(format!(
+                "token id {token_id} is outside tokenizer vocab size {}",
+                self.id_to_text.len()
+            ))
+        })
+    }
 }
 
-fn token_to_text_surface(token: &str) -> String {
-    token.replace('Ġ', " ").replace('Ċ', "\n")
+fn token_to_text_surface(token: &str, scheme: PreTokenizerScheme) -> String {
+    match scheme {
+        PreTokenizerScheme::ByteLevel => token.replace('Ġ', " ").replace('Ċ', "\n"),
+        PreTokenizerScheme::Metaspace => token.replace(METASPACE, " "),
+    }
 }
 
 fn is_raw_special_token(token: &str) -> bool {
     token.len() >= 4 && token.starts_with('<') && token.ends_with('>')
+}
+
+/// Parse a SentencePiece byte-fallback token `<0xNN>` into its byte value.
+fn byte_fallback_value(token: &str) -> Option<u8> {
+    let hex = token.strip_prefix("<0x")?.strip_suffix('>')?;
+    if hex.len() != 2 {
+        return None;
+    }
+    u8::from_str_radix(hex, 16).ok()
 }
 
 fn byte_level_pretokens(segment: &str) -> Vec<String> {
@@ -323,20 +431,29 @@ fn byte_level_char_class(ch: char) -> u8 {
 mod tests {
     use super::*;
 
+    fn meta(
+        tokenizer_type: &str,
+        id_to_token: Vec<String>,
+        bpe_merges: Vec<(String, String)>,
+        unk_token_id: Option<u64>,
+    ) -> TokenizerMetadata {
+        TokenizerMetadata {
+            tokenizer_type: Some(tokenizer_type.to_string()),
+            id_to_token,
+            bpe_merges,
+            unk_token_id,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn greedy_encode_and_decode_use_literal_token_surfaces() {
-        let tokenizer = RllmTokenizer::from_metadata(&TokenizerMetadata {
-            tokenizer_type: Some("hf-wordlevel".to_string()),
-            id_to_token: vec![
-                "Hello".to_string(),
-                " world".to_string(),
-                "<unk>".to_string(),
-            ],
-            bpe_merges: Vec::new(),
-            unk_token_id: Some(2),
-            bos_token_id: None,
-            eos_token_id: None,
-        })
+        let tokenizer = RllmTokenizer::from_metadata(&meta(
+            "hf-wordlevel",
+            vec!["Hello".to_string(), " world".to_string(), "<unk>".to_string()],
+            Vec::new(),
+            Some(2),
+        ))
         .unwrap();
 
         assert_eq!(tokenizer.encode("Hello world").unwrap(), [0, 1]);
@@ -346,14 +463,12 @@ mod tests {
 
     #[test]
     fn decode_maps_common_byte_level_space_and_newline_markers() {
-        let tokenizer = RllmTokenizer::from_metadata(&TokenizerMetadata {
-            tokenizer_type: Some("hf-bpe".to_string()),
-            id_to_token: vec!["Hello".to_string(), "Ġworld".to_string(), "Ċ".to_string()],
-            bpe_merges: Vec::new(),
-            unk_token_id: None,
-            bos_token_id: None,
-            eos_token_id: None,
-        })
+        let tokenizer = RllmTokenizer::from_metadata(&meta(
+            "hf-bpe",
+            vec!["Hello".to_string(), "Ġworld".to_string(), "Ċ".to_string()],
+            Vec::new(),
+            None,
+        ))
         .unwrap();
 
         assert_eq!(tokenizer.encode("Hello world\n").unwrap(), [0, 1, 2]);
@@ -362,33 +477,28 @@ mod tests {
 
     #[test]
     fn token_id_for_raw_token_finds_special_added_tokens() {
-        let tokenizer = RllmTokenizer::from_metadata(&TokenizerMetadata {
-            tokenizer_type: Some("hf-bpe".to_string()),
-            id_to_token: vec![
+        let tokenizer = RllmTokenizer::from_metadata(&meta(
+            "hf-bpe",
+            vec![
                 "Hello".to_string(),
                 "<|begin_of_text|>".to_string(),
                 "<|eot_id|>".to_string(),
             ],
-            bpe_merges: Vec::new(),
-            unk_token_id: None,
-            bos_token_id: None,
-            eos_token_id: None,
-        })
+            Vec::new(),
+            None,
+        ))
         .unwrap();
 
-        assert_eq!(
-            tokenizer.token_id_for_raw_token("<|begin_of_text|>"),
-            Some(1)
-        );
+        assert_eq!(tokenizer.token_id_for_raw_token("<|begin_of_text|>"), Some(1));
         assert_eq!(tokenizer.token_id_for_raw_token("<|eot_id|>"), Some(2));
         assert_eq!(tokenizer.token_id_for_raw_token("<missing>"), None);
     }
 
     #[test]
     fn encode_preserves_raw_special_token_boundaries() {
-        let tokenizer = RllmTokenizer::from_metadata(&TokenizerMetadata {
-            tokenizer_type: Some("hf-bpe".to_string()),
-            id_to_token: vec![
+        let tokenizer = RllmTokenizer::from_metadata(&meta(
+            "hf-bpe",
+            vec![
                 "<|im_start|>".to_string(),
                 "<|im_end|>".to_string(),
                 "?".to_string(),
@@ -396,26 +506,22 @@ mod tests {
                 "assistant".to_string(),
                 "Ċ".to_string(),
             ],
-            bpe_merges: Vec::new(),
-            unk_token_id: None,
-            bos_token_id: None,
-            eos_token_id: None,
-        })
+            Vec::new(),
+            None,
+        ))
         .unwrap();
 
         assert_eq!(
-            tokenizer
-                .encode("?<|im_end|>\n<|im_start|>assistant\n")
-                .unwrap(),
+            tokenizer.encode("?<|im_end|>\n<|im_start|>assistant\n").unwrap(),
             vec![2, 1, 5, 0, 4, 5]
         );
     }
 
     #[test]
     fn bpe_encode_uses_merges_without_crossing_special_boundaries() {
-        let tokenizer = RllmTokenizer::from_metadata(&TokenizerMetadata {
-            tokenizer_type: Some("hf-bpe".to_string()),
-            id_to_token: vec![
+        let tokenizer = RllmTokenizer::from_metadata(&meta(
+            "hf-bpe",
+            vec![
                 "<|im_start|>".to_string(),
                 "<|im_end|>".to_string(),
                 "?".to_string(),
@@ -431,7 +537,7 @@ mod tests {
                 "a".to_string(),
                 "n".to_string(),
             ],
-            bpe_merges: vec![
+            vec![
                 ("a".to_string(), "s".to_string()),
                 ("as".to_string(), "s".to_string()),
                 ("i".to_string(), "s".to_string()),
@@ -440,17 +546,80 @@ mod tests {
                 ("an".to_string(), "t".to_string()),
                 ("ist".to_string(), "ant".to_string()),
             ],
-            unk_token_id: None,
-            bos_token_id: None,
-            eos_token_id: None,
-        })
+            None,
+        ))
         .unwrap();
 
         assert_eq!(
-            tokenizer
-                .encode("?<|im_end|>\n<|im_start|>assistant\n")
-                .unwrap(),
+            tokenizer.encode("?<|im_end|>\n<|im_start|>assistant\n").unwrap(),
             vec![2, 1, 8, 0, 4, 7, 8]
         );
+    }
+
+    fn metaspace_tokenizer() -> RllmTokenizer {
+        // Vocab with metaspace word pieces, a non-metaspace leading-word piece,
+        // single chars, and byte-fallback tokens.
+        let id_to_token = vec![
+            "<unk>".to_string(),  // 0
+            "<bos>".to_string(),  // 1
+            "▁the".to_string(),   // 2
+            "▁cat".to_string(),   // 3
+            "▁".to_string(),      // 4
+            "t".to_string(),      // 5
+            "h".to_string(),      // 6
+            "e".to_string(),      // 7
+            "c".to_string(),      // 8
+            "a".to_string(),      // 9
+            "the".to_string(),    // 10 (leading word, no metaspace)
+            "<0xC3>".to_string(), // 11
+            "<0xA9>".to_string(), // 12 (é = C3 A9)
+        ];
+        let bpe_merges = vec![
+            ("t".to_string(), "h".to_string()),   // th
+            ("th".to_string(), "e".to_string()),  // the
+            ("▁".to_string(), "c".to_string()),   // ▁c
+            ("▁c".to_string(), "a".to_string()),  // ▁ca
+            ("▁ca".to_string(), "t".to_string()), // ▁cat
+        ];
+        let metadata = TokenizerMetadata {
+            tokenizer_type: Some("hf-bpe".to_string()),
+            id_to_token,
+            bpe_merges,
+            unk_token_id: Some(0),
+            bos_token_id: Some(1),
+            pre_tokenizer: Some("metaspace".to_string()),
+            add_bos_token: Some(true),
+            ..Default::default()
+        };
+        RllmTokenizer::from_metadata(&metadata).unwrap()
+    }
+
+    #[test]
+    fn metaspace_encode_prepends_bos_and_attaches_space_to_following_word() {
+        let tokenizer = metaspace_tokenizer();
+        // Faithful SentencePiece (no dummy prefix): "the cat" normalizes to
+        // "the▁cat" → <bos> the ▁cat. The leading word has NO metaspace; the
+        // space attaches to the *following* word as ▁cat.
+        assert_eq!(tokenizer.encode("the cat").unwrap(), vec![1, 10, 3]);
+        assert_eq!(tokenizer.decode(&[10, 3]).unwrap(), "the cat");
+    }
+
+    #[test]
+    fn metaspace_byte_fallback_decomposes_oov_chars_and_decodes_utf8() {
+        let tokenizer = metaspace_tokenizer();
+        // 'é' (U+00E9) is not a vocab piece → bytes C3 A9 → tokens 11, 12.
+        let ids = tokenizer.encode("é").unwrap();
+        assert_eq!(ids, vec![1, 11, 12]); // bos + byte fallback
+        // Decode reassembles the byte run into UTF-8.
+        assert_eq!(tokenizer.decode(&[11, 12]).unwrap(), "é");
+    }
+
+    #[test]
+    fn byte_fallback_value_parses_only_well_formed_byte_tokens() {
+        assert_eq!(byte_fallback_value("<0xC3>"), Some(0xC3));
+        assert_eq!(byte_fallback_value("<0x00>"), Some(0x00));
+        assert_eq!(byte_fallback_value("<bos>"), None);
+        assert_eq!(byte_fallback_value("<0xZZ>"), None);
+        assert_eq!(byte_fallback_value("<0x1>"), None);
     }
 }
