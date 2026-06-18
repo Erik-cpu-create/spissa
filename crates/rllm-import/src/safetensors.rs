@@ -245,6 +245,76 @@ impl SafetensorsReader {
     }
 }
 
+/// `model.safetensors.index.json`: maps each tensor to the shard file holding it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SafetensorsIndex {
+    pub weight_map: HashMap<String, String>,
+}
+
+/// Reader over a sharded safetensors checkpoint (`*.index.json` + N shard files).
+/// Presents the same `list_tensors` / `read_tensor` / `to_rllm_meta` surface as
+/// `SafetensorsReader`, dispatching each tensor to the shard that holds it.
+pub struct ShardedSafetensorsReader {
+    shards: Vec<SafetensorsReader>,
+    name_to_shard: HashMap<String, usize>,
+}
+
+impl ShardedSafetensorsReader {
+    /// Open a sharded checkpoint from its `*.index.json` path. Shard files are
+    /// resolved relative to the index file's directory.
+    pub fn open_index(index_path: impl AsRef<Path>) -> Result<Self> {
+        let index_path = index_path.as_ref();
+        let dir = index_path.parent().unwrap_or_else(|| Path::new("."));
+        let json = fs::read_to_string(index_path)?;
+        let index: SafetensorsIndex = serde_json::from_str(&json)?;
+
+        // Unique shard files, deterministic order.
+        let mut shard_files: Vec<String> = index.weight_map.values().cloned().collect();
+        shard_files.sort();
+        shard_files.dedup();
+
+        let mut shards = Vec::with_capacity(shard_files.len());
+        let mut file_to_idx: HashMap<String, usize> = HashMap::new();
+        for (i, f) in shard_files.iter().enumerate() {
+            shards.push(SafetensorsReader::open(dir.join(f))?);
+            file_to_idx.insert(f.clone(), i);
+        }
+        let name_to_shard = index
+            .weight_map
+            .into_iter()
+            .map(|(name, f)| (name, file_to_idx[&f]))
+            .collect();
+
+        Ok(Self {
+            shards,
+            name_to_shard,
+        })
+    }
+
+    /// List all tensor names across every shard.
+    pub fn list_tensors(&self) -> Vec<String> {
+        self.name_to_shard.keys().cloned().collect()
+    }
+
+    /// Read tensor data, dispatching to the shard that holds it.
+    pub fn read_tensor(&mut self, name: &str) -> Result<Vec<u8>> {
+        let idx = *self
+            .name_to_shard
+            .get(name)
+            .ok_or_else(|| SafetensorsError::TensorNotFound(name.to_string()))?;
+        self.shards[idx].read_tensor(name)
+    }
+
+    /// Convert a tensor's metadata to RLLM `TensorMeta` (hashes the data).
+    pub fn to_rllm_meta(&mut self, name: &str) -> Result<TensorMeta> {
+        let idx = *self
+            .name_to_shard
+            .get(name)
+            .ok_or_else(|| SafetensorsError::TensorNotFound(name.to_string()))?;
+        self.shards[idx].to_rllm_meta(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,5 +404,36 @@ mod tests {
         );
         assert_eq!(tokenizer.unk_token_id, Some(2));
         assert_eq!(tokenizer.eos_token_id, Some(3));
+    }
+
+    /// Integration check against the real downloaded Gemma 3 4B sharded
+    /// checkpoint. Ignored by default (depends on a local 8.6GB download).
+    /// Run: `cargo test -p rllm-import --release sharded_reads_real_gemma -- --ignored`
+    #[test]
+    #[ignore]
+    fn sharded_reads_real_gemma() {
+        let idx = "../../models/gemma-3-4b-it/model.safetensors.index.json";
+        let mut r = ShardedSafetensorsReader::open_index(idx).expect("open index");
+        let names = r.list_tensors();
+        assert!(names.len() > 800, "expected ~883 tensors, got {}", names.len());
+        // text decoder is nested under language_model.*; embeddings are [vocab, hidden]
+        let meta = r
+            .to_rllm_meta("language_model.model.embed_tokens.weight")
+            .expect("embed_tokens meta");
+        assert_eq!(meta.shape, vec![262208, 2560], "gemma3 embed shape");
+        // a layer-0 q_proj: head_dim 256 * 8 heads = 2048 out, 2560 in
+        let q = r
+            .to_rllm_meta("language_model.model.layers.0.self_attn.q_proj.weight")
+            .expect("q_proj meta");
+        assert_eq!(q.shape, vec![2048, 2560], "gemma3 q_proj shape (8*256, 2560)");
+        // the Gemma-specific QK-norm tensor exists
+        assert!(r
+            .to_rllm_meta("language_model.model.layers.0.self_attn.q_norm.weight")
+            .is_ok());
+        // reading actual bytes works (cross-shard dispatch)
+        let data = r
+            .read_tensor("language_model.model.norm.weight")
+            .expect("final norm bytes");
+        assert_eq!(data.len(), 2560 * 2, "bf16 final norm = hidden*2 bytes");
     }
 }
