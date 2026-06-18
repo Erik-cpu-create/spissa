@@ -60,6 +60,16 @@ struct HuggingFaceModelConfig {
     num_key_value_heads: Option<u64>,
     rope_theta: Option<f32>,
     tie_word_embeddings: Option<bool>,
+    // Gemma-family fields
+    head_dim: Option<u64>,
+    query_pre_attn_scalar: Option<f32>,
+    sliding_window: Option<u64>,
+    sliding_window_pattern: Option<u64>,
+    rope_local_base_freq: Option<f32>,
+    hidden_activation: Option<String>,
+    /// Multimodal checkpoints (e.g. Gemma 3 4B = `Gemma3ForConditionalGeneration`)
+    /// nest the language-model architecture params under `text_config`.
+    text_config: Option<Box<HuggingFaceModelConfig>>,
 }
 
 pub fn read_model_config_metadata(path: impl AsRef<Path>) -> Result<ModelConfigMetadata> {
@@ -69,28 +79,39 @@ pub fn read_model_config_metadata(path: impl AsRef<Path>) -> Result<ModelConfigM
 
 pub fn model_config_metadata_from_json_str(json: &str) -> Result<ModelConfigMetadata> {
     let config: HuggingFaceModelConfig = serde_json::from_str(json)?;
+    // Architecture detection uses the TOP-level model_type/architectures (e.g.
+    // "gemma3" / "Gemma3ForConditionalGeneration" for the multimodal wrapper).
     let architecture_type = config
         .model_type
         .as_deref()
         .or_else(|| config.architectures.as_ref()?.first().map(String::as_str))
         .map(normalize_architecture_type);
+    // Multimodal checkpoints nest the language-model architecture under
+    // `text_config`; read dimensions/params from there when present.
+    let dims: &HuggingFaceModelConfig = config.text_config.as_deref().unwrap_or(&config);
 
     Ok(ModelConfigMetadata {
         architecture_type,
-        num_hidden_layers: config.num_hidden_layers,
-        hidden_size: config.hidden_size,
-        intermediate_size: config.intermediate_size,
-        num_attention_heads: config.num_attention_heads,
-        max_position_embeddings: config.max_position_embeddings,
-        rotary_pct: config.rotary_pct,
-        rotary_emb_base: config.rotary_emb_base,
-        layer_norm_eps: config.layer_norm_eps,
-        use_parallel_residual: config.use_parallel_residual,
-        vocab_size: config.vocab_size,
-        rms_norm_eps: config.rms_norm_eps,
-        num_key_value_heads: config.num_key_value_heads,
-        rope_theta: config.rope_theta,
-        tie_word_embeddings: config.tie_word_embeddings,
+        num_hidden_layers: dims.num_hidden_layers,
+        hidden_size: dims.hidden_size,
+        intermediate_size: dims.intermediate_size,
+        num_attention_heads: dims.num_attention_heads,
+        max_position_embeddings: dims.max_position_embeddings,
+        rotary_pct: dims.rotary_pct,
+        rotary_emb_base: dims.rotary_emb_base,
+        layer_norm_eps: dims.layer_norm_eps,
+        use_parallel_residual: dims.use_parallel_residual,
+        vocab_size: dims.vocab_size,
+        rms_norm_eps: dims.rms_norm_eps,
+        num_key_value_heads: dims.num_key_value_heads,
+        rope_theta: dims.rope_theta,
+        tie_word_embeddings: dims.tie_word_embeddings.or(config.tie_word_embeddings),
+        head_dim: dims.head_dim,
+        query_pre_attn_scalar: dims.query_pre_attn_scalar,
+        sliding_window: dims.sliding_window,
+        sliding_window_pattern: dims.sliding_window_pattern,
+        rope_local_base_freq: dims.rope_local_base_freq,
+        hidden_activation: dims.hidden_activation.clone(),
     })
 }
 
@@ -100,6 +121,13 @@ fn normalize_architecture_type(value: &str) -> String {
         "gpt_neox".to_string()
     } else if normalized == "llamaforcausallm" || normalized.contains("llama") {
         "llama".to_string()
+    } else if normalized.contains("gemma3") {
+        // "gemma3", "gemma3_text", "gemma3forconditionalgeneration"
+        "gemma3".to_string()
+    } else if normalized.contains("gemma2") {
+        "gemma2".to_string()
+    } else if normalized.contains("gemma") {
+        "gemma".to_string()
     } else {
         normalized
     }
@@ -435,5 +463,31 @@ mod tests {
             .read_tensor("language_model.model.norm.weight")
             .expect("final norm bytes");
         assert_eq!(data.len(), 2560 * 2, "bf16 final norm = hidden*2 bytes");
+    }
+
+    /// Parse the real multimodal Gemma 3 config.json: architecture from the top,
+    /// dimensions + Gemma fields from `text_config`. Ignored (needs the download).
+    #[test]
+    #[ignore]
+    fn parses_real_gemma3_multimodal_config() {
+        let json = std::fs::read_to_string("../../models/gemma-3-4b-it/config.json")
+            .expect("read gemma config");
+        let m = model_config_metadata_from_json_str(&json).expect("parse config");
+        assert_eq!(m.architecture_type.as_deref(), Some("gemma3"));
+        // dims come from text_config (NOT the multimodal top level)
+        assert_eq!(m.hidden_size, Some(2560));
+        assert_eq!(m.num_hidden_layers, Some(34));
+        assert_eq!(m.num_attention_heads, Some(8));
+        assert_eq!(m.num_key_value_heads, Some(4));
+        assert_eq!(m.head_dim, Some(256)); // explicit, != 2560/8
+        assert_eq!(m.intermediate_size, Some(10240));
+        assert_eq!(m.vocab_size, Some(262208));
+        assert_eq!(m.hidden_activation.as_deref(), Some("gelu_pytorch_tanh"));
+        assert_eq!(m.sliding_window, Some(1024));
+        assert_eq!(m.sliding_window_pattern, Some(6));
+        assert_eq!(m.rope_theta, Some(1_000_000.0));
+        assert_eq!(m.rope_local_base_freq, Some(10_000.0));
+        assert_eq!(m.query_pre_attn_scalar, Some(256.0));
+        assert_eq!(m.rms_norm_eps, Some(1e-6));
     }
 }
