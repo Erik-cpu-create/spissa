@@ -1139,6 +1139,132 @@ fn accumulate_q8_0_chunk_int8_batch1_rowmajor(
     })
 }
 
+/// R133: int8×int8 sdot GEMV over a contiguous row range of a whole Q8_0 tensor.
+/// `out_slice` is the output for rows `[base_row, base_row + out_slice.len())`;
+/// `q8_bytes` is the WHOLE tensor (row-major, `blocks_per_row` 32-blocks per row);
+/// `act_i8`/`act_scales` are the activation quantized ONCE by the caller. 4-row
+/// ILP via `batch1_x4_ilp` on dotprod CPUs, per-row `i8_dot32` remainder/fallback.
+fn sdot_int8_batch1_rows_range(
+    out_slice: &mut [f32],
+    q8_bytes: &[u8],
+    act_i8: &[i8],
+    act_scales: &[f32],
+    base_row: usize,
+    blocks_per_row: usize,
+) {
+    let n = out_slice.len();
+    let mut r = 0usize;
+    #[cfg(target_arch = "aarch64")]
+    {
+        if q8_sdot_available() {
+            while r + 4 <= n {
+                let row_base = (base_row + r) * blocks_per_row * 34;
+                // SAFETY: q8_sdot_available() verified dotprod.
+                let acc = unsafe { batch1_x4_ilp(q8_bytes, row_base, act_i8, act_scales, blocks_per_row) };
+                out_slice[r] += acc[0];
+                out_slice[r + 1] += acc[1];
+                out_slice[r + 2] += acc[2];
+                out_slice[r + 3] += acc[3];
+                r += 4;
+            }
+        }
+    }
+    while r < n {
+        let row_base = (base_row + r) * blocks_per_row * 34;
+        let mut acc = 0.0f32;
+        for b in 0..blocks_per_row {
+            let off = row_base + b * 34;
+            let w_scale = q8_0_block_scale(q8_bytes, off);
+            let wq = &q8_bytes[off + 2..off + 34];
+            let a_seg: &[i8; 32] = act_i8[b * 32..b * 32 + 32]
+                .try_into()
+                .expect("32-element activation segment");
+            acc += w_scale * act_scales[b] * i8_dot32(wq, a_seg) as f32;
+        }
+        out_slice[r] += acc;
+        r += 1;
+    }
+}
+
+/// R133 decode fast-path: int8 sdot GEMV over a WHOLE contiguous Q8_0 tensor
+/// (batch=1), parallel across output rows. The activation is quantized to int8
+/// ONCE (ggml-style: quantize-once → parallel rows), then each worker owns a
+/// disjoint output-row range. Replaces the per-chunk dispatch + scalar i8×f32
+/// path for raw-codec q8 decode. Near-exact (int8 activation, quant-only diff —
+/// same as llama.cpp q8 inference). `q8_bytes` MUST be the full row-major tensor.
+pub(crate) fn accumulate_q8_0_full_tensor_int8_batch1(
+    input: &[f32],
+    output: &mut [f32],
+    q8_bytes: &[u8],
+    config: StreamingLinearConfig,
+) -> Result<()> {
+    let in_features = config.in_features;
+    let out_features = config.out_features;
+    if config.batch != 1 || !in_features.is_multiple_of(32) || in_features == 0 {
+        return Err(RuntimeError::Shape(
+            "q8 full-tensor fast-path requires batch=1 and in_features%32==0".to_string(),
+        ));
+    }
+    let blocks_per_row = in_features / 32;
+    let expected_bytes = out_features
+        .checked_mul(blocks_per_row)
+        .and_then(|blocks| blocks.checked_mul(34))
+        .ok_or_else(|| RuntimeError::Shape("q8 full-tensor size overflow".to_string()))?;
+    if q8_bytes.len() != expected_bytes {
+        return Err(RuntimeError::Shape(format!(
+            "q8 full-tensor byte len {} != expected {expected_bytes} (out={out_features}, bpr={blocks_per_row})",
+            q8_bytes.len()
+        )));
+    }
+    if output.len() != out_features {
+        return Err(RuntimeError::Shape(format!(
+            "q8 full-tensor output len {} != out_features {out_features}",
+            output.len()
+        )));
+    }
+
+    // Quantize the activation row to int8 ONCE for the whole matmul.
+    let (act_i8, act_scales) = quantize_input_q8_blocks(input, 1, in_features);
+
+    let threads = effective_runtime_threads(
+        std::env::var(RLLM_THREADS_ENV).ok().as_deref(),
+        available_runtime_threads(),
+    );
+    if threads <= 1 || out_features < 2 * MIN_ROWS_PER_PARALLEL_Q8_PREFILL {
+        sdot_int8_batch1_rows_range(output, q8_bytes, &act_i8, &act_scales, 0, blocks_per_row);
+        return Ok(());
+    }
+
+    let workers = threads
+        .min(out_features / MIN_ROWS_PER_PARALLEL_Q8_PREFILL)
+        .max(1);
+    let rows_per_worker = out_features.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let act_i8 = &act_i8;
+        let act_scales = &act_scales;
+        let mut rest = &mut output[..];
+        let mut base_row = 0usize;
+        while base_row < out_features {
+            let rows = rows_per_worker.min(out_features - base_row);
+            let (chunk, tail) = rest.split_at_mut(rows);
+            rest = tail;
+            let worker_base = base_row;
+            scope.spawn(move || {
+                sdot_int8_batch1_rows_range(
+                    chunk,
+                    q8_bytes,
+                    act_i8,
+                    act_scales,
+                    worker_base,
+                    blocks_per_row,
+                );
+            });
+            base_row += rows;
+        }
+    });
+    Ok(())
+}
+
 fn accumulate_q8_0_chunk_int8_activation(
     input: &[f32],
     output: &mut [f32],

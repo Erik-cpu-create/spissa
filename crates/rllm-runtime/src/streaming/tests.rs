@@ -253,6 +253,50 @@ mod tests {
     }
 
     #[test]
+    fn r133_full_tensor_int8_batch1_matches_per_row_reference() {
+        // R133 decode fast-path: whole-tensor int8 sdot, row-parallel. out_features=10
+        // (>= 2*MIN_ROWS_PER_PARALLEL_Q8_PREFILL=8 → exercises the parallel split;
+        // 10 % 4 == 2 → exercises x4 ILP + remainder). Must be bit-identical to the
+        // per-row int8 reference (the activation is quantized once either way).
+        let in_features = 64usize; // 2 blocks/row
+        let out_features = 10usize;
+        let blocks_per_row = in_features / 32;
+
+        let mut q8: Vec<u8> = Vec::new();
+        for idx in 0..(out_features * blocks_per_row) {
+            let scale_bits = 0x2400u16 + (idx as u16 % 256);
+            q8.extend_from_slice(&scale_bits.to_le_bytes());
+            for k in 0..32usize {
+                q8.push((((idx * 11 + k * 7) % 251) as i32 - 125) as i8 as u8);
+            }
+        }
+        let input: Vec<f32> = (0..in_features).map(|i| (i as f32 * 0.09 - 1.1).cos()).collect();
+        let config = StreamingLinearConfig { batch: 1, in_features, out_features };
+
+        let mut got = vec![0.0f32; out_features];
+        accumulate_q8_0_full_tensor_int8_batch1(&input, &mut got, &q8, config).unwrap();
+
+        // Per-row int8 reference (same activation quant, same block order).
+        let (act_i8, act_scales) = quantize_input_q8_blocks(&input, 1, in_features);
+        let mut want = vec![0.0f32; out_features];
+        for (row, slot) in want.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for blk in 0..blocks_per_row {
+                let off = (row * blocks_per_row + blk) * 34;
+                let scale = q8_0_block_scale(&q8, off);
+                let a_seg: &[i8; 32] = act_i8[blk * 32..blk * 32 + 32].try_into().unwrap();
+                acc += scale * act_scales[blk] * i8_dot32(&q8[off + 2..off + 34], a_seg) as f32;
+            }
+            *slot = acc;
+        }
+        assert_eq!(got, want, "R133 full-tensor int8 batch1 must match the per-row reference");
+
+        // Wrong byte length must be rejected (guards the contiguity contract).
+        let mut short = vec![0.0f32; out_features];
+        assert!(accumulate_q8_0_full_tensor_int8_batch1(&input, &mut short, &q8[..q8.len() - 34], config).is_err());
+    }
+
+    #[test]
     fn streaming_linear_matches_full_decode_linear_across_chunk_boundary() {
         let path = temp_path("linear");
         write_chunked_weight(&path);

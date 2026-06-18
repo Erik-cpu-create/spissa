@@ -136,6 +136,28 @@ impl RllmReader {
         Ok(self.read_chunk_slice(chunk_id)?.to_vec())
     }
 
+    /// Read an arbitrary file span as a zero-copy mmap slice. Used by the q8
+    /// decode fast-path to view a whole tensor's contiguous raw chunks as one
+    /// slice (skipping per-chunk dispatch).
+    pub fn read_span(&self, offset: u64, len: u64) -> Result<&[u8]> {
+        let offset = offset as usize;
+        let end = offset
+            .checked_add(len as usize)
+            .ok_or(ContainerError::InvalidRange {
+                context: "read_span".to_string(),
+                offset: offset as u64,
+                len,
+                size: self.mmap.len() as u64,
+            })?;
+        if end > self.mmap.len() {
+            return Err(ContainerError::TruncatedFile {
+                expected: end as u64,
+                actual: self.mmap.len() as u64,
+            });
+        }
+        Ok(&self.mmap[offset..end])
+    }
+
     /// Read a byte range from a chunk's compressed payload as a zero-copy slice.
     pub fn read_chunk_range_slice(
         &self,

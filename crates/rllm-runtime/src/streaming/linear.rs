@@ -405,6 +405,23 @@ pub fn streaming_tile_linear_from_model(
         }
     }
 
+    // R133 decode fast-path: raw-codec Q8_0 + batch=1 (gated on RLLM_Q8_ACTIVATION).
+    // View the whole tensor as one contiguous mmap slice and run int8 sdot
+    // row-parallel — bypassing the per-chunk dispatch + scalar i8×f32 path.
+    // Falls through to the per-chunk path if the tensor isn't contiguous-raw.
+    if tensor.dtype == rllm_container::DType::Q8_0
+        && config.linear.batch == 1
+        && q8_activation_path_enabled()
+    {
+        let lin = config.linear;
+        let handled = model.with_raw_tensor(tensor.tensor_id, |q8_bytes| {
+            accumulate_q8_0_full_tensor_int8_batch1(input, &mut output, q8_bytes, lin)
+        })?;
+        if handled.is_some() {
+            return Ok(output);
+        }
+    }
+
     let dtype_size = tensor.dtype.size_bytes();
     let mut byte_offset = 0usize;
     for chunk in chunks {
