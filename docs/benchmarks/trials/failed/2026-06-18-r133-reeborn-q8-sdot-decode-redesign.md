@@ -2,8 +2,8 @@
 
 Date: 2026-06-18
 Owner: RLLM
-Status: running
-Folder: active
+Status: rejected (no decode speedup — decode is memory-bound, not compute-bound)
+Folder: failed
 
 ## Hypothesis
 
@@ -55,27 +55,39 @@ batch>1 prefill. Default behavior (env unset) unchanged.
   bit-identical to the per-row int8 reference (incl. non-÷4 rows + parallel
   split). Quant-only diff vs the f32-exact path (inherent to int8 activations,
   same as llama.cpp).
-- **Decode speed: PENDING a cool machine.** This session is thermally saturated
-  (step-0 prefill drifted 22s→30s across the session); A/B warm decode step was
-  ~5.4s (fast-path) vs ~6.0s (scalar) — WITHIN thermal noise, no trustworthy
-  speedup/regression claim. Must be re-measured cool, warm-iteration, best-of-N
-  (cf. arXiv 2603.23640 methodology).
+- **Decode speed (COOL machine, warm, steady-state, 12-token A/B): NO SPEEDUP.**
+  scalar avg ~5.87s/token (steps 1–11) vs fast-path avg ~5.74s/token (steps 2–11;
+  step 1 = 14s cold-cache outlier). Overall 0.12 tok/s both. `RLLM_THREADS=8` made
+  no difference (~5.77s). Per-step instrumentation: the 7 projections = **99.8%**
+  of the layer-loop time, and the run is mostly user-CPU-time (20s user / 4s system)
+  — yet the matmul runs at **~0.56 GMAC/s = identical to scalar**, with 8 cores
+  giving nothing.
 - **Tests:** full runtime suite green (280 passed, 1 ignored).
 
 ## Analysis
 
-The fast-path is correct by construction (mirrors ggml's quantize-once →
-contiguous → row-parallel sdot) and verified to engage + preserve output. It
-collapses per-token weight dispatch from ~3366 `with_raw_chunk` calls to ~238
-contiguous-tensor calls and replaces scalar i8×f32 with int8 sdot. Whether this
-translates to the expected decode speedup is unconfirmed because the machine is
-thermally throttled — the relative A/B is inside noise. The lossless/streaming
-differentiator is intact (chunk path kept; fast-path is opt-in, default unchanged).
+The fast-path is correct, engages, and preserves output — but it does NOT speed up
+decode, because **decode is memory-bound, not compute-bound.** Batch=1 decode has
+arithmetic intensity 1 (each weight byte is used once), so the sdot/i8mm kernel and
+8-core parallelism cannot help — 8 cores all stall waiting on the weight stream.
+(Prefill got 1.6× from the same int8/i8mm precisely because batch>1 reuses each
+weight byte → compute-bound.) This OVERTURNS the earlier "compute-bound / scalar
+dot is the bottleneck" conclusion (which was thermally confounded). The ~0.56 GB/s
+effective weight-read rate is ~90× below RAM bandwidth and far below llama.cpp on
+the same weights/RAM — the prime suspect is residency: RLLM's working set (4.75 GB
+q8 model + a **2.68 GB f32-decoded embedding** held resident for the tied LM head)
+likely evicts the q8 weights, forcing slow re-reads, whereas llama.cpp keeps the
+embedding quantized and fits. The lossless/streaming differentiator is intact
+(chunk path kept; fast-path opt-in; default unchanged), and the fast-path code is
+retained behind `RLLM_Q8_ACTIVATION=1` (harmless; may help once decode is no longer
+memory-bound).
 
 ## Decision
 
-needs follow-up
+failed (useful negative)
 
-Reason: implementation + parity + engagement done; the decode tok/s claim is
-blocked on a cool-machine measurement. Re-measure warm-iteration best-of-N on a
-cool device, then move to success (if materially faster) or failed/inconclusive.
+The compute lever does not move decode. Value: definitively re-classifies decode as
+**memory-bound** (8-core sdot ≡ scalar), correcting the thermal-confounded
+"compute-bound" read. Next lever shifts to the memory/residency axis — first kill
+the 2.68 GB f32 embedding residency (keep it q8/bf16 + dequant-on-the-fly for lookup
++ LM head) so the q8 weights stay resident, then re-measure decode.
