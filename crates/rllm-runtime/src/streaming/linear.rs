@@ -469,10 +469,14 @@ pub fn streaming_tile_linear_from_model(
                 )
             })?;
         } else if tensor.dtype == rllm_container::DType::Q8_0 {
-            model.with_decoded_chunk(chunk.chunk_id, budget, |quantized_bytes, _budget| {
+            // R126: raw (identity-codec) chunks already hold the final q8 bytes, so
+            // read them zero-copy from the mmap instead of paying a per-call
+            // `.to_vec()` decode (which re-copies ~the whole model every token on
+            // the decode path). Bytes are identical; compressed codecs still decode.
+            let kernel = |quantized_bytes: &[u8], _budget: &mut MemoryBudget| -> Result<()> {
                 if quantized_bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
-                        "chunk {} decoded byte len {} does not match metadata {}",
+                        "chunk {} byte len {} does not match metadata {}",
                         chunk.chunk_id,
                         quantized_bytes.len(),
                         expected_chunk_bytes
@@ -486,7 +490,12 @@ pub fn streaming_tile_linear_from_model(
                     config.linear,
                     weight_name,
                 )
-            })?;
+            };
+            if chunk.codec_id == "rtc-raw-v1" {
+                model.with_raw_chunk(chunk.chunk_id, budget, kernel)?;
+            } else {
+                model.with_decoded_chunk(chunk.chunk_id, budget, kernel)?;
+            }
         } else if tensor.dtype.is_quantized() {
             model.with_decoded_chunk(chunk.chunk_id, budget, |quantized_bytes, budget| {
                 if quantized_bytes.len() != expected_chunk_bytes {
@@ -722,10 +731,11 @@ pub fn streaming_tile_linear_multiply_into_from_model(
                 )
             })?;
         } else if tensor.dtype == rllm_container::DType::Q8_0 {
-            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+            // R126: zero-copy raw q8 bytes (skip per-call .to_vec()).
+            let kernel = |bytes: &[u8], _budget: &mut MemoryBudget| -> Result<()> {
                 if bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
-                        "chunk {} decoded byte len {} does not match metadata {}",
+                        "chunk {} byte len {} does not match metadata {}",
                         chunk.chunk_id,
                         bytes.len(),
                         expected_chunk_bytes
@@ -739,7 +749,12 @@ pub fn streaming_tile_linear_multiply_into_from_model(
                     &mut state,
                     weight_name,
                 )
-            })?;
+            };
+            if chunk.codec_id == "rtc-raw-v1" {
+                model.with_raw_chunk(chunk.chunk_id, budget, kernel)?;
+            } else {
+                model.with_decoded_chunk(chunk.chunk_id, budget, kernel)?;
+            }
         } else if tensor.dtype.is_quantized() {
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
                 if bytes.len() != expected_chunk_bytes {
@@ -914,10 +929,11 @@ fn try_panel_multiply_into_up(
         })?;
         let up_ref = &mut up;
         let mut paneled = false;
-        model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+        // R126: zero-copy raw q8 bytes (skip per-call .to_vec()).
+        let kernel = |bytes: &[u8], _budget: &mut MemoryBudget| -> Result<()> {
             if bytes.len() != expected_chunk_bytes {
                 return Err(RuntimeError::InvalidTensorData(format!(
-                    "chunk {} decoded byte len {} does not match metadata {}",
+                    "chunk {} byte len {} does not match metadata {}",
                     chunk.chunk_id,
                     bytes.len(),
                     expected_chunk_bytes
@@ -925,7 +941,12 @@ fn try_panel_multiply_into_up(
             }
             paneled = accumulate_q8_0_chunk_panel_smmla(input, up_ref, bytes, element_start, config)?;
             Ok(())
-        })?;
+        };
+        if chunk.codec_id == "rtc-raw-v1" {
+            model.with_raw_chunk(chunk.chunk_id, budget, kernel)?;
+        } else {
+            model.with_decoded_chunk(chunk.chunk_id, budget, kernel)?;
+        }
         if !paneled {
             all_paneled = false;
             break;
@@ -2782,10 +2803,11 @@ pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
                 )
             })?;
         } else if tensor.dtype == rllm_container::DType::Q8_0 {
-            model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+            // R126: zero-copy raw q8 bytes for lm_head (skip per-call .to_vec()).
+            let kernel = |bytes: &[u8], _budget: &mut MemoryBudget| -> Result<()> {
                 if bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
-                        "chunk {} decoded byte len {} does not match metadata {}",
+                        "chunk {} byte len {} does not match metadata {}",
                         chunk.chunk_id,
                         bytes.len(),
                         expected_chunk_bytes
@@ -2799,7 +2821,12 @@ pub(crate) fn streaming_tile_linear_argmax_with_rolling_from_model(
                     &mut state,
                     weight_name,
                 )
-            })?;
+            };
+            if chunk.codec_id == "rtc-raw-v1" {
+                model.with_raw_chunk(chunk.chunk_id, budget, kernel)?;
+            } else {
+                model.with_decoded_chunk(chunk.chunk_id, budget, kernel)?;
+            }
         } else if tensor.dtype.is_quantized() {
             model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, budget| {
                 if bytes.len() != expected_chunk_bytes {
