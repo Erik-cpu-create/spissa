@@ -199,6 +199,60 @@ mod tests {
     }
 
     #[test]
+    fn int8_batch1_rowmajor_terminates_on_non_multiple_of_4_rows() {
+        // Regression: the x4 sdot loop leaves `r` at the largest multiple of 4
+        // <= n_rows; the per-row remainder loop must advance `r` or it spins
+        // forever. out_features=5 (5 % 4 == 1) forces the remainder path. Without
+        // the `r += 1` fix in accumulate_q8_0_chunk_int8_batch1_rowmajor this test
+        // hangs (real-world repro: Gemma q_proj's 385-row chunk).
+        let in_features = 64usize; // 2 blocks/row
+        let out_features = 5usize; // not a multiple of 4
+        let blocks_per_row = in_features / 32;
+        let q8_block_count = out_features * blocks_per_row;
+
+        let mut q8: Vec<u8> = Vec::new();
+        for idx in 0..q8_block_count {
+            let scale_bits = 0x2400u16 + (idx as u16 % 256);
+            q8.extend_from_slice(&scale_bits.to_le_bytes());
+            for k in 0..32usize {
+                q8.push((((idx * 7 + k * 5) % 251) as i32 - 125) as i8 as u8);
+            }
+        }
+        let input: Vec<f32> = (0..in_features).map(|i| (i as f32 * 0.07 - 0.9).sin()).collect();
+        let config = StreamingLinearConfig { batch: 1, in_features, out_features };
+        let weight_elements = out_features * in_features;
+
+        let mut got = vec![0.0f32; out_features];
+        accumulate_q8_0_chunk_int8_batch1_rowmajor(
+            &input,
+            &mut got,
+            &q8,
+            0,
+            config,
+            weight_elements,
+            blocks_per_row,
+            q8_block_count,
+        )
+        .unwrap();
+
+        // Reference: identical int8-activation math, every row via the per-row
+        // dispatcher (the path the x4 loop's remainder also uses).
+        let (act_i8, act_scales) = quantize_input_q8_blocks(&input, 1, in_features);
+        let mut want = vec![0.0f32; out_features];
+        for (row, slot) in want.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for blk in 0..blocks_per_row {
+                let off = (row * blocks_per_row + blk) * 34;
+                let scale = q8_0_block_scale(&q8, off);
+                let a_seg: &[i8; 32] = act_i8[blk * 32..blk * 32 + 32].try_into().unwrap();
+                acc += scale * act_scales[blk] * i8_dot32(&q8[off + 2..off + 34], a_seg) as f32;
+            }
+            *slot = acc;
+        }
+        assert_eq!(got, want, "int8 batch1 rowmajor must terminate and match the per-row reference");
+    }
+
+    #[test]
     fn streaming_linear_matches_full_decode_linear_across_chunk_boundary() {
         let path = temp_path("linear");
         write_chunked_weight(&path);
