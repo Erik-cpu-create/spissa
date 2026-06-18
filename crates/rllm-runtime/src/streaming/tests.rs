@@ -156,6 +156,49 @@ mod tests {
     }
 
     #[test]
+    fn r132_parallel_batch1_q8_rows_match_serial_bit_for_bit() {
+        // in_features=64 → 2 blocks/row; out_features=20 > 2*MIN_ROWS_PER_PARALLEL_Q8_PREFILL
+        // so the parallel split engages on multi-core hosts.
+        let in_features = 64usize;
+        let out_features = 20usize;
+        let blocks_per_row = in_features / 32;
+
+        // Deterministic row-aligned Q8_0 chunk: per block = 2-byte fp16 scale + 32 int8.
+        let mut q8: Vec<u8> = Vec::new();
+        for idx in 0..(out_features * blocks_per_row) {
+            let scale_bits = 0x2400u16 + (idx as u16 % 256); // small positive fp16
+            q8.extend_from_slice(&scale_bits.to_le_bytes());
+            for k in 0..32usize {
+                let v = (((idx * 13 + k * 3) % 251) as i32 - 125) as i8;
+                q8.push(v as u8);
+            }
+        }
+        let input: Vec<f32> = (0..in_features).map(|i| (i as f32 * 0.05 - 1.3).cos()).collect();
+        let config = StreamingLinearConfig { batch: 1, in_features, out_features };
+
+        // Path under test: integrated complete-rows kernel (parallel split inside).
+        let mut got = vec![0.0f32; out_features];
+        let handled =
+            accumulate_q8_0_chunk_batch1_complete_rows(&input, &mut got, &q8, 0, config, "w")
+                .unwrap();
+        assert!(handled, "complete-rows path must fire for a row-aligned chunk");
+
+        // Independent serial reference (same per-row block-order accumulation).
+        let mut want = vec![0.0f32; out_features];
+        for (row, slot) in want.iter_mut().enumerate() {
+            let mut acc = 0.0f32;
+            for blk in 0..blocks_per_row {
+                let off = (row * blocks_per_row + blk) * 34;
+                let scale = q8_0_block_scale(&q8, off);
+                acc += scale * q8_0_dot_i8_f32(&q8[off + 2..off + 34], &input[blk * 32..], 32);
+            }
+            *slot = acc;
+        }
+
+        assert_eq!(got, want, "R132 parallel batch1 Q8 GEMV must be bit-identical to serial");
+    }
+
+    #[test]
     fn streaming_linear_matches_full_decode_linear_across_chunk_boundary() {
         let path = temp_path("linear");
         write_chunked_weight(&path);
