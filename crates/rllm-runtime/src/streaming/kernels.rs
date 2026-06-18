@@ -414,12 +414,30 @@ thread_local! {
 
 fn q8_act_fingerprint(input: &[f32]) -> u64 {
     let n = input.len();
-    let sample = |i: usize| input[i].to_bits() as u64;
-    sample(0).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ sample(n / 3).rotate_left(17)
-        ^ sample(2 * n / 3).rotate_left(31)
-        ^ sample(n - 1).rotate_left(47)
-        ^ (n as u64)
+    if n == 0 {
+        return 0;
+    }
+    // Sample up to 64 points spread evenly across the buffer (vs the original 4)
+    // and fold them with a per-index FNV-style mix. The cache is keyed by this
+    // fingerprint, so on the decode path — where the same activation buffer
+    // address is reused across tokens — a richer sample makes a stale-cache
+    // collision (two distinct activations matching at every sampled index)
+    // astronomically unlikely. Cost is O(64), amortized across the matmul.
+    let samples = n.min(64);
+    let mut h = 0xcbf2_9ce4_8422_2325u64 ^ (n as u64);
+    for s in 0..samples {
+        let i = if samples == 1 {
+            0
+        } else {
+            (s * (n - 1)) / (samples - 1)
+        };
+        let v = input[i].to_bits() as u64;
+        h ^= v
+            .wrapping_add(0x9E37_79B9_7F4A_7C15)
+            .rotate_left((s as u32 * 7 + 13) & 63);
+        h = h.wrapping_mul(0x0000_0001_0000_01B3);
+    }
+    h
 }
 
 /// Cache the quantized + panel-packed activation by (ptr, len, shape, content
@@ -931,7 +949,10 @@ fn accumulate_q8_0_chunk_panel_smmla(
 /// path (`output[row][out_feature] += ...`) but uses int8×int8 dot with per-row
 /// per-segment activation quantization. Boundary/partial blocks fall back to the
 /// exact f32 reecast dot.
-fn accumulate_q8_0_chunk_int8_activation(
+/// Exact per-segment int8-activation path (pre-R127). Used when `in_features` is
+/// not a multiple of 32, where the block-quantization cache layout does not apply.
+/// Re-quantizes each input segment per output row.
+fn accumulate_q8_0_chunk_int8_activation_uncached(
     input: &[f32],
     output: &mut [f32],
     q8_bytes: &[u8],
@@ -972,6 +993,83 @@ fn accumulate_q8_0_chunk_int8_activation(
         }
     }
     Ok(())
+}
+
+fn accumulate_q8_0_chunk_int8_activation(
+    input: &[f32],
+    output: &mut [f32],
+    q8_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    weight_elements: usize,
+) -> Result<()> {
+    // R127: the block-cache (`quantize_input_q8_blocks`) only quantizes the first
+    // `blocks_per_row * 32` elements of each row. When `in_features` is NOT a
+    // multiple of 32, `in_feature` can be non-32-aligned and the fast-path segment
+    // can run past the cached region, so the cache layout would be wrong. Real
+    // transformer dims are always multiples of 32; the non-aligned case falls back
+    // to the exact per-segment path.
+    if !config.in_features.is_multiple_of(32) {
+        return accumulate_q8_0_chunk_int8_activation_uncached(
+            input,
+            output,
+            q8_bytes,
+            element_start,
+            config,
+            weight_elements,
+        );
+    }
+    let q8_block_count = q8_bytes.len() / 34;
+    let blocks_per_row = config.in_features / 32;
+    // R127: quantize the activation ONCE per matmul (cached thread-local by
+    // pointer+fingerprint), then look the per-(row,block) int8 segment + scale up
+    // in the inner loop instead of re-quantizing `input` for every output row.
+    // `quantize_input_q8_blocks` uses the identical absmax/round/clamp as
+    // `quantize_seg32_i8`, so the result is bit-for-bit unchanged. The previous
+    // code re-quantized each input segment `out_features` times per chunk; for
+    // batch=1 decode (gate: 8192 output rows) that was an 8192x redundancy.
+    with_q8_panel_activations(input, config.batch, config.in_features, |act_i8, _panel, act_scales| {
+        for block_idx in 0..q8_block_count {
+            let block_global_start = element_start + block_idx * 32;
+            if block_global_start >= weight_elements {
+                break;
+            }
+            let block_offset = block_idx * 34;
+            let w_scale = q8_0_block_scale(q8_bytes, block_offset);
+            let wq = &q8_bytes[block_offset + 2..block_offset + 34];
+            let block_len = (weight_elements - block_global_start).min(32);
+            let out_feature = block_global_start / config.in_features;
+            let in_feature = block_global_start % config.in_features;
+
+            if block_len == 32 && in_feature + 32 <= config.in_features {
+                let block_in_row = in_feature / 32;
+                for row in 0..config.batch {
+                    let seg_start = row * config.in_features + in_feature;
+                    // SAFETY of unwrap: in_feature + 32 <= in_features guarantees
+                    // seg_start + 32 <= (row + 1) * in_features <= act_i8.len().
+                    let aq: &[i8; 32] = act_i8[seg_start..seg_start + 32]
+                        .try_into()
+                        .expect("32-element activation segment");
+                    let a_scale = act_scales[row * blocks_per_row + block_in_row];
+                    let dot = i8_dot32(wq, aq);
+                    output[row * config.out_features + out_feature] +=
+                        w_scale * a_scale * dot as f32;
+                }
+            } else {
+                // Partial / boundary block: exact f32 path on the raw input.
+                let scaled = q8_0_scaled_block_reecast(wq, w_scale);
+                for row in 0..config.batch {
+                    let input_start = row * config.in_features + in_feature;
+                    let mut acc = 0.0f32;
+                    for k in 0..block_len {
+                        acc += scaled[k] * input[input_start + k];
+                    }
+                    output[row * config.out_features + out_feature] += acc;
+                }
+            }
+        }
+        Ok::<(), RuntimeError>(())
+    })
 }
 
 /// Minimum batch rows per worker before the Q8 prefill matmul is parallelized.
