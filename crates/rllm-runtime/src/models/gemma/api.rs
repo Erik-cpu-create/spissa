@@ -2,6 +2,7 @@ use crate::models::gemma::generate::{streaming_gemma_transformer_block, GemmaBlo
 use crate::models::gemma::model::*;
 use crate::rotary::KvCache;
 use crate::{
+    lm_head_logits_parallel,
     ops::{embedding_lookup, rms_norm, sample_argmax, sample_top_p},
     LazyRllmModel, MemoryBudget, Result, RuntimeError, StreamingSamplingConfig,
 };
@@ -243,7 +244,9 @@ pub fn gemma_generate_from_model(
         hidden_states = rms_norm(&hidden_states, &prepared.final_layernorm, seq_len, hidden, build.rms_norm_eps)?;
 
         let last_hidden = &hidden_states[(seq_len - 1) * hidden..];
-        let logits = lm_head_logits(last_hidden, &embedding, vocab_size, hidden);
+        // R131: parallel LM-head GEMV over the 262k-row vocabulary (bit-identical
+        // to the previous scalar loop, but spread across all available cores).
+        let logits = lm_head_logits_parallel(last_hidden, &embedding, vocab_size, hidden);
 
         let next_token = match build.sampling {
             StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
@@ -271,15 +274,3 @@ pub fn gemma_generate_from_model(
     })
 }
 
-fn lm_head_logits(last_hidden: &[f32], weight: &[f32], vocab_size: usize, hidden: usize) -> Vec<f32> {
-    let mut logits = vec![0.0f32; vocab_size];
-    for (v, logit) in logits.iter_mut().enumerate() {
-        let row = &weight[v * hidden..v * hidden + hidden];
-        let mut sum = 0.0f32;
-        for (h, w) in row.iter().enumerate() {
-            sum += last_hidden[h] * *w;
-        }
-        *logit = sum;
-    }
-    logits
-}

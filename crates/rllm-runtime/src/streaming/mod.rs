@@ -81,6 +81,63 @@ fn parse_sparse_parallel_enabled(value: Option<&str>) -> bool {
     )
 }
 
+/// R131: LM-head logits GEMV `logits[v] = Σ_h last_hidden[h] · weight[v, h]`,
+/// parallelized over the vocabulary rows.
+///
+/// The LM head over a large vocabulary (Gemma 3 = 262k) is a dense matrix–vector
+/// product recomputed every decode step; the previous adapter loop ran it on a
+/// single thread while the q8 transformer kernels already use all cores. Each
+/// logit is an independent dot product, so splitting the vocab rows across
+/// workers is embarrassingly parallel and **bit-identical** to the serial path:
+/// every output keeps the same scalar accumulation order, only the row range a
+/// thread owns changes. Honors `RLLM_THREADS`; falls back to serial for tiny
+/// vocabularies or a single available core.
+pub fn lm_head_logits_parallel(
+    last_hidden: &[f32],
+    weight: &[f32],
+    vocab_size: usize,
+    hidden: usize,
+) -> Vec<f32> {
+    let mut logits = vec![0.0f32; vocab_size];
+    let threads = effective_runtime_threads(
+        std::env::var(RLLM_THREADS_ENV).ok().as_deref(),
+        available_runtime_threads(),
+    );
+    if threads <= 1 || vocab_size < 2 * MIN_ROWS_PER_PARALLEL_ARGMAX {
+        lm_head_logits_rows(last_hidden, weight, hidden, &mut logits);
+        return logits;
+    }
+    let workers = threads.min(vocab_size / MIN_ROWS_PER_PARALLEL_ARGMAX).max(1);
+    let rows_per_worker = vocab_size.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut out_rest = &mut logits[..];
+        let mut row_start = 0usize;
+        while row_start < vocab_size {
+            let rows = rows_per_worker.min(vocab_size - row_start);
+            let (out_slice, rest) = out_rest.split_at_mut(rows);
+            out_rest = rest;
+            let weight_slice = &weight[row_start * hidden..(row_start + rows) * hidden];
+            scope.spawn(move || lm_head_logits_rows(last_hidden, weight_slice, hidden, out_slice));
+            row_start += rows;
+        }
+    });
+    logits
+}
+
+/// Serial reference for one contiguous block of LM-head rows. Kept as the single
+/// source of the per-logit accumulation order so the parallel split stays
+/// bit-identical to it (see the R131 parity test).
+fn lm_head_logits_rows(last_hidden: &[f32], weight: &[f32], hidden: usize, out: &mut [f32]) {
+    for (v, logit) in out.iter_mut().enumerate() {
+        let row = &weight[v * hidden..v * hidden + hidden];
+        let mut sum = 0.0f32;
+        for (h, w) in row.iter().enumerate() {
+            sum += last_hidden[h] * *w;
+        }
+        *logit = sum;
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingLinearConfig {
     pub batch: usize,
