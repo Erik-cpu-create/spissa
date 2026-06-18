@@ -1111,6 +1111,10 @@ fn accumulate_q8_0_chunk_int8_batch1_rowmajor(
             }
         }
         // Remainder rows (and non-dotprod fallback): per-row register accumulate.
+        // `r` MUST advance here — otherwise any chunk whose row count is not a
+        // multiple of 4 (so the x4 loop above leaves `r < n_rows`) spins forever.
+        // Latent until a non-÷4 row-aligned chunk hits it (e.g. Gemma q_proj's
+        // 385-row chunk: 385 % 4 == 1).
         while r < n_rows {
             let out_feature = out_start + r;
             if out_feature * config.in_features >= weight_elements {
@@ -1129,6 +1133,7 @@ fn accumulate_q8_0_chunk_int8_batch1_rowmajor(
                 acc += w_scale * act_scales[b] * dot as f32;
             }
             output[out_feature] += acc;
+            r += 1;
         }
         Ok::<(), RuntimeError>(())
     })
