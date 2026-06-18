@@ -995,6 +995,77 @@ fn accumulate_q8_0_chunk_int8_activation_uncached(
     Ok(())
 }
 
+/// R130: batch=1 4-row ILP int8 GEMV core (promotes the R128b lab kernel). One
+/// asm block per K-block processes 4 output rows with 4 INDEPENDENT sdot
+/// accumulator chains and a single shared activation-block load (v0/v1); the four
+/// chains pipeline to hide sdot latency. Reduce each tile in Rust (`vaddvq_s32`),
+/// apply per-block per-row weight scale. Bit-identical to the per-row path (same
+/// int32 dots, same block-order f32 accumulation). Lab: ~1.6x over per-row sdot;
+/// the interleaved repack (R129) was tested and lost to this (fewer ILP chains).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn batch1_x4_ilp(
+    q8_bytes: &[u8],
+    row_base: usize,
+    act_i8: &[i8],
+    act_scales: &[f32],
+    blocks_per_row: usize,
+) -> [f32; 4] {
+    let row_stride = blocks_per_row * 34;
+    let mut acc = [0.0f32; 4];
+    for b in 0..blocks_per_row {
+        let a_ptr = act_i8.as_ptr().add(b * 32);
+        let off0 = row_base + b * 34;
+        let off1 = row_base + row_stride + b * 34;
+        let off2 = row_base + 2 * row_stride + b * 34;
+        let off3 = row_base + 3 * row_stride + b * 34;
+        let w0 = q8_bytes.as_ptr().add(off0 + 2);
+        let w1 = q8_bytes.as_ptr().add(off1 + 2);
+        let w2 = q8_bytes.as_ptr().add(off2 + 2);
+        let w3 = q8_bytes.as_ptr().add(off3 + 2);
+        let t0: int32x4_t;
+        let t1: int32x4_t;
+        let t2: int32x4_t;
+        let t3: int32x4_t;
+        std::arch::asm!(
+            "movi {a0:v}.4s, #0",
+            "movi {a1:v}.4s, #0",
+            "movi {a2:v}.4s, #0",
+            "movi {a3:v}.4s, #0",
+            "ld1 {{v0.16b, v1.16b}}, [{a}]",
+            "ld1 {{v2.16b, v3.16b}}, [{w0}]",
+            "sdot {a0:v}.4s, v2.16b, v0.16b",
+            "sdot {a0:v}.4s, v3.16b, v1.16b",
+            "ld1 {{v4.16b, v5.16b}}, [{w1}]",
+            "sdot {a1:v}.4s, v4.16b, v0.16b",
+            "sdot {a1:v}.4s, v5.16b, v1.16b",
+            "ld1 {{v6.16b, v7.16b}}, [{w2}]",
+            "sdot {a2:v}.4s, v6.16b, v0.16b",
+            "sdot {a2:v}.4s, v7.16b, v1.16b",
+            "ld1 {{v16.16b, v17.16b}}, [{w3}]",
+            "sdot {a3:v}.4s, v16.16b, v0.16b",
+            "sdot {a3:v}.4s, v17.16b, v1.16b",
+            a0 = out(vreg) t0,
+            a1 = out(vreg) t1,
+            a2 = out(vreg) t2,
+            a3 = out(vreg) t3,
+            a = in(reg) a_ptr,
+            w0 = in(reg) w0,
+            w1 = in(reg) w1,
+            w2 = in(reg) w2,
+            w3 = in(reg) w3,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+            out("v5") _, out("v6") _, out("v7") _, out("v16") _, out("v17") _,
+        );
+        let s_a = act_scales[b];
+        acc[0] += q8_0_block_scale(q8_bytes, off0) * s_a * vaddvq_s32(t0) as f32;
+        acc[1] += q8_0_block_scale(q8_bytes, off1) * s_a * vaddvq_s32(t1) as f32;
+        acc[2] += q8_0_block_scale(q8_bytes, off2) * s_a * vaddvq_s32(t2) as f32;
+        acc[3] += q8_0_block_scale(q8_bytes, off3) * s_a * vaddvq_s32(t3) as f32;
+    }
+    acc
+}
+
 /// R128: batch=1 row-major int8 GEMV (decode fast path). For each output row,
 /// accumulate the per-block scaled int8 dot into a register across ALL in-blocks
 /// and write `output` ONCE — vs the block-major path's per-block read-modify-write
@@ -1016,7 +1087,31 @@ fn accumulate_q8_0_chunk_int8_batch1_rowmajor(
     let n_rows = q8_block_count / blocks_per_row;
     let out_start = element_start / config.in_features;
     with_q8_panel_activations(input, 1, config.in_features, |act_i8, _panel, act_scales| {
-        for r in 0..n_rows {
+        let mut r = 0usize;
+        // R130: 4 output rows per pass via the ILP sdot kernel (dotprod CPUs).
+        #[cfg(target_arch = "aarch64")]
+        {
+            if q8_sdot_available() {
+                while r + 4 <= n_rows {
+                    let out_feature = out_start + r;
+                    if (out_feature + 3) * config.in_features >= weight_elements {
+                        break;
+                    }
+                    let row_base = r * blocks_per_row * 34;
+                    // SAFETY: q8_sdot_available() verified dotprod above.
+                    let acc = unsafe {
+                        batch1_x4_ilp(q8_bytes, row_base, act_i8, act_scales, blocks_per_row)
+                    };
+                    output[out_feature] += acc[0];
+                    output[out_feature + 1] += acc[1];
+                    output[out_feature + 2] += acc[2];
+                    output[out_feature + 3] += acc[3];
+                    r += 4;
+                }
+            }
+        }
+        // Remainder rows (and non-dotprod fallback): per-row register accumulate.
+        while r < n_rows {
             let out_feature = out_start + r;
             if out_feature * config.in_features >= weight_elements {
                 break;
