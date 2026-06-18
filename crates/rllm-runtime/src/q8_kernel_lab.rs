@@ -490,6 +490,29 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
                 max_abs_diff: max_abs_diff(&base_out, &ilp_out),
                 speedup_vs_baseline: base_ns as f64 / ilp_ns.max(1) as f64,
             });
+
+            // R129: 4-output interleaved GEMV (no per-block addv, 4 outputs/sdot).
+            let (w_packed, w_scales_packed) = pack_w_interleaved_x4(&q8_quad, blocks);
+            let (r129_ns, r129_out) = time_variant(config.iters, 4, || unsafe {
+                r129_x4_interleaved(&w_packed, &w_scales_packed, &a_i8, &a_scales, blocks)
+            });
+            results.push(Q8KernelBenchResult {
+                variant: "r129_x4_interleaved".to_string(),
+                elapsed_ns: r129_ns,
+                checksum: checksum(&r129_out),
+                max_abs_diff: max_abs_diff(&base_out, &r129_out),
+                speedup_vs_baseline: base_ns as f64 / r129_ns.max(1) as f64,
+            });
+            let (r129b_ns, r129b_out) = time_variant(config.iters, 4, || unsafe {
+                r129_x4_interleaved_2t(&w_packed, &w_scales_packed, &a_i8, &a_scales, blocks)
+            });
+            results.push(Q8KernelBenchResult {
+                variant: "r129_x4_interleaved_2t".to_string(),
+                elapsed_ns: r129b_ns,
+                checksum: checksum(&r129b_out),
+                max_abs_diff: max_abs_diff(&base_out, &r129b_out),
+                speedup_vs_baseline: base_ns as f64 / r129b_ns.max(1) as f64,
+            });
         }
     }
 
@@ -1932,6 +1955,174 @@ pub unsafe fn r128_x4_ilp(
         acc[3] += weight_scale * sa * vaddvq_s32(t3) as f32;
     }
     acc.to_vec()
+}
+
+/// R129 lab: pack 4 q8 weight rows into the interleaved layout the 4-output GEMV
+/// kernel consumes. Per K-block (32 weights): 8 segments × `[r0[seg*4..+4] |
+/// r1 | r2 | r3]` (16 bytes each) = 128 bytes, plus the 4 per-row fp16 scales.
+/// This is the layout that would be baked into the `.rllm` at pack time (R129).
+fn pack_w_interleaved_x4(q8_quad: &[u8], blocks_per_row: usize) -> (Vec<i8>, Vec<f32>) {
+    let row_stride = blocks_per_row * 34;
+    let mut packed = vec![0i8; blocks_per_row * 128];
+    let mut scales = vec![0.0f32; blocks_per_row * 4];
+    for b in 0..blocks_per_row {
+        for (j, row) in (0..4).enumerate() {
+            let blk = row * row_stride + b * 34;
+            scales[b * 4 + j] = crate::tensor::fp16_to_f32(u16::from_le_bytes([
+                q8_quad[blk],
+                q8_quad[blk + 1],
+            ]));
+            let qs = &q8_quad[blk + 2..blk + 34];
+            for seg in 0..8 {
+                for k in 0..4 {
+                    packed[b * 128 + seg * 16 + j * 4 + k] = qs[seg * 4 + k] as i8;
+                }
+            }
+        }
+    }
+    (packed, scales)
+}
+
+/// R129 lab kernel: 4-output GEMV with NO per-block `addv`. One `sdot` per
+/// K-segment puts 4 DIFFERENT outputs in its 4 lanes (interleaved weights +
+/// `ld1r`-broadcast activation); 8 sdots accumulate a 32-block into one int32x4
+/// tile whose 4 lanes ARE the 4 outputs; convert + scale once per block (4
+/// outputs at once via `vfmaq_f32`) into a register f32 accumulator, written
+/// once at the end. This is llama.cpp's q8_0 4x8 GEMV structure.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+pub unsafe fn r129_x4_interleaved(
+    w_packed: &[i8],
+    w_scales: &[f32],
+    a_i8: &[i8],
+    a_scales: &[f32],
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    use std::arch::asm;
+    let mut acc_f = vdupq_n_f32(0.0);
+    for b in 0..blocks_per_row {
+        let mut w_ptr = w_packed.as_ptr().add(b * 128);
+        let mut a_ptr = a_i8.as_ptr().add(b * 32);
+        let tile: int32x4_t;
+        asm!(
+            "movi {t:v}.4s, #0",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            t = out(vreg) tile,
+            a = inout(reg) a_ptr,
+            w = inout(reg) w_ptr,
+            out("v0") _,
+            out("v1") _,
+        );
+        let _ = (a_ptr, w_ptr);
+        let s_a = a_scales[b];
+        let sc = [
+            w_scales[b * 4] * s_a,
+            w_scales[b * 4 + 1] * s_a,
+            w_scales[b * 4 + 2] * s_a,
+            w_scales[b * 4 + 3] * s_a,
+        ];
+        let scale_vec = vld1q_f32(sc.as_ptr());
+        acc_f = vfmaq_f32(acc_f, vcvtq_f32_s32(tile), scale_vec);
+    }
+    let mut out = vec![0.0f32; 4];
+    vst1q_f32(out.as_mut_ptr(), acc_f);
+    out
+}
+
+/// R129 lab, 2-tile variant: same interleaved 4-output layout, but split the 8
+/// K-segments across TWO independent int32 tiles (t0: segs 0,2,4,6; t1: segs
+/// 1,3,5,7) so the sdot chains pipeline (the 1-tile version was a serial chain).
+/// Summed before the per-block scale. 4 outputs, no per-block addv, 2-way ILP.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+pub unsafe fn r129_x4_interleaved_2t(
+    w_packed: &[i8],
+    w_scales: &[f32],
+    a_i8: &[i8],
+    a_scales: &[f32],
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    use std::arch::asm;
+    let mut acc_f = vdupq_n_f32(0.0);
+    for b in 0..blocks_per_row {
+        let mut w_ptr = w_packed.as_ptr().add(b * 128);
+        let mut a_ptr = a_i8.as_ptr().add(b * 32);
+        let t0: int32x4_t;
+        let t1: int32x4_t;
+        asm!(
+            "movi {t0:v}.4s, #0",
+            "movi {t1:v}.4s, #0",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t0:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v2.4s}}, [{a}], #4",
+            "ld1 {{v3.16b}}, [{w}], #16",
+            "sdot {t1:v}.4s, v3.16b, v2.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t0:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v2.4s}}, [{a}], #4",
+            "ld1 {{v3.16b}}, [{w}], #16",
+            "sdot {t1:v}.4s, v3.16b, v2.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t0:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v2.4s}}, [{a}], #4",
+            "ld1 {{v3.16b}}, [{w}], #16",
+            "sdot {t1:v}.4s, v3.16b, v2.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t0:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v2.4s}}, [{a}], #4",
+            "ld1 {{v3.16b}}, [{w}], #16",
+            "sdot {t1:v}.4s, v3.16b, v2.16b",
+            t0 = out(vreg) t0,
+            t1 = out(vreg) t1,
+            a = inout(reg) a_ptr,
+            w = inout(reg) w_ptr,
+            out("v0") _,
+            out("v1") _,
+            out("v2") _,
+            out("v3") _,
+        );
+        let _ = (a_ptr, w_ptr);
+        let tile = vaddq_s32(t0, t1);
+        let s_a = a_scales[b];
+        let sc = [
+            w_scales[b * 4] * s_a,
+            w_scales[b * 4 + 1] * s_a,
+            w_scales[b * 4 + 2] * s_a,
+            w_scales[b * 4 + 3] * s_a,
+        ];
+        let scale_vec = vld1q_f32(sc.as_ptr());
+        acc_f = vfmaq_f32(acc_f, vcvtq_f32_s32(tile), scale_vec);
+    }
+    let mut out = vec![0.0f32; 4];
+    vst1q_f32(out.as_mut_ptr(), acc_f);
+    out
 }
 
 pub fn baseline_i8_dot32_batch1_row(
