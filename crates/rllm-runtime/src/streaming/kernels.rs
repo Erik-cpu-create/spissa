@@ -995,6 +995,50 @@ fn accumulate_q8_0_chunk_int8_activation_uncached(
     Ok(())
 }
 
+/// R128: batch=1 row-major int8 GEMV (decode fast path). For each output row,
+/// accumulate the per-block scaled int8 dot into a register across ALL in-blocks
+/// and write `output` ONCE — vs the block-major path's per-block read-modify-write
+/// (524288 output writes per gate matmul → 8192). The f32 accumulation order is
+/// identical to the block-major path (a row's blocks are contiguous in the q8
+/// chunk and processed in the same b=0..blocks_per_row order), so the result is
+/// bit-for-bit identical. Activation is quantized once (R127 cache).
+/// Caller guarantees batch==1, in_features % 32 == 0, and a row-aligned chunk.
+fn accumulate_q8_0_chunk_int8_batch1_rowmajor(
+    input: &[f32],
+    output: &mut [f32],
+    q8_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+    weight_elements: usize,
+    blocks_per_row: usize,
+    q8_block_count: usize,
+) -> Result<()> {
+    let n_rows = q8_block_count / blocks_per_row;
+    let out_start = element_start / config.in_features;
+    with_q8_panel_activations(input, 1, config.in_features, |act_i8, _panel, act_scales| {
+        for r in 0..n_rows {
+            let out_feature = out_start + r;
+            if out_feature * config.in_features >= weight_elements {
+                break;
+            }
+            let row_block_base = r * blocks_per_row * 34;
+            let mut acc = 0.0f32;
+            for b in 0..blocks_per_row {
+                let block_offset = row_block_base + b * 34;
+                let w_scale = q8_0_block_scale(q8_bytes, block_offset);
+                let wq = &q8_bytes[block_offset + 2..block_offset + 34];
+                let a_seg: &[i8; 32] = act_i8[b * 32..b * 32 + 32]
+                    .try_into()
+                    .expect("32-element activation segment");
+                let dot = i8_dot32(wq, a_seg);
+                acc += w_scale * act_scales[b] * dot as f32;
+            }
+            output[out_feature] += acc;
+        }
+        Ok::<(), RuntimeError>(())
+    })
+}
+
 fn accumulate_q8_0_chunk_int8_activation(
     input: &[f32],
     output: &mut [f32],
@@ -1021,6 +1065,24 @@ fn accumulate_q8_0_chunk_int8_activation(
     }
     let q8_block_count = q8_bytes.len() / 34;
     let blocks_per_row = config.in_features / 32;
+    // R128: batch=1 decode on a row-aligned chunk uses the row-major
+    // register-accumulating GEMV (write output once per row, not per block).
+    if config.batch == 1
+        && blocks_per_row != 0
+        && element_start.is_multiple_of(config.in_features)
+        && q8_block_count.is_multiple_of(blocks_per_row)
+    {
+        return accumulate_q8_0_chunk_int8_batch1_rowmajor(
+            input,
+            output,
+            q8_bytes,
+            element_start,
+            config,
+            weight_elements,
+            blocks_per_row,
+            q8_block_count,
+        );
+    }
     // R127: quantize the activation ONCE per matmul (cached thread-local by
     // pointer+fingerprint), then look the per-(row,block) int8 segment + scale up
     // in the inner loop instead of re-quantizing `input` for every output row.
