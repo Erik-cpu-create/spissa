@@ -3629,3 +3629,87 @@ mod r119_panel_in8192_tests {
     #[test] fn down_in8192() { run(53, 8192, 4); }
     #[test] fn down_in8192_realistic() { run(53, 8192, 64); }
 }
+
+/// R121: the multiply-into fast path (`try_panel_multiply_into_up` +
+/// `target *= up + bias`). Validates the two pieces R121 actually adds on top of
+/// the already-tested panel kernel: (1) accumulating the panel into a scratch
+/// buffer chunk-by-chunk with a threaded `element_start`, and (2) the caller's
+/// `target *= up + bias` arithmetic — both against the whole-weight int8
+/// reference so the comparison is tight (same int8 dot on both sides), not a
+/// quant-tolerance check.
+#[cfg(all(test, target_arch = "aarch64"))]
+mod r121_multiply_into_tests {
+    use super::*;
+    use super::r119_panel_tests::*;
+
+    fn run(batch: usize, in_features: usize, out_features: usize, chunk_rows: usize) {
+        if !q8_i8mm_available() {
+            return;
+        }
+        let q8 = make_q8_pub(out_features, in_features);
+        let input = make_input_pub(batch, in_features);
+        let bias: Vec<f32> = (0..out_features).map(|f| (f as f32) * 0.013 - 0.07).collect();
+        let config = StreamingLinearConfig { batch, in_features, out_features };
+
+        // Reference up over the full weight via the int8-activation path.
+        let we = out_features * in_features;
+        let mut up_ref = vec![0.0f32; batch * out_features];
+        accumulate_q8_0_chunk_int8_activation(&input, &mut up_ref, &q8, 0, config, we).unwrap();
+
+        // Panel up accumulated chunk-by-chunk, mirroring try_panel_multiply_into_up:
+        // each chunk covers `chunk_rows` output rows, with element_start derived
+        // from the running byte offset exactly like chunk_element_start_for_dtype.
+        let blocks_per_row = in_features / 32;
+        let bytes_per_row = blocks_per_row * 34;
+        let mut up_panel = vec![0.0f32; batch * out_features];
+        let mut row = 0usize;
+        let mut byte_offset = 0usize;
+        while row < out_features {
+            let rows = chunk_rows.min(out_features - row);
+            let start = row * bytes_per_row;
+            let end = start + rows * bytes_per_row;
+            let element_start = (byte_offset / 34) * 32;
+            let used = accumulate_q8_0_chunk_panel_smmla(
+                &input,
+                &mut up_panel,
+                &q8[start..end],
+                element_start,
+                config,
+            )
+            .unwrap();
+            assert!(used, "panel should engage for chunk at row {row}");
+            byte_offset += end - start;
+            row += rows;
+        }
+
+        // Apply the caller's multiply-into on both, then compare end results.
+        let init: Vec<f32> = (0..batch * out_features)
+            .map(|i| (i as f32 % 13.0) * 0.1 + 0.3)
+            .collect();
+        let mut max = 0.0f32;
+        let mut worst = (0, 0);
+        for b in 0..batch {
+            for f in 0..out_features {
+                let idx = b * out_features + f;
+                let tgt_ref = init[idx] * (up_ref[idx] + bias[f]);
+                let tgt_panel = init[idx] * (up_panel[idx] + bias[f]);
+                let d = (tgt_ref - tgt_panel).abs();
+                if d > max {
+                    max = d;
+                    worst = (b, f);
+                }
+            }
+        }
+        assert!(
+            max < 1e-2,
+            "multiply-into panel vs ref max_diff={max} at row {} col {}",
+            worst.0,
+            worst.1
+        );
+    }
+
+    #[test] fn multiply_into_even() { run(4, 64, 8, 4); }
+    #[test] fn multiply_into_odd_out_and_chunks() { run(5, 64, 7, 3); }
+    #[test] fn multiply_into_realistic_up() { run(53, 2048, 16, 8); }
+    #[test] fn multiply_into_single_chunk_full() { run(53, 2048, 32, 32); }
+}
