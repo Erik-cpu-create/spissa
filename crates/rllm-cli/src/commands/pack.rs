@@ -1,7 +1,10 @@
 use crate::commands::common::parse_size;
 use anyhow::{Context, Result};
 use rllm_container::{ChunkRangeSpec, DType, GlobalMetadata, RllmWriter, TensorMeta};
-use rllm_import::{read_model_config_metadata, read_tokenizer_metadata, SafetensorsReader};
+use rllm_import::{
+    read_model_config_metadata, read_tokenizer_metadata, SafetensorsReader,
+    ShardedSafetensorsReader,
+};
 use rtc_codec::{
     EncodeMeta, HuffmanCodec, RawCodec, RleCodec, TensorCodec, CODEC_HUFF_V1, CODEC_RAW_V1,
     CODEC_RLE_V1,
@@ -157,6 +160,79 @@ fn is_quantizable_weight_tensor(tensor_name: &str, shape: &[u64], dtype: DType) 
         && matches!(dtype, DType::Fp16 | DType::Bf16 | DType::Fp32)
 }
 
+/// A safetensors source: either a single file or a sharded checkpoint
+/// (`*.index.json` + N shards). Presents one read surface to the pack loop.
+enum TensorSource {
+    Single(SafetensorsReader),
+    Sharded(ShardedSafetensorsReader),
+}
+
+impl TensorSource {
+    /// Open a single `.safetensors`, a `*.index.json`, or a directory that
+    /// contains a `model.safetensors.index.json` (sharded) or `model.safetensors`.
+    fn open(path: &Path) -> Result<Self> {
+        let is_index = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".index.json"));
+        if is_index {
+            return Ok(Self::Sharded(ShardedSafetensorsReader::open_index(path)?));
+        }
+        if path.is_dir() {
+            let index = path.join("model.safetensors.index.json");
+            if index.exists() {
+                return Ok(Self::Sharded(ShardedSafetensorsReader::open_index(index)?));
+            }
+            let single = path.join("model.safetensors");
+            return Ok(Self::Single(SafetensorsReader::open(single)?));
+        }
+        Ok(Self::Single(SafetensorsReader::open(path)?))
+    }
+
+    fn list_tensors(&self) -> Vec<String> {
+        match self {
+            Self::Single(r) => r.list_tensors().into_iter().map(String::from).collect(),
+            Self::Sharded(r) => r.list_tensors(),
+        }
+    }
+
+    fn read_tensor(&mut self, name: &str) -> Result<Vec<u8>> {
+        match self {
+            Self::Single(r) => Ok(r.read_tensor(name)?),
+            Self::Sharded(r) => Ok(r.read_tensor(name)?),
+        }
+    }
+
+    fn to_rllm_meta(&mut self, name: &str) -> Result<TensorMeta> {
+        match self {
+            Self::Single(r) => Ok(r.to_rllm_meta(name)?),
+            Self::Sharded(r) => Ok(r.to_rllm_meta(name)?),
+        }
+    }
+}
+
+/// Map raw checkpoint tensor names to the names stored in the `.rllm`, returning
+/// `(rllm_name, source_name)` pairs. For multimodal Gemma checkpoints
+/// (`Gemma3ForConditionalGeneration`) this keeps only the language model
+/// (`language_model.*`), strips that prefix so tensors match the standard
+/// `model.layers.*` convention (so the existing quant matchers + runtime naming
+/// apply), and drops the vision tower / multimodal projector. Other architectures
+/// pass through unchanged.
+fn map_tensor_names(raw: &[String], architecture: &str) -> Vec<(String, String)> {
+    if architecture.starts_with("gemma") {
+        const PREFIX: &str = "language_model.";
+        let mut mapped: Vec<(String, String)> = raw
+            .iter()
+            .filter(|t| t.starts_with(PREFIX))
+            .map(|t| (t[PREFIX.len()..].to_string(), t.clone()))
+            .collect();
+        mapped.sort();
+        mapped
+    } else {
+        raw.iter().map(|t| (t.clone(), t.clone())).collect()
+    }
+}
+
 pub fn run(
     input: &str,
     output: &str,
@@ -194,16 +270,11 @@ pub fn run(
 
     println!("Reading safetensors from: {}", input);
 
-    // Open safetensors file
-    let mut reader = SafetensorsReader::open(input_path)
-        .with_context(|| format!("Failed to open safetensors file: {}", input))?;
-
-    let tensor_names: Vec<String> = reader
-        .list_tensors()
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
-    println!("Found {} tensors", tensor_names.len());
+    // Open the source (single file, a `*.index.json`, or a directory holding a
+    // sharded `model.safetensors.index.json`).
+    let mut source = TensorSource::open(input_path)
+        .with_context(|| format!("Failed to open safetensors source: {}", input))?;
+    let raw_names = source.list_tensors();
 
     // Create metadata
     let model_name = input_path
@@ -224,6 +295,15 @@ pub fn run(
         .as_ref()
         .and_then(|config| config.architecture_type.clone())
         .unwrap_or_else(|| "unknown".to_string());
+    // Map raw checkpoint names to `.rllm` names (filters vision + strips the
+    // `language_model.` prefix for multimodal Gemma; identity otherwise).
+    let tensors = map_tensor_names(&raw_names, &architecture);
+    println!(
+        "Found {} tensors ({} packed for architecture '{}')",
+        raw_names.len(),
+        tensors.len(),
+        architecture
+    );
     let default_context_length = model_config
         .as_ref()
         .and_then(|config| config.max_position_embeddings)
@@ -272,20 +352,19 @@ pub fn run(
     let mut next_tensor_id = 0u64;
 
     // Process each tensor
-    for (tensor_idx, tensor_name) in tensor_names.iter().enumerate() {
+    for (tensor_idx, (tensor_name, src_name)) in tensors.iter().enumerate() {
         println!(
             "Processing tensor: {} ({}/{})",
             tensor_name,
             tensor_idx + 1,
-            tensor_names.len()
+            tensors.len()
         );
 
-        // Read tensor data
-        let mut tensor_data = reader.read_tensor(tensor_name)?;
-        let tensor_meta = reader.to_rllm_meta(tensor_name)?;
-
-        // Update tensor ID
-        let mut meta = tensor_meta;
+        // Read from the source (original) name; store under the `.rllm` (mapped)
+        // name so quant matchers + the runtime see standard `model.layers.*`.
+        let mut tensor_data = source.read_tensor(src_name)?;
+        let mut meta = source.to_rllm_meta(src_name)?;
+        meta.name = tensor_name.clone();
         let tensor_id = next_tensor_id;
         next_tensor_id = next_tensor_id.saturating_add(1);
         meta.tensor_id = tensor_id;
