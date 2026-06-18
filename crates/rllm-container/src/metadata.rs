@@ -180,6 +180,27 @@ pub struct ModelConfigMetadata {
     pub rope_theta: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tie_word_embeddings: Option<bool>,
+    // --- Gemma-family fields (also usable by other models that set them) ---
+    /// Explicit attention head dimension. Gemma sets this independent of
+    /// `hidden_size / num_attention_heads` (e.g. Gemma 3 4B uses 256).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_dim: Option<u64>,
+    /// Gemma attention query pre-scale base; attention scaled by
+    /// `1/sqrt(query_pre_attn_scalar)` instead of `1/sqrt(head_dim)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_pre_attn_scalar: Option<f32>,
+    /// Local sliding-window size (Gemma 2/3 interleave local + global attention).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sliding_window: Option<u64>,
+    /// Period of the local:global interleave (Gemma 3: 6 → 5 local : 1 global).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sliding_window_pattern: Option<u64>,
+    /// RoPE base for local (sliding-window) layers; global layers use `rope_theta`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rope_local_base_freq: Option<f32>,
+    /// MLP activation (e.g. `gelu_pytorch_tanh` for Gemma, `silu` for LLaMA).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_activation: Option<String>,
 }
 
 /// Minimal tokenizer vocabulary/config metadata persisted in `.rllm` global metadata.
