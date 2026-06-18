@@ -130,6 +130,32 @@ mod tests {
     }
 
     #[test]
+    fn r131_parallel_lm_head_matches_serial_bit_for_bit() {
+        // Vocab > 2 * MIN_ROWS_PER_PARALLEL_ARGMAX so the parallel split engages
+        // on multi-core hosts; the result must still equal the serial reference
+        // exactly (same per-logit accumulation order, only row ownership differs).
+        let hidden = 5usize;
+        let vocab = 37usize;
+        let last_hidden: Vec<f32> = (0..hidden).map(|h| (h as f32 * 0.37 - 0.5).sin()).collect();
+        let weight: Vec<f32> =
+            (0..vocab * hidden).map(|i| (i as f32 * 0.013 - 0.21).cos() * 0.5).collect();
+
+        let parallel = lm_head_logits_parallel(&last_hidden, &weight, vocab, hidden);
+
+        let mut serial = vec![0.0f32; vocab];
+        for (v, logit) in serial.iter_mut().enumerate() {
+            let row = &weight[v * hidden..v * hidden + hidden];
+            let mut sum = 0.0f32;
+            for (h, w) in row.iter().enumerate() {
+                sum += last_hidden[h] * *w;
+            }
+            *logit = sum;
+        }
+
+        assert_eq!(parallel, serial, "R131 parallel LM head must be bit-identical to serial");
+    }
+
+    #[test]
     fn streaming_linear_matches_full_decode_linear_across_chunk_boundary() {
         let path = temp_path("linear");
         write_chunked_weight(&path);
