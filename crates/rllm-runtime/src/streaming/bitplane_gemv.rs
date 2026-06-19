@@ -176,4 +176,77 @@ mod bitplane_gemv_tests {
              VERDICT: {verdict}\n",
         );
     }
+
+    // Time a GEMV split across `nthreads` OS threads; `f(row_offset, out_slice)`
+    // computes a contiguous row range. Returns ms/token (3 warm iters).
+    #[cfg(test)]
+    fn time_par<F: Fn(usize, &mut [f32]) + Sync>(vocab: usize, nthreads: usize, f: F) -> f64 {
+        let iters = 3;
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            let mut out = vec![0f32; vocab];
+            let rows_per = vocab.div_ceil(nthreads);
+            let fref = &f;
+            std::thread::scope(|s| {
+                let mut rest = &mut out[..];
+                let mut start = 0usize;
+                while start < vocab {
+                    let rows = rows_per.min(vocab - start);
+                    let (slice, r) = rest.split_at_mut(rows);
+                    rest = r;
+                    s.spawn(move || fref(start, slice));
+                    start += rows;
+                }
+            });
+            std::hint::black_box(&out);
+        }
+        t.elapsed().as_secs_f64() * 1000.0 / iters as f64
+    }
+
+    #[test]
+    #[ignore]
+    fn fused_bitplane_gemv_multicore_scout() {
+        std::env::set_var("RLLM_Q8_ACTIVATION", "1");
+        std::env::set_var("RLLM_BF16_DOT", "1");
+        let bf16 = std::fs::read("/tmp/rllm-bf16-sample.bin")
+            .expect("run dump_bf16_embedding_sample first");
+        let hidden = 2048usize;
+        let n_weights = bf16.len() / 2;
+        let vocab = n_weights / hidden;
+        let enc = BitplaneCodec
+            .encode(
+                &bf16,
+                &EncodeMeta { name: "e".into(), shape: vec![n_weights as u64], dtype: "bf16".into() },
+            )
+            .unwrap();
+        let p = enc.data[14] as usize;
+        let mut off = 16;
+        let palette = enc.data[off..off + p].to_vec();
+        off += p;
+        let idx_bytes = (n_weights * 5 + 7) / 8;
+        let idx_plane = enc.data[off..off + idx_bytes].to_vec();
+        off += idx_bytes;
+        let residuals = enc.data[off..off + n_weights].to_vec();
+        let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+
+        let cores = std::thread::available_parallelism().map(usize::from).unwrap_or(1);
+        eprintln!(
+            "\n=== R145 multi-core fused GEMV SCOUT (available cores: {cores}) ===\n\
+             threads |  plain bf16  |  fused bit-plane | speedup"
+        );
+        for &nt in &[1usize, 2, 4, 6, 8] {
+            let plain = time_par(vocab, nt, |base, slice| {
+                lm_head_logits_rows_bf16(&act, &bf16, hidden, base, slice)
+            });
+            let fused = time_par(vocab, nt, |base, slice| {
+                lm_head_logits_rows_bitplane(&act, &palette, &idx_plane, &residuals, hidden, base, slice)
+            });
+            eprintln!(
+                "   {nt:2}   |  {plain:6.1} ms  |   {fused:6.1} ms     | {:.2}x{}",
+                plain / fused,
+                if fused < plain { "  <-- fused faster" } else { "" }
+            );
+        }
+        eprintln!();
+    }
 }
