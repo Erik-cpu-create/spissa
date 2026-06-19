@@ -497,8 +497,31 @@ fn pack_q8_weight_pair(
         let off1 = base_r1 + b * 34;
         w_scales[b * 2] = q8_0_block_scale(q8_bytes, off0);
         w_scales[b * 2 + 1] = q8_0_block_scale(q8_bytes, off1);
+        // Interleave the two rows' 32 int8 weights into the panel at 8-byte
+        // segment granularity: [r0 seg0, r1 seg0, r0 seg1, r1 seg1, ...]. NEON
+        // moves each 8-byte segment in one load/store instead of 8 scalar bytes;
+        // the byte values are identical (q8 is already int8, just reinterpreted).
+        let pbase = b * 64;
+        #[cfg(target_arch = "aarch64")]
+        {
+            use std::arch::aarch64::*;
+            // SAFETY: each (off + 2 + seg*8 + 8) <= off + 34 is in bounds of the
+            // block, and pbase + 4*16 == (b+1)*64 <= panel.len() (2*in_features).
+            unsafe {
+                let src0 = q8_bytes.as_ptr().add(off0 + 2);
+                let src1 = q8_bytes.as_ptr().add(off1 + 2);
+                let dst = panel.as_mut_ptr().add(pbase) as *mut u8;
+                for seg in 0..4 {
+                    let v0 = vld1_u8(src0.add(seg * 8));
+                    let v1 = vld1_u8(src1.add(seg * 8));
+                    vst1_u8(dst.add(seg * 16), v0);
+                    vst1_u8(dst.add(seg * 16 + 8), v1);
+                }
+            }
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         for seg in 0..4 {
-            let dst = b * 64 + seg * 16;
+            let dst = pbase + seg * 16;
             let src0 = off0 + 2 + seg * 8;
             let src1 = off1 + 2 + seg * 8;
             for k in 0..8 {
