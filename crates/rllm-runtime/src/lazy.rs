@@ -129,13 +129,21 @@ impl LazyRllmModel {
         tensor_id: u64,
         f: impl FnOnce(&[u8]) -> Result<R>,
     ) -> Result<Option<R>> {
-        let (first, total) = {
+        let (first, total, all_chunks_verified) = {
             let chunks = match self.chunks_by_tensor.get(&tensor_id) {
                 Some(chunks) if !chunks.is_empty() => chunks,
                 _ => return Ok(None),
             };
             let first = chunks[0].file_offset;
             let mut cursor = first;
+            // Bridge to the chunk-level integrity record: this whole-tensor view
+            // is exactly the tensor's rtc-raw-v1 chunks concatenated, and for
+            // that codec the raw bytes ARE the original bytes. So if every chunk
+            // was already SHA-verified via the chunk path (e.g. during prefill),
+            // the tensor's bytes are proven intact and re-hashing the whole
+            // tensor here is pure redundant work — the cost that showed up as a
+            // ~6s "warmup" on the first decode token.
+            let mut all_chunks_verified = true;
             for chunk in chunks {
                 if chunk.codec_id != "rtc-raw-v1"
                     || chunk.compressed_size != chunk.uncompressed_size
@@ -143,13 +151,22 @@ impl LazyRllmModel {
                 {
                     return Ok(None);
                 }
+                if !self.verified_compressed_chunks.contains(&chunk.chunk_id) {
+                    all_chunks_verified = false;
+                }
                 cursor = cursor.saturating_add(chunk.compressed_size);
             }
-            (first, cursor - first)
+            (first, cursor - first, all_chunks_verified)
         };
 
+        // In VerifyOnce, skip the redundant whole-tensor hash when the chunks are
+        // already verified. Strict still re-verifies every call (never skips);
+        // Unchecked never verifies.
+        let bridge_skip =
+            self.integrity_mode == RamaIntegrityMode::VerifyOnce && all_chunks_verified;
         let verify = self.integrity_mode != RamaIntegrityMode::Unchecked
-            && !self.verified_tensors.contains(&tensor_id);
+            && !self.verified_tensors.contains(&tensor_id)
+            && !bridge_skip;
 
         let result = {
             let slice = self.reader.read_span(first, total)?;
@@ -164,7 +181,7 @@ impl LazyRllmModel {
             }
             f(slice)?
         };
-        if verify && self.integrity_mode == RamaIntegrityMode::VerifyOnce {
+        if self.integrity_mode == RamaIntegrityMode::VerifyOnce {
             self.verified_tensors.insert(tensor_id);
         }
         Ok(Some(result))
@@ -1283,6 +1300,68 @@ mod tests {
         assert_eq!(original_checksum_events, 1);
         assert_eq!(read_events, 2);
         assert_eq!(budget.current_bytes(), 0);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn with_raw_tensor_skips_whole_tensor_hash_once_chunks_are_verified() {
+        // Tensor written with a DELIBERATELY WRONG tensor-level checksum but a
+        // CORRECT chunk checksum. A whole-tensor verify would fail; a chunk
+        // verify passes. This lets us observe whether with_raw_tensor skips the
+        // redundant whole-tensor hash once the chunks are already verified.
+        let path = temp_path("raw-tensor-bridge");
+        let data: Vec<u8> = (0..32).collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "bridge.weight".to_string(),
+            shape: vec![32],
+            dtype: DType::U8,
+            original_size_bytes: data.len() as u64,
+            compressed_size_bytes: data.len() as u64,
+            original_sha256: [0xAB; 32], // wrong on purpose
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer.write_chunk(0, "rtc-raw-v1", &data, &data, 0).unwrap();
+        writer.finalize().unwrap();
+
+        // (a) VerifyOnce, chunks NOT pre-verified: with_raw_tensor runs the
+        // whole-tensor verify, which catches the bad checksum → declines.
+        {
+            let mut model = LazyRllmModel::open(&path).unwrap();
+            model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
+            let got = model.with_raw_tensor(0, |bytes| Ok(bytes.len())).unwrap();
+            assert_eq!(got, None, "bad tensor checksum must be caught when chunks are unverified");
+        }
+
+        // (b) VerifyOnce, chunk pre-verified (as prefill does): the bytes are
+        // already proven intact, so with_raw_tensor skips the redundant hash and
+        // succeeds despite the bad tensor-level checksum.
+        {
+            let mut model = LazyRllmModel::open(&path).unwrap();
+            model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
+            let mut budget = MemoryBudget::new(usize::MAX);
+            model.with_raw_chunk(0, &mut budget, |bytes, _b| Ok(bytes.len())).unwrap();
+            let got = model.with_raw_tensor(0, |bytes| Ok(bytes.len())).unwrap();
+            assert_eq!(
+                got,
+                Some(data.len()),
+                "verified chunks must let with_raw_tensor skip the redundant whole-tensor hash"
+            );
+        }
+
+        // (c) Strict never skips: even after the chunk is verified, the bad
+        // tensor checksum is re-checked on every call and caught.
+        {
+            let mut model = LazyRllmModel::open(&path).unwrap();
+            model.set_rama_integrity_mode(RamaIntegrityMode::Strict);
+            let mut budget = MemoryBudget::new(usize::MAX);
+            model.with_raw_chunk(0, &mut budget, |bytes, _b| Ok(bytes.len())).unwrap();
+            let got = model.with_raw_tensor(0, |bytes| Ok(bytes.len())).unwrap();
+            assert_eq!(got, None, "Strict must re-verify the whole tensor on every call");
+        }
 
         std::fs::remove_file(&path).ok();
     }

@@ -145,7 +145,18 @@ fn main() -> Result<()> {
     }
 
     let mut model = LazyRllmModel::open(&args.model)?;
-    model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
+    // Integrity mode defaults to VerifyOnce (SHA-256 each tensor's bytes once
+    // per session). RLLM_INTEGRITY={unchecked,verifyonce,strict} overrides it —
+    // a diagnostic/operational knob to measure or skip the verification cost.
+    let integrity_mode = match std::env::var("RLLM_INTEGRITY").ok().as_deref() {
+        Some("unchecked") => RamaIntegrityMode::Unchecked,
+        Some("strict") => RamaIntegrityMode::Strict,
+        Some("verifyonce") | None => RamaIntegrityMode::VerifyOnce,
+        Some(other) => anyhow::bail!(
+            "invalid RLLM_INTEGRITY={other:?} (expected unchecked|verifyonce|strict)"
+        ),
+    };
+    model.set_rama_integrity_mode(integrity_mode);
 
     let tokenizer = model
         .metadata()
