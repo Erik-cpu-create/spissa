@@ -298,11 +298,31 @@ impl RllmTokenizer {
     }
 
     fn decode_byte_level(&self, token_ids: &[usize]) -> Result<String> {
-        let mut text = String::new();
+        // GPT-2/tiktoken byte-level decode: each char in the raw token maps back
+        // to one byte (the inverse of the bytes->unicode alphabet); reassemble the
+        // bytes and interpret as UTF-8. Without this, multi-byte sequences (emoji,
+        // accents) leak their raw byte glyphs (e.g. 🤔 -> "ðŁ¤Ķ"). ASCII bytes map
+        // to themselves, so plain text is unchanged.
+        let map = byte_level_char_to_byte();
+        let mut bytes: Vec<u8> = Vec::new();
         for &token_id in token_ids {
-            text.push_str(&self.surface(token_id)?);
+            let raw = self.id_to_token.get(token_id).ok_or_else(|| {
+                RuntimeError::InvalidTensorData(format!(
+                    "token id {token_id} is outside tokenizer vocab size {}",
+                    self.id_to_token.len()
+                ))
+            })?;
+            for ch in raw.chars() {
+                if let Some(&b) = map.get(&ch) {
+                    bytes.push(b);
+                } else {
+                    // Not a byte-level glyph (e.g. a raw special token): keep as UTF-8.
+                    let mut buf = [0u8; 4];
+                    bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                }
+            }
         }
-        Ok(text)
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Decode SentencePiece output: reassemble runs of `<0xNN>` byte-fallback
@@ -348,6 +368,34 @@ fn token_to_text_surface(token: &str, scheme: PreTokenizerScheme) -> String {
         PreTokenizerScheme::ByteLevel => token.replace('Ġ', " ").replace('Ċ', "\n"),
         PreTokenizerScheme::Metaspace => token.replace(METASPACE, " "),
     }
+}
+
+/// True for the bytes GPT-2's `bytes_to_unicode` maps to themselves; the rest map
+/// to `U+0100 + n` in ascending order.
+fn byte_level_byte_is_printable(b: u8) -> bool {
+    matches!(b, 0x21..=0x7E | 0xA1..=0xAC | 0xAE..=0xFF)
+}
+
+/// Inverse of GPT-2's byte-level alphabet: maps each visible char back to its
+/// byte. Built once; used to reassemble UTF-8 when decoding byte-level tokens.
+fn byte_level_char_to_byte() -> &'static HashMap<char, u8> {
+    static MAP: std::sync::OnceLock<HashMap<char, u8>> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map = HashMap::with_capacity(256);
+        for b in 0u16..256 {
+            if byte_level_byte_is_printable(b as u8) {
+                map.insert(b as u8 as char, b as u8);
+            }
+        }
+        let mut n = 0u32;
+        for b in 0u16..256 {
+            if !byte_level_byte_is_printable(b as u8) {
+                map.insert(char::from_u32(0x100 + n).unwrap(), b as u8);
+                n += 1;
+            }
+        }
+        map
+    })
 }
 
 fn is_raw_special_token(token: &str) -> bool {
@@ -473,6 +521,23 @@ mod tests {
 
         assert_eq!(tokenizer.encode("Hello world\n").unwrap(), [0, 1, 2]);
         assert_eq!(tokenizer.decode(&[0, 1, 2]).unwrap(), "Hello world\n");
+    }
+
+    #[test]
+    fn decode_byte_level_reassembles_multibyte_utf8() {
+        // Tokens are stored in GPT-2's byte-level alphabet: "Ã©" is the encoding of
+        // the two UTF-8 bytes of "é", and "ðŁ¤Ķ" is the four bytes of 🤔. Decoding
+        // must reverse the byte map and reassemble UTF-8, not leak the byte glyphs.
+        let tokenizer = RllmTokenizer::from_metadata(&meta(
+            "hf-bpe",
+            vec!["caf".to_string(), "Ã©".to_string(), "ðŁ¤Ķ".to_string()],
+            Vec::new(),
+            None,
+        ))
+        .unwrap();
+
+        assert_eq!(tokenizer.decode(&[0, 1]).unwrap(), "café");
+        assert_eq!(tokenizer.decode(&[2]).unwrap(), "🤔");
     }
 
     #[test]

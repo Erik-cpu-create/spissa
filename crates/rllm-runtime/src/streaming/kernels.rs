@@ -3370,35 +3370,48 @@ fn accumulate_fused_raw_16bit_chunk_batch1_row_blocked(
         .in_features
         .checked_mul(4)
         .ok_or_else(|| RuntimeError::Shape("row block element count overflow".to_string()))?;
+    // In --fast (int8-activation) mode, bf16 rows can use the NEON dot kernel
+    // (exact (bits<<16) upcast + vectorized FMA — the R137 lm_head kernel). The
+    // EXACT default keeps the scalar accumulation so its bit-for-bit tests hold;
+    // the NEON path differs only in f32 accumulation order (a few ULPs).
+    let fast_bf16 = q8_activation_path_enabled() && matches!(dtype, rllm_container::DType::Bf16);
     while local_idx + row_block_elements <= weight_elements {
         let out_feature = global_idx / config.in_features;
         if out_feature + 3 >= config.out_features {
             break;
         }
 
-        let mut acc0 = output[out_feature];
-        let mut acc1 = output[out_feature + 1];
-        let mut acc2 = output[out_feature + 2];
-        let mut acc3 = output[out_feature + 3];
         let row0_start = local_idx;
         let row1_start = local_idx + config.in_features;
         let row2_start = row1_start + config.in_features;
         let row3_start = row2_start + config.in_features;
 
-        let mut idx = 0usize;
-        while idx < config.in_features {
-            let x = input[idx];
-            acc0 += x * raw_16bit_weight_at(raw_bytes, row0_start + idx, dtype);
-            acc1 += x * raw_16bit_weight_at(raw_bytes, row1_start + idx, dtype);
-            acc2 += x * raw_16bit_weight_at(raw_bytes, row2_start + idx, dtype);
-            acc3 += x * raw_16bit_weight_at(raw_bytes, row3_start + idx, dtype);
-            idx += 1;
+        if fast_bf16 {
+            let n = config.in_features;
+            let dot = |rs: usize| bf16_row_dot_f32(input, &raw_bytes[rs * 2..(rs + n) * 2], n);
+            output[out_feature] += dot(row0_start);
+            output[out_feature + 1] += dot(row1_start);
+            output[out_feature + 2] += dot(row2_start);
+            output[out_feature + 3] += dot(row3_start);
+        } else {
+            let mut acc0 = output[out_feature];
+            let mut acc1 = output[out_feature + 1];
+            let mut acc2 = output[out_feature + 2];
+            let mut acc3 = output[out_feature + 3];
+            let mut idx = 0usize;
+            while idx < config.in_features {
+                let x = input[idx];
+                acc0 += x * raw_16bit_weight_at(raw_bytes, row0_start + idx, dtype);
+                acc1 += x * raw_16bit_weight_at(raw_bytes, row1_start + idx, dtype);
+                acc2 += x * raw_16bit_weight_at(raw_bytes, row2_start + idx, dtype);
+                acc3 += x * raw_16bit_weight_at(raw_bytes, row3_start + idx, dtype);
+                idx += 1;
+            }
+            output[out_feature] = acc0;
+            output[out_feature + 1] = acc1;
+            output[out_feature + 2] = acc2;
+            output[out_feature + 3] = acc3;
         }
-
-        output[out_feature] = acc0;
-        output[out_feature + 1] = acc1;
-        output[out_feature + 2] = acc2;
-        output[out_feature + 3] = acc3;
         local_idx += row_block_elements;
         global_idx += row_block_elements;
     }

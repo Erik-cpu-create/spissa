@@ -200,6 +200,12 @@ fn raw_16bit_argmax_rows_range(
     dtype: rllm_container::DType,
     bias: Option<&[f32]>,
 ) -> ArgmaxCandidate {
+    // In --fast (int8-activation) mode, bf16 rows use the NEON dot kernel (exact
+    // (bits<<16) upcast + vectorized FMA — the R137 lm_head kernel). This is the
+    // dominant decode cost for tied-bf16-embedding models (LLaMA/Gemma). The exact
+    // default keeps the scalar accumulation so its bit-for-bit tests hold.
+    let fast_bf16 = q8_activation_path_enabled() && matches!(dtype, rllm_container::DType::Bf16);
+    let n = config.in_features;
     let mut best = ArgmaxCandidate::empty();
     for row_idx in 0..rows {
         let out_feature = out_feature_start + row_idx;
@@ -208,10 +214,14 @@ fn raw_16bit_argmax_rows_range(
             .and_then(|values| values.get(out_feature))
             .copied()
             .unwrap_or(0.0);
-        let mut input_idx = 0usize;
-        while input_idx < config.in_features {
-            acc += input[input_idx] * raw_16bit_weight_at(raw_bytes, row_start + input_idx, dtype);
-            input_idx += 1;
+        if fast_bf16 {
+            acc += bf16_row_dot_f32(input, &raw_bytes[row_start * 2..(row_start + n) * 2], n);
+        } else {
+            let mut input_idx = 0usize;
+            while input_idx < n {
+                acc += input[input_idx] * raw_16bit_weight_at(raw_bytes, row_start + input_idx, dtype);
+                input_idx += 1;
+            }
         }
         best.observe(out_feature, acc);
     }
