@@ -5,6 +5,9 @@
 //! Original implementation (technique from DFloat11, arXiv 2504.11651); no code
 //! was copied and no external dependency is used.
 
+use crate::codec::{EncodeMeta, EncodedChunk, TensorCodec};
+use crate::error::{CodecError, Result};
+
 /// Split a bf16 bit pattern into (exponent, residual=sign|mantissa).
 /// exponent = bits 14..=7 ; residual = (sign << 7) | mantissa(bits 6..=0).
 #[inline]
@@ -202,6 +205,69 @@ pub fn build_decode_lut(lengths: &[u8; 256]) -> DecodeLut {
     DecodeLut { max_len, entries }
 }
 
+pub struct DfloatCodec;
+
+impl DfloatCodec {
+    pub const ID: &'static str = "rtc-dfloat-v1";
+}
+
+impl TensorCodec for DfloatCodec {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
+    fn encode(&self, input: &[u8], meta: &EncodeMeta) -> Result<EncodedChunk> {
+        if meta.dtype != "bf16" {
+            return Err(CodecError::InvalidData(format!(
+                "rtc-dfloat-v1 only supports bf16, got {}",
+                meta.dtype
+            )));
+        }
+        if input.len() % 2 != 0 {
+            return Err(CodecError::InvalidData("bf16 byte length must be even".into()));
+        }
+        let num_weights = input.len() / 2;
+
+        // Split fields + frequency count.
+        let mut exps = Vec::with_capacity(num_weights);
+        let mut residuals = Vec::with_capacity(num_weights);
+        let mut freqs = [0u64; 256];
+        for w in input.chunks_exact(2) {
+            let bits = u16::from_le_bytes([w[0], w[1]]);
+            let (e, r) = split_bf16(bits);
+            freqs[e as usize] += 1;
+            exps.push(e);
+            residuals.push(r);
+        }
+
+        let lengths = huffman_code_lengths(&freqs);
+        let codes = canonical_codes(&lengths);
+
+        let mut bw = BitWriter::new();
+        for &e in &exps {
+            bw.write(codes[e as usize], lengths[e as usize]);
+        }
+        let exp_stream = bw.finish();
+
+        let mut data = Vec::with_capacity(8 + 256 + 8 + exp_stream.len() + residuals.len());
+        data.extend_from_slice(&(num_weights as u64).to_le_bytes());
+        data.extend_from_slice(&lengths);
+        data.extend_from_slice(&(exp_stream.len() as u64).to_le_bytes());
+        data.extend_from_slice(&exp_stream);
+        data.extend_from_slice(&residuals);
+
+        Ok(EncodedChunk {
+            codec_id: Self::ID.to_string(),
+            data,
+            original_size: input.len() as u64,
+        })
+    }
+
+    fn decode(&self, _encoded: &[u8], _meta: &crate::codec::DecodeMeta) -> Result<Vec<u8>> {
+        Err(CodecError::InvalidData("decode implemented in the next task".into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +326,27 @@ mod tests {
             assert_eq!(sym, s);
             r.advance(len);
         }
+    }
+
+    #[test]
+    fn dfloat_encode_produces_expected_layout_and_shrinks() {
+        use crate::{EncodeMeta, TensorCodec};
+        // 1024 weights, exponents heavily skewed -> should compress below 2 bytes/weight.
+        let mut bytes = Vec::new();
+        for i in 0..1024u16 {
+            // exponent mostly 0x3F, occasionally others; random-ish mantissa
+            let exp: u16 = if i % 8 == 0 { 0x40 } else { 0x3F };
+            let mantissa = i & 0x7F;
+            let sign = (i >> 6) & 1;
+            let bits = (sign << 15) | (exp << 7) | mantissa;
+            bytes.extend_from_slice(&bits.to_le_bytes());
+        }
+        let codec = DfloatCodec;
+        let meta = EncodeMeta { name: "w".into(), shape: vec![1024], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &meta).unwrap();
+        assert_eq!(enc.codec_id, "rtc-dfloat-v1");
+        assert_eq!(enc.original_size, bytes.len() as u64);
+        // header(8) + table(256) + 8 + exp_bits + residuals(1024). Must beat raw 2048.
+        assert!(enc.data.len() < bytes.len(), "encoded {} !< raw {}", enc.data.len(), bytes.len());
     }
 }
