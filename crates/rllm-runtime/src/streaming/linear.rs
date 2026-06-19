@@ -704,6 +704,31 @@ pub fn streaming_tile_linear_multiply_into_from_model(
         )));
     }
 
+    // R133-style decode fast-path for the multiply-into projection (LLaMA up_proj
+    // at batch=1). The regular tile-linear path got the whole-tensor int8 sdot in
+    // R133, but multiply_into only had the batch>=2 panel path — so up_proj fell to
+    // the scalar per-chunk path on DECODE (~107ms/token vs ~6ms for gate_proj on
+    // Llama 1B). Compute the projection with the whole-tensor int8 sdot kernel into
+    // a scratch, then apply `target *= up + bias`. Falls through if not contiguous-raw.
+    if tensor.dtype == rllm_container::DType::Q8_0
+        && config.linear.batch == 1
+        && q8_activation_path_enabled()
+    {
+        let lin = config.linear;
+        let out_features = lin.out_features;
+        let mut up = vec![0.0f32; out_features];
+        let handled = model.with_raw_tensor(tensor.tensor_id, |q8_bytes| {
+            accumulate_q8_0_full_tensor_int8_batch1(input, &mut up, q8_bytes, lin)
+        })?;
+        if handled.is_some() {
+            for (f, slot) in target.iter_mut().enumerate().take(out_features) {
+                let bias_v = bias.map(|values| values[f]).unwrap_or(0.0);
+                *slot *= up[f] + bias_v;
+            }
+            return Ok(());
+        }
+    }
+
     // R121: i8mm packed-panel fast path for the multiply-into projection
     // (LLaMA up_proj). Compute the full Q8_0 linear dot product into a scratch
     // buffer via the same panel kernel R119 uses for gate/down, then apply
