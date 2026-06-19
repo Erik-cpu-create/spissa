@@ -215,13 +215,16 @@ fn run_interactive(
         let mut on_token = |token: usize| -> bool {
             reply_tokens.push(token);
             let full = tokenizer.decode(&reply_tokens).unwrap_or_default();
-            if let Some(rest) = full.strip_prefix(&shown) {
+            // Hold back a trailing replacement char (incomplete multi-byte tail, e.g.
+            // an emoji split across tokens) until the next token completes it.
+            let full = full.trim_end_matches('\u{FFFD}');
+            if let Some(rest) = full.strip_prefix(shown.as_str()) {
                 print!("{rest}");
             } else {
                 // A late token rewrote earlier text (rare): reprint the reply fresh.
                 print!("\rbot> {full}");
             }
-            shown = full;
+            shown = full.to_string();
             io::stdout().flush().ok();
             true
         };

@@ -568,16 +568,30 @@ fn main() -> Result<()> {
         let input_tokens = tokenizer.encode(&turn_text)?;
 
         let mut assistant_ended = false;
+        // Stream incrementally but re-decode the whole reply each token so multi-token
+        // glyphs (emoji, byte-fallback chars) render correctly, printing only the new
+        // suffix (no `\r`). Matches the Gemma REPL.
+        let mut reply_tokens: Vec<usize> = Vec::new();
+        let mut shown = String::new();
         let mut on_token = |token: usize| -> bool {
             if stop_token_ids.contains(&token) {
                 assistant_ended = true;
                 return false;
             }
-            if let Ok(word) = tokenizer.decode(&[token]) {
-                print!("{}", word);
+            reply_tokens.push(token);
+            if let Ok(full) = tokenizer.decode(&reply_tokens) {
+                // Hold back a trailing replacement char: it's almost always an
+                // incomplete multi-byte sequence (e.g. an emoji split across tokens)
+                // that the next token completes — printing it would flash a `�`.
+                let full = full.trim_end_matches('\u{FFFD}');
+                if let Some(rest) = full.strip_prefix(shown.as_str()) {
+                    print!("{rest}");
+                } else {
+                    print!("\n{full}");
+                }
+                shown = full.to_string();
                 io::stdout().flush().unwrap();
             }
-
             true
         };
 
