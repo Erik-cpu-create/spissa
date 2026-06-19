@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::io::{self, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::time::Instant;
 
 use rllm_runtime::{
     models::gemma::{
-        gemma_generate_from_model, prepare_gemma_transformer_from_metadata, GemmaGenerationConfig,
-        GemmaGenerationOptions,
+        gemma_generate_from_model, prepare_gemma_transformer_from_metadata, GemmaChatSession,
+        GemmaGenerationConfig, GemmaGenerationOptions, PreparedGemmaTransformer,
     },
     LazyRllmModel, MemoryBudget, RamaIntegrityMode, RllmTokenizer, StreamingSamplingConfig,
 };
@@ -60,6 +60,12 @@ struct Args {
     /// OOM caveat).
     #[arg(long, default_value_t = false)]
     fast: bool,
+
+    /// Interactive multi-turn chat (REPL). Loads the model once and keeps the KV
+    /// cache resident across turns, so each message only prefills the new text.
+    /// `--ctx` sets the conversation cap (default 2048). Commands: /reset /exit.
+    #[arg(short, long, default_value_t = false)]
+    interactive: bool,
 }
 
 fn parse_token_ids(raw: &str) -> Result<Vec<usize>> {
@@ -119,12 +125,134 @@ mod tests {
     }
 }
 
+/// Build the token ids for one user turn in Gemma's chat template. The first
+/// turn keeps the BOS that `encode` prepends; later turns drop it and prepend the
+/// `<end_of_turn>` that closes the previous (still-uncached) model reply.
+fn build_user_turn(
+    tokenizer: &RllmTokenizer,
+    msg: &str,
+    is_first: bool,
+    bos: Option<u64>,
+) -> Result<Vec<usize>> {
+    let text = if is_first {
+        format!("<start_of_turn>user\n{msg}<end_of_turn>\n<start_of_turn>model\n")
+    } else {
+        format!("<end_of_turn>\n<start_of_turn>user\n{msg}<end_of_turn>\n<start_of_turn>model\n")
+    };
+    let mut ids = tokenizer.encode(&text)?;
+    if !is_first {
+        if let Some(b) = bos {
+            if ids.first() == Some(&(b as usize)) {
+                ids.remove(0);
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// Interactive multi-turn chat REPL over a resident `GemmaChatSession`.
+fn run_interactive(
+    model: &mut LazyRllmModel,
+    prepared: &PreparedGemmaTransformer,
+    tokenizer: &RllmTokenizer,
+    stop_token_ids: &[usize],
+    bos: Option<u64>,
+    max_context: usize,
+) -> Result<()> {
+    const PER_TURN_MAX: usize = 512;
+    let mut budget = MemoryBudget::unbounded();
+    let mut session = GemmaChatSession::new(model, prepared, &mut budget, max_context)?;
+    let stdout_is_tty = io::stdout().is_terminal();
+
+    println!("\nRLLM Gemma chat — model loaded, KV cache resident (cap {max_context} tokens).");
+    println!("Type a message. Commands: /reset (new conversation), /exit.\n");
+
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    loop {
+        print!("you> ");
+        io::stdout().flush().ok();
+        let mut line = String::new();
+        if handle.read_line(&mut line)? == 0 {
+            println!();
+            break; // EOF (Ctrl-D)
+        }
+        let msg = line.trim();
+        if msg.is_empty() {
+            continue;
+        }
+        match msg {
+            "/exit" | "/quit" => break,
+            "/help" => {
+                println!("commands: /reset (new conversation), /exit");
+                continue;
+            }
+            "/reset" => {
+                session.reset(prepared)?;
+                println!("[new conversation]");
+                continue;
+            }
+            _ => {}
+        }
+
+        let is_first = session.total_tokens() == 0;
+        let turn_tokens = match build_user_turn(tokenizer, msg, is_first, bos) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("encode error: {e}");
+                continue;
+            }
+        };
+
+        print!("bot> ");
+        io::stdout().flush().ok();
+        let started = Instant::now();
+        let mut acc = String::new();
+        let mut on_token = |token: usize| -> bool {
+            let piece = tokenizer.decode(&[token]).unwrap_or_default();
+            acc.push_str(&piece);
+            if stdout_is_tty {
+                print!("\rbot> {acc}");
+            } else {
+                print!("{piece}");
+            }
+            io::stdout().flush().ok();
+            true
+        };
+        let result = session.feed_and_decode(
+            model,
+            prepared,
+            &mut budget,
+            &turn_tokens,
+            PER_TURN_MAX,
+            stop_token_ids,
+            &mut on_token,
+        );
+        println!();
+        match result {
+            Ok(gen) => {
+                let secs = started.elapsed().as_secs_f64();
+                eprintln!(
+                    "  [{} tok, {:.1} tok/s, ctx {}/{}]",
+                    gen.len(),
+                    gen.len() as f64 / secs.max(1e-6),
+                    session.total_tokens(),
+                    max_context
+                );
+            }
+            Err(e) => eprintln!("  [{e}] — use /reset to start over"),
+        }
+    }
+    println!("bye!");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     if args.ctx == 0 || args.max_new_tokens == 0 {
         anyhow::bail!("--ctx and --max-new-tokens must be greater than zero");
     }
-    if args.prompt.is_some() == args.token_ids.is_some() {
+    if !args.interactive && args.prompt.is_some() == args.token_ids.is_some() {
         anyhow::bail!("provide exactly one of --prompt or --token-ids");
     }
 
@@ -200,7 +328,9 @@ fn main() -> Result<()> {
         }
     }
 
-    let prompt_token_ids = if let Some(prompt) = args.prompt.as_deref() {
+    let prompt_token_ids = if args.interactive {
+        Vec::new()
+    } else if let Some(prompt) = args.prompt.as_deref() {
         let tokenizer = tokenizer
             .as_ref()
             .context("model has no tokenizer metadata; use --token-ids")?;
@@ -224,6 +354,14 @@ fn main() -> Result<()> {
         },
     )?;
 
+    if args.interactive {
+        let tokenizer = tokenizer
+            .as_ref()
+            .context("interactive mode needs tokenizer metadata")?;
+        let bos = model.metadata().tokenizer.as_ref().and_then(|m| m.bos_token_id);
+        return run_interactive(&mut model, &prepared, tokenizer, &stop_token_ids, bos, args.ctx);
+    }
+
     println!("===================================================");
     println!("RLLM Gemma single-shot generation (Phase 2 adapter)");
     println!("Model: {}", model.metadata().model_name);
@@ -244,15 +382,24 @@ fn main() -> Result<()> {
 
     let mut budget = MemoryBudget::unbounded();
     let started = Instant::now();
+    // On a real terminal, redraw the whole running line with `\r` so multi-token
+    // glyphs render smoothly. When stdout is piped/captured the `\r` isn't
+    // honored and the redraws pile up (looking like duplicated output), so there
+    // just append each newly decoded piece once.
+    let stdout_is_tty = io::stdout().is_terminal();
     let mut decoded_so_far = String::new();
     let mut on_token = |token: usize| -> bool {
         if stop_token_ids.contains(&token) {
             return false;
         }
         if let Some(tokenizer) = tokenizer.as_ref() {
-            // Re-decode the running sequence so multi-token glyphs render.
-            decoded_so_far.push_str(&tokenizer.decode(&[token]).unwrap_or_default());
-            print!("\r{decoded_so_far}");
+            let piece = tokenizer.decode(&[token]).unwrap_or_default();
+            decoded_so_far.push_str(&piece);
+            if stdout_is_tty {
+                print!("\r{decoded_so_far}");
+            } else {
+                print!("{piece}");
+            }
             let _ = io::stdout().flush();
         }
         true
