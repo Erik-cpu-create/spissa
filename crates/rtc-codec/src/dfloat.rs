@@ -100,10 +100,8 @@ impl<'a> BitReader<'a> {
     }
 }
 
-const MAX_CODE_LEN: u8 = 15;
-
-/// Compute Huffman code lengths from symbol frequencies via repeated min-merge,
-/// then enforce a 15-bit ceiling. Length 0 means the symbol does not occur.
+/// Compute Huffman code lengths from symbol frequencies via repeated min-merge.
+/// Length 0 means the symbol does not occur.
 pub fn huffman_code_lengths(freqs: &[u64; 256]) -> [u8; 256] {
     // Collect used symbols.
     let used: Vec<usize> = (0..256).filter(|&s| freqs[s] > 0).collect();
@@ -152,17 +150,9 @@ pub fn huffman_code_lengths(freqs: &[u64; 256]) -> [u8; 256] {
         nodes.push(Node { weight: a.weight + b.weight, members });
     }
 
-    // Enforce the 15-bit ceiling: clamp (rare for low-entropy exponents). Clamping
-    // can break the prefix property, so re-canonicalize via lengths only — the
-    // canonical_codes step below assigns valid prefix-free codes for ANY length
-    // multiset that satisfies Kraft; clamping long codes keeps Kraft satisfiable
-    // because we only ever shorten. We clamp then verify Kraft, shortening the
-    // longest as needed.
-    for s in 0..256 {
-        if lengths[s] > MAX_CODE_LEN {
-            lengths[s] = MAX_CODE_LEN;
-        }
-    }
+    // No length cap: the min-merge above produces valid (Kraft-satisfying) Huffman
+    // lengths. Inputs are bf16 EXPONENT bytes (256 symbols, low-entropy), whose code
+    // lengths stay well under 16, so the decode LUT (2^max_len entries) stays small.
     lengths
 }
 
