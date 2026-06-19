@@ -183,10 +183,11 @@ fn lm_head_logits_rows_bf16(
     row_offset: usize,
     out: &mut [f32],
 ) {
+    let act = Bf16DotActivation::new(last_hidden);
     for (r, logit) in out.iter_mut().enumerate() {
         let row_base = (row_offset + r) * hidden * 2;
         let wrow = &weight_bf16[row_base..row_base + hidden * 2];
-        *logit = bf16_row_dot_f32(last_hidden, wrow, hidden);
+        *logit = act.row_dot(wrow, hidden);
     }
 }
 
@@ -350,6 +351,62 @@ unsafe fn bf16_row_dot_bf16(hid_bf16: &[u16], wrow: &[u8], hidden: usize) -> f32
         i += 1;
     }
     sum
+}
+
+/// bfdot is the `--fast` LM-head/embedding kernel: it engages only when the fast
+/// (int8-activation) path is on, the CPU has FEAT_BF16, and it is not disabled via
+/// `RLLM_BF16_DOT=0`. The exact (non-fast) default stays on the f32-upcast path, so
+/// the lossless-by-default behavior is unchanged. False on non-aarch64.
+fn bf16_dot_enabled() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        if matches!(std::env::var("RLLM_BF16_DOT").as_deref(), Ok("0")) {
+            return false;
+        }
+        q8_activation_path_enabled() && bf16_dot_available()
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
+    }
+}
+
+/// Holds a GEMV activation in the form the row-dot kernel needs, converting f32 ->
+/// bf16 ONCE when bfdot is active so the per-row cost is pure bfdot. Falls back to
+/// holding the f32 slice and using the f32 kernel otherwise.
+enum Bf16DotActivation<'a> {
+    Bf16(Vec<u16>),
+    F32(&'a [f32]),
+}
+
+impl<'a> Bf16DotActivation<'a> {
+    fn new(hid: &'a [f32]) -> Self {
+        if bf16_dot_enabled() {
+            Bf16DotActivation::Bf16(convert_f32_to_bf16(hid))
+        } else {
+            Bf16DotActivation::F32(hid)
+        }
+    }
+
+    #[inline]
+    fn row_dot(&self, wrow: &[u8], hidden: usize) -> f32 {
+        match self {
+            Bf16DotActivation::Bf16(a) => {
+                #[cfg(target_arch = "aarch64")]
+                {
+                    // SAFETY: the Bf16 variant is only constructed when
+                    // bf16_dot_enabled() -> bf16_dot_available() == FEAT_BF16.
+                    unsafe { bf16_row_dot_bf16(a, wrow, hidden) }
+                }
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    let _ = a;
+                    unreachable!("Bf16 activation variant cannot exist off aarch64")
+                }
+            }
+            Bf16DotActivation::F32(h) => bf16_row_dot_f32(h, wrow, hidden),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
