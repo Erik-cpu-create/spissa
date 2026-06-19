@@ -158,6 +158,19 @@ fn main() -> Result<()> {
     };
     model.set_rama_integrity_mode(integrity_mode);
 
+    // Front-load the per-chunk SHA-256 integrity pass across cores. In VerifyOnce
+    // this moves the multi-second verification out of the first prefill (where it
+    // would run serially inline) into a brief parallel startup step, and lets the
+    // decode fast-path skip its whole-tensor hash. No-op for Strict/Unchecked.
+    let prewarm_start = Instant::now();
+    let verified_chunks = model.prewarm_chunk_integrity()?;
+    if verified_chunks > 0 {
+        eprintln!(
+            "[gemma-test] integrity prewarm: verified {verified_chunks} chunks in {:.2}s",
+            prewarm_start.elapsed().as_secs_f64()
+        );
+    }
+
     let tokenizer = model
         .metadata()
         .tokenizer
