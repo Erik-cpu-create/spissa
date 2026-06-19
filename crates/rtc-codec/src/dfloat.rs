@@ -706,6 +706,65 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn dfloat_fast_decode_feasibility() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        let bytes = std::fs::read("/tmp/rllm-bf16-sample.bin")
+            .expect("run dump_bf16_embedding_sample first (see plan Task 3, Step 2)");
+        let num_weights = bytes.len() / 2;
+        let codec = DfloatCodec;
+        let emeta =
+            EncodeMeta { name: "embed".into(), shape: vec![num_weights as u64], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+        let bits_per_weight = (enc.data.len() as f64 * 8.0) / num_weights as f64;
+        let dmeta =
+            DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: bytes.len() as u64 };
+
+        // Correctness on the real sample before timing.
+        let fast = codec.decode_fast(&enc.data).unwrap();
+        assert_eq!(fast, bytes, "decode_fast must be lossless on the real embedding");
+
+        // Warm, timed fast decode.
+        let iters = 5;
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            let d = codec.decode_fast(&enc.data).unwrap();
+            std::hint::black_box(&d);
+        }
+        let fast_s = t.elapsed().as_secs_f64() / iters as f64;
+        let fast_gw = (num_weights as f64 / 1e9) / fast_s; // Gweight/s
+        let fast_gbps = (bytes.len() as f64 / 1e9) / fast_s; // GB/s bf16-out
+
+        // One pass of the naive decoder for the speedup ratio (it is ~26 s).
+        let t = std::time::Instant::now();
+        let slow = codec.decode(&enc.data, &dmeta).unwrap();
+        std::hint::black_box(&slow);
+        let slow_s = t.elapsed().as_secs_f64();
+        let slow_gw = (num_weights as f64 / 1e9) / slow_s;
+
+        let agg = fast_gw * 3.5; // A18: 2 P + 4 E ≈ 3.5 P-equivalent
+        let verdict = if agg >= 12.0 {
+            "GO"
+        } else if agg >= 5.0 {
+            "MARGINAL"
+        } else {
+            "NO-GO"
+        };
+
+        eprintln!(
+            "\n=== R142 REEDRIP fast-decode FEASIBILITY ===\n\
+             weights={num_weights}  bits/weight={bits_per_weight:.3}\n\
+             fast single-core: {fast_gw:.2} Gweight/s  ({fast_gbps:.2} GB/s bf16-out, {:.1} ms/decode)\n\
+             naive single-core: {slow_gw:.4} Gweight/s  (speedup {:.0}x)\n\
+             aggregate (x3.5): {agg:.1} Gweight/s\n\
+             threshold: GO>=12, MARGINAL 5-12, NO-GO<5 (Gweight/s aggregate)\n\
+             VERDICT: {verdict}\n",
+            fast_s * 1000.0,
+            fast_gw / slow_gw,
+        );
+    }
+
+    #[test]
+    #[ignore]
     fn dfloat_feasibility_ratio_and_throughput() {
         use crate::{DecodeMeta, EncodeMeta, TensorCodec};
         let bytes = std::fs::read("/tmp/rllm-bf16-sample.bin")
