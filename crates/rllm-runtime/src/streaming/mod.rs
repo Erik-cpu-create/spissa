@@ -266,6 +266,92 @@ unsafe fn bf16_row_dot_f32_neon(hid: &[f32], wrow: &[u8], hidden: usize) -> f32 
     sum
 }
 
+/// f32 -> bf16 with round-to-nearest, ties-to-even. Returns the bf16 bit pattern.
+fn f32_to_bf16_rne(x: f32) -> u16 {
+    let bits = x.to_bits();
+    if (bits & 0x7FFF_FFFF) > 0x7F80_0000 {
+        // NaN: truncate to bf16 but force a nonzero mantissa so it stays NaN.
+        return ((bits >> 16) as u16) | 0x0040;
+    }
+    let rounding_bias = 0x0000_7FFFu32 + ((bits >> 16) & 1);
+    (bits.wrapping_add(rounding_bias) >> 16) as u16
+}
+
+/// Convert an f32 activation row to a bf16 scratch buffer (done once per GEMV).
+fn convert_f32_to_bf16(hid: &[f32]) -> Vec<u16> {
+    hid.iter().map(|&x| f32_to_bf16_rne(x)).collect()
+}
+
+#[cfg(target_arch = "aarch64")]
+fn bf16_dot_available() -> bool {
+    static AVAIL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAIL.get_or_init(|| std::arch::is_aarch64_feature_detected!("bf16"))
+}
+
+/// Dot product of a bf16 activation row (native u16) with one bf16 weight row
+/// (little-endian u16 bytes), accumulated in f32 via ARM `bfdot`. Weights are read
+/// exactly as stored. 4 independent accumulator chains for ILP, 32 bf16 per
+/// iteration; scalar tail upcasts both operands to f32 (exact).
+///
+/// SAFETY: caller guarantees `FEAT_BF16` (see `bf16_dot_available`), `hid_bf16` has
+/// `hidden` u16, and `wrow` has `hidden * 2` bytes.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "bf16")]
+unsafe fn bf16_row_dot_bf16(hid_bf16: &[u16], wrow: &[u8], hidden: usize) -> f32 {
+    use std::arch::aarch64::*;
+    debug_assert!(hid_bf16.len() >= hidden && wrow.len() >= hidden * 2);
+    let aptr = hid_bf16.as_ptr();
+    let wptr = wrow.as_ptr();
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut i = 0usize;
+    while i + 32 <= hidden {
+        let a0 = aptr.add(i) as *const u8;
+        let a1 = aptr.add(i + 8) as *const u8;
+        let a2 = aptr.add(i + 16) as *const u8;
+        let a3 = aptr.add(i + 24) as *const u8;
+        let w0 = wptr.add(i * 2);
+        let w1 = wptr.add((i + 8) * 2);
+        let w2 = wptr.add((i + 16) * 2);
+        let w3 = wptr.add((i + 24) * 2);
+        std::arch::asm!(
+            "ld1 {{v0.8h}}, [{a0}]",
+            "ld1 {{v1.8h}}, [{a1}]",
+            "ld1 {{v2.8h}}, [{a2}]",
+            "ld1 {{v3.8h}}, [{a3}]",
+            "ld1 {{v4.8h}}, [{w0}]",
+            "ld1 {{v5.8h}}, [{w1}]",
+            "ld1 {{v6.8h}}, [{w2}]",
+            "ld1 {{v7.8h}}, [{w3}]",
+            "bfdot {acc0:v}.4s, v4.8h, v0.8h",
+            "bfdot {acc1:v}.4s, v5.8h, v1.8h",
+            "bfdot {acc2:v}.4s, v6.8h, v2.8h",
+            "bfdot {acc3:v}.4s, v7.8h, v3.8h",
+            a0 = in(reg) a0, a1 = in(reg) a1, a2 = in(reg) a2, a3 = in(reg) a3,
+            w0 = in(reg) w0, w1 = in(reg) w1, w2 = in(reg) w2, w3 = in(reg) w3,
+            acc0 = inout(vreg) acc0,
+            acc1 = inout(vreg) acc1,
+            acc2 = inout(vreg) acc2,
+            acc3 = inout(vreg) acc3,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+            out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+            options(readonly, nostack),
+        );
+        i += 32;
+    }
+    let mut sum = vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
+    while i < hidden {
+        let wb = u16::from_le_bytes([*wptr.add(i * 2), *wptr.add(i * 2 + 1)]);
+        let w = f32::from_bits((wb as u32) << 16);
+        let a = f32::from_bits((*aptr.add(i) as u32) << 16);
+        sum += a * w;
+        i += 1;
+    }
+    sum
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingLinearConfig {
     pub batch: usize,
