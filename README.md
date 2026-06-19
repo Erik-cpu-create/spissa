@@ -107,6 +107,59 @@ vs Ollama is the 2-performance-core hardware ceiling, not kernel quality.
   --codec raw          # raw (rtc-raw-v1) is required for the zero-copy fast path
 ```
 
+## Why RLLM
+
+What makes RLLM different from just running a quantized model in Ollama or
+llama.cpp:
+
+- **Lossless by default.** The transformer weights are stored bit-identically to
+  the original safetensors — `decode(encode(w)) == w`, checked per byte. Other
+  runtimes ship lossy quantized weights (q4/q6/q8 K-quants that approximate the
+  model). RLLM only ever quantizes the *f32 activation* at runtime in `--fast`
+  (a quant-only diff, opt-in and labeled), never the stored weights. You get the
+  real model, not an approximation of it.
+- **Custom in-house codecs (RTC).** Compression is done by **RTC (RLLM Tensor
+  Codec)** — our own lossless tensor codecs, not a generic library like
+  zstd/gzip. See [RTC below](#rtc-rllm-tensor-codec).
+- **Integrity every run.** Every weight chunk carries a SHA-256 and is verified
+  (once per process in `verify-once`, prewarmed in parallel under `--fast`).
+  Ollama/llama.cpp do not verify weights at load — RLLM proves the bytes are
+  intact before using them.
+- **Memory-first, runtime-compressed.** Weights are dormant compressed memory;
+  only the chunks/tiles needed are decoded, under a bounded `MemoryBudget`. On
+  small models this shows as a real RAM win (Llama 3.2 1B: ~1.05 GB vs Ollama's
+  ~1.8 GB on the same machine).
+- **Original, not a wrapper.** RLLM does not embed or shell out to Ollama or
+  llama.cpp. The container, codecs, and CPU kernels are written from scratch — yet
+  reach **prefill parity** with llama.cpp/Ollama on the same chip (and within
+  ~1.5–2.5× on decode, a hardware-core ceiling, not a kernel-quality gap).
+- **Honest metrics.** No "10× smaller, same quality" claims. Compression ratios,
+  tok/s, and RAM are measured and reported as-is, including the limitations.
+
+### RTC (RLLM Tensor Codec)
+
+RTC is RLLM's family of **lossless** tensor codecs. Each must satisfy
+`decode(encode(input)) == input` exactly — that is the contract that keeps the
+model bit-identical. The codec is chosen *per chunk* at pack time, which lets one
+`.rllm` trade storage size against runtime speed:
+
+- **`rtc-raw-v1`** — identity layout. No size win, but its bytes are the final
+  weight bytes, so the runtime reads them **zero-copy straight from the mmap** —
+  this is what the `--fast` q8 kernels need (whole-tensor `sdot`/`i8mm` with no
+  per-token decode). Pack q8 models with `--codec raw`.
+- **`rtc-rle-v1`** — run-length encoding for repetitive regions.
+- **`rtc-huff-v1`** — in-house **byte-level Huffman** entropy codec for real
+  lossless size reduction on disk (e.g. Pythia-70M packs to ~76% of the original
+  safetensors, bit-exact).
+- planned: `rtc-delta-v1`, `rtc-bitplane-v1`, `rtc-entropy-v1`.
+
+The key design point: RTC separates **storage compression** (entropy codecs like
+Huffman, smaller on disk) from **runtime residency** (raw, zero-copy, fast). A
+generic compressor would force you to decompress the whole model into RAM before
+inference; RTC lets the runtime decode only the tiles it needs — or skip decode
+entirely on the raw fast path — while still being able to verify every byte.
+Details: [docs/codec-rtc-v1.md](docs/codec-rtc-v1.md).
+
 ## Current Status
 
 Implemented:
