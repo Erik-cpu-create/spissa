@@ -219,8 +219,12 @@ impl TensorSource {
 /// apply), and drops the vision tower / multimodal projector. Other architectures
 /// pass through unchanged.
 fn map_tensor_names(raw: &[String], architecture: &str) -> Vec<(String, String)> {
-    if architecture.starts_with("gemma") {
-        const PREFIX: &str = "language_model.";
+    const PREFIX: &str = "language_model.";
+    // Multimodal Gemma (`Gemma3ForConditionalGeneration`, e.g. 4B) wraps the LM
+    // under `language_model.`; text-only Gemma (`Gemma3ForCausalLM`, e.g. 1B) uses
+    // bare `model.*`. Only strip/filter the prefix when it is actually present —
+    // otherwise a text-only Gemma checkpoint would be filtered down to zero tensors.
+    if architecture.starts_with("gemma") && raw.iter().any(|t| t.starts_with(PREFIX)) {
         let mut mapped: Vec<(String, String)> = raw
             .iter()
             .filter(|t| t.starts_with(PREFIX))
@@ -791,8 +795,37 @@ mod tests {
     use super::{
         effective_chunk_size_bytes_for_tensor, input_tile_range_specs, input_tile_sidecar_bytes,
         is_llama_attention_projection_weight, is_llama_lm_head_weight,
-        is_llama_mlp_projection_weight, PackCodecPolicy, PackQuantizePolicy,
+        is_llama_mlp_projection_weight, map_tensor_names, PackCodecPolicy, PackQuantizePolicy,
     };
+
+    #[test]
+    fn map_tensor_names_keeps_text_only_gemma() {
+        // Text-only Gemma (Gemma3ForCausalLM, e.g. 1B): bare `model.*` names, no
+        // `language_model.` prefix -> identity passthrough (regression: was filtered
+        // to zero tensors).
+        let raw = vec![
+            "model.embed_tokens.weight".to_string(),
+            "model.layers.0.self_attn.q_proj.weight".to_string(),
+            "model.norm.weight".to_string(),
+        ];
+        let mapped = map_tensor_names(&raw, "gemma3");
+        assert_eq!(mapped.len(), 3, "text-only gemma must keep all tensors");
+        assert!(mapped.iter().all(|(dst, src)| dst == src));
+    }
+
+    #[test]
+    fn map_tensor_names_strips_multimodal_gemma_prefix() {
+        // Multimodal Gemma (Gemma3ForConditionalGeneration, e.g. 4B): strip the
+        // `language_model.` prefix and drop the vision tower.
+        let raw = vec![
+            "language_model.model.layers.0.self_attn.q_proj.weight".to_string(),
+            "vision_tower.encoder.layer.0.weight".to_string(),
+        ];
+        let mapped = map_tensor_names(&raw, "gemma3");
+        assert_eq!(mapped.len(), 1, "vision tower dropped, LM kept");
+        assert_eq!(mapped[0].0, "model.layers.0.self_attn.q_proj.weight");
+        assert_eq!(mapped[0].1, "language_model.model.layers.0.self_attn.q_proj.weight");
+    }
 
     #[test]
     fn pack_codec_policy_accepts_short_and_codec_ids() {
