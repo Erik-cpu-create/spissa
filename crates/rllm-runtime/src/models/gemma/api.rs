@@ -183,6 +183,83 @@ fn decode_layer_norms(
     })
 }
 
+/// Tied-embedding context resolved once per generation/session: the embedding
+/// tensor id, vocab size, and an optional resident f32 table (None when the
+/// bf16-direct mmap path is used).
+struct GemmaEmbedCtx<'a> {
+    embed_id: u64,
+    vocab_size: usize,
+    embedding_f32: Option<&'a [f32]>,
+}
+
+/// One transformer forward over `current_tokens` (prefill chunk or a single
+/// decode token): input embed → blocks (appending to `caches`) → final norm →
+/// LM head, returning the next-token logits. Shared by the single-shot
+/// generator and the interactive `GemmaChatSession` so both stay identical.
+#[allow(clippy::too_many_arguments)]
+fn gemma_forward_logits(
+    model: &mut LazyRllmModel,
+    prepared: &PreparedGemmaTransformer,
+    embed: &GemmaEmbedCtx,
+    current_tokens: &[usize],
+    position_offset: usize,
+    caches: &mut [KvCache],
+    budget: &mut MemoryBudget,
+    profile_step: usize,
+) -> Result<Vec<f32>> {
+    let build = &prepared.config;
+    let hidden = build.hidden_size;
+    let seq_len = current_tokens.len();
+
+    let mut hidden_states = gemma_embed_input(
+        model,
+        embed.embedding_f32,
+        embed.embed_id,
+        current_tokens,
+        embed.vocab_size,
+        hidden,
+        build.embed_scale,
+    )?;
+
+    let layers_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
+    for (i, names) in prepared.layers.iter().enumerate() {
+        hidden_states = streaming_gemma_transformer_block(
+            model,
+            &hidden_states,
+            names,
+            &prepared.layer_norms[i],
+            build,
+            GemmaBlockRuntime { seq_len, position_offset, layer_index: i },
+            budget,
+            Some(&mut caches[i]),
+        )?;
+    }
+    if let Some(t) = layers_started {
+        eprintln!(
+            "[gemma-profile] step {profile_step} seq_len={seq_len}: {} layers {:.0}ms",
+            prepared.layers.len(),
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    hidden_states = rms_norm(&hidden_states, &prepared.final_layernorm, seq_len, hidden, build.rms_norm_eps)?;
+
+    let last_hidden = &hidden_states[(seq_len - 1) * hidden..];
+    // R131: parallel LM-head GEMV over the 262k-row vocabulary (bf16-direct from
+    // mmap, or f32 fallback).
+    let lm_head_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
+    let logits = gemma_lm_head(model, embed.embedding_f32, embed.embed_id, last_hidden, embed.vocab_size, hidden)?;
+    if let Some(t) = lm_head_started {
+        eprintln!(
+            "[gemma-profile] step {profile_step} lm_head {:.0}ms (vocab={})",
+            t.elapsed().as_secs_f64() * 1000.0,
+            embed.vocab_size
+        );
+    }
+
+    Ok(logits)
+}
+
 pub fn gemma_generate_from_model(
     model: &mut LazyRllmModel,
     prepared: &PreparedGemmaTransformer,
@@ -192,7 +269,6 @@ pub fn gemma_generate_from_model(
     on_token: &mut dyn FnMut(usize) -> bool,
 ) -> Result<GemmaTextGenerationResult> {
     let build = &prepared.config;
-    let hidden = build.hidden_size;
     let mut token_ids = prompt_token_ids.to_vec();
     let mut generated_token_ids = Vec::new();
 
@@ -207,16 +283,8 @@ pub fn gemma_generate_from_model(
     // and dequant-on-the-fly for both the input lookup and the LM head. Fall back
     // to a one-time f32 decode only if the embedding isn't a contiguous bf16 raw
     // tensor (e.g. a different codec/dtype).
-    let embed_meta = model.tensor(&prepared.embedding_weight)?.clone();
-    let vocab_size = embed_meta.shape.first().copied().unwrap_or(0) as usize;
-    let embed_id = embed_meta.tensor_id;
-    let bf16_direct = embed_meta.dtype == DType::Bf16
-        && model.with_raw_tensor(embed_id, |_| Ok::<(), RuntimeError>(()))?.is_some();
-    let embedding_f32: Option<Vec<f32>> = if bf16_direct {
-        None
-    } else {
-        Some(model.decode_tensor(&prepared.embedding_weight, budget)?.data)
-    };
+    let (embed_id, vocab_size, embedding_f32) = resolve_gemma_embedding(model, prepared, budget)?;
+    let embed_ctx = GemmaEmbedCtx { embed_id, vocab_size, embedding_f32: embedding_f32.as_deref() };
 
     // For parity we keep the first decode step's logits (the prefill → first
     // predicted token over the raw prompt), which is the most directly
@@ -228,64 +296,18 @@ pub fn gemma_generate_from_model(
         } else {
             &generated_token_ids[generated_token_ids.len() - 1..]
         };
-        let seq_len = current_tokens.len();
-        let position_offset = token_ids.len() - seq_len;
+        let position_offset = token_ids.len() - current_tokens.len();
 
-        let mut hidden_states = gemma_embed_input(
+        let logits = gemma_forward_logits(
             model,
-            embedding_f32.as_deref(),
-            embed_id,
+            prepared,
+            &embed_ctx,
             current_tokens,
-            vocab_size,
-            hidden,
-            build.embed_scale,
+            position_offset,
+            &mut caches,
+            budget,
+            step,
         )?;
-
-        let layers_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
-        for (i, names) in prepared.layers.iter().enumerate() {
-            hidden_states = streaming_gemma_transformer_block(
-                model,
-                &hidden_states,
-                names,
-                &prepared.layer_norms[i],
-                build,
-                GemmaBlockRuntime {
-                    seq_len,
-                    position_offset,
-                    layer_index: i,
-                },
-                budget,
-                Some(&mut caches[i]),
-            )?;
-        }
-        if let Some(t) = layers_started {
-            eprintln!(
-                "[gemma-profile] step {step} seq_len={seq_len}: {} layers {:.0}ms",
-                prepared.layers.len(),
-                t.elapsed().as_secs_f64() * 1000.0
-            );
-        }
-
-        hidden_states = rms_norm(&hidden_states, &prepared.final_layernorm, seq_len, hidden, build.rms_norm_eps)?;
-
-        let last_hidden = &hidden_states[(seq_len - 1) * hidden..];
-        // R131: parallel LM-head GEMV over the 262k-row vocabulary (bf16-direct
-        // from mmap, or f32 fallback).
-        let lm_head_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
-        let logits = gemma_lm_head(
-            model,
-            embedding_f32.as_deref(),
-            embed_id,
-            last_hidden,
-            vocab_size,
-            hidden,
-        )?;
-        if let Some(t) = lm_head_started {
-            eprintln!(
-                "[gemma-profile] step {step} lm_head {:.0}ms (vocab={vocab_size})",
-                t.elapsed().as_secs_f64() * 1000.0
-            );
-        }
 
         let next_token = match build.sampling {
             StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
@@ -311,6 +333,137 @@ pub fn gemma_generate_from_model(
         context_echo_bytes,
         logits: first_step_logits,
     })
+}
+
+/// Resolve the tied embedding once: prefer the bf16-direct mmap path (no 2.68 GB
+/// f32 materialization); otherwise decode the table to a resident f32 vector.
+fn resolve_gemma_embedding(
+    model: &mut LazyRllmModel,
+    prepared: &PreparedGemmaTransformer,
+    budget: &mut MemoryBudget,
+) -> Result<(u64, usize, Option<Vec<f32>>)> {
+    let embed_meta = model.tensor(&prepared.embedding_weight)?.clone();
+    let vocab_size = embed_meta.shape.first().copied().unwrap_or(0) as usize;
+    let embed_id = embed_meta.tensor_id;
+    let bf16_direct = embed_meta.dtype == DType::Bf16
+        && model.with_raw_tensor(embed_id, |_| Ok::<(), RuntimeError>(()))?.is_some();
+    let embedding_f32 = if bf16_direct {
+        None
+    } else {
+        Some(model.decode_tensor(&prepared.embedding_weight, budget)?.data)
+    };
+    Ok((embed_id, vocab_size, embedding_f32))
+}
+
+/// A multi-turn Gemma chat with a RESIDENT KV cache. Built once (model load +
+/// embedding resolve), then each turn prefills only the new tokens into the
+/// existing caches and decodes the reply — so per-turn latency is independent of
+/// the conversation length (unlike re-prefilling the whole history every turn).
+pub struct GemmaChatSession {
+    caches: Vec<KvCache>,
+    total_tokens: usize,
+    max_context: usize,
+    embed_id: u64,
+    vocab_size: usize,
+    embedding_f32: Option<Vec<f32>>,
+}
+
+impl GemmaChatSession {
+    /// Allocate the per-layer KV caches (sized to `max_context`) and resolve the
+    /// tied embedding once.
+    pub fn new(
+        model: &mut LazyRllmModel,
+        prepared: &PreparedGemmaTransformer,
+        budget: &mut MemoryBudget,
+        max_context: usize,
+    ) -> Result<Self> {
+        let build = &prepared.config;
+        let mut caches = Vec::with_capacity(prepared.layers.len());
+        for _ in 0..prepared.layers.len() {
+            caches.push(KvCache::new(build.num_key_value_heads, build.head_dim, max_context)?);
+        }
+        let (embed_id, vocab_size, embedding_f32) = resolve_gemma_embedding(model, prepared, budget)?;
+        Ok(Self { caches, total_tokens: 0, max_context, embed_id, vocab_size, embedding_f32 })
+    }
+
+    /// Tokens currently held in the KV cache (the running conversation length).
+    pub fn total_tokens(&self) -> usize {
+        self.total_tokens
+    }
+
+    pub fn max_context(&self) -> usize {
+        self.max_context
+    }
+
+    /// Drop the conversation: fresh KV caches, position back to zero.
+    pub fn reset(&mut self, prepared: &PreparedGemmaTransformer) -> Result<()> {
+        let build = &prepared.config;
+        for cache in &mut self.caches {
+            *cache = KvCache::new(build.num_key_value_heads, build.head_dim, self.max_context)?;
+        }
+        self.total_tokens = 0;
+        Ok(())
+    }
+
+    /// Prefill `new_tokens` into the resident caches, then greedily/sampled-decode
+    /// the reply, streaming each token through `on_token` and stopping at a
+    /// `stop_ids` token (which is NOT fed to the cache, so the next turn supplies
+    /// the turn-closing marker). Returns the generated tokens (excluding stop).
+    #[allow(clippy::too_many_arguments)]
+    pub fn feed_and_decode(
+        &mut self,
+        model: &mut LazyRllmModel,
+        prepared: &PreparedGemmaTransformer,
+        budget: &mut MemoryBudget,
+        new_tokens: &[usize],
+        max_new: usize,
+        stop_ids: &[usize],
+        on_token: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Vec<usize>> {
+        if new_tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.total_tokens + new_tokens.len() > self.max_context {
+            return Err(RuntimeError::Shape(format!(
+                "gemma chat context full ({} + {} > {})",
+                self.total_tokens,
+                new_tokens.len(),
+                self.max_context
+            )));
+        }
+        let build = &prepared.config;
+        let embed = GemmaEmbedCtx {
+            embed_id: self.embed_id,
+            vocab_size: self.vocab_size,
+            embedding_f32: self.embedding_f32.as_deref(),
+        };
+        let mut generated = Vec::new();
+        let mut current: Vec<usize> = new_tokens.to_vec();
+        for step in 0..max_new {
+            let position_offset = self.total_tokens;
+            let logits = gemma_forward_logits(
+                model, prepared, &embed, &current, position_offset, &mut self.caches, budget, step,
+            )?;
+            // `current` is now resident in the caches.
+            self.total_tokens += current.len();
+
+            let next = match build.sampling {
+                StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
+                StreamingSamplingConfig::TopP { temperature, top_p, seed } => {
+                    sample_top_p(&logits, temperature, top_p, seed)?
+                }
+            };
+            if stop_ids.contains(&next) {
+                break;
+            }
+            generated.push(next);
+            if !on_token(next) || self.total_tokens >= self.max_context {
+                break;
+            }
+            current = vec![next];
+        }
+        Ok(generated)
+    }
 }
 
 /// Input embedding lookup scaled by `embed_scale` — from a resident f32 table
