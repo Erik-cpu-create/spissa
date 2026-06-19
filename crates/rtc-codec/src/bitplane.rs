@@ -345,6 +345,70 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore]
+    fn bitplane_neon_decode_feasibility() {
+        let bytes = std::fs::read("/tmp/rllm-bf16-sample.bin")
+            .expect("run dump_bf16_embedding_sample first (see plan Task 3, Step 2)");
+        let n = bytes.len() / 2;
+        let codec = BitplaneCodec;
+        let meta = EncodeMeta { name: "embed".into(), shape: vec![n as u64], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &meta).unwrap();
+        let bits_per_weight = (enc.data.len() as f64 * 8.0) / n as f64;
+        let p = enc.data[14] as usize;
+        let w = enc.data[15];
+        assert_eq!(w, 5, "expected w=5 (32 exponents) for the real embedding");
+        let mut off = 16;
+        let palette = enc.data[off..off + p].to_vec();
+        off += p;
+        let idx_bytes = (n * 5 + 7) / 8;
+        let idx_plane = enc.data[off..off + idx_bytes].to_vec();
+        off += idx_bytes;
+        let residuals = enc.data[off..off + n].to_vec();
+
+        // Correctness on the real sample.
+        let neon = decode_neon_w5(&palette, &idx_plane, &residuals, n);
+        assert_eq!(neon, bytes, "NEON decode must be lossless on the real embedding");
+
+        // Timed NEON decode (materializing; the fused kernel would skip the store,
+        // so this is a conservative floor).
+        let iters = 8;
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            let d = decode_neon_w5(&palette, &idx_plane, &residuals, n);
+            std::hint::black_box(&d);
+        }
+        let neon_s = t.elapsed().as_secs_f64() / iters as f64;
+        let neon_gw = (n as f64 / 1e9) / neon_s;
+
+        // Scalar bitplane decode for the speedup ratio (one pass).
+        let t = std::time::Instant::now();
+        let sc = codec
+            .decode(
+                &enc.data,
+                &DecodeMeta { codec_id: "rtc-bitplane-v1".into(), uncompressed_size: 0 },
+            )
+            .unwrap();
+        std::hint::black_box(&sc);
+        let scalar_s = t.elapsed().as_secs_f64();
+        let scalar_gw = (n as f64 / 1e9) / scalar_s;
+
+        let agg = neon_gw * 3.5;
+        let verdict = if agg >= 12.0 { "GO" } else if agg >= 5.0 { "MARGINAL" } else { "NO-GO" };
+        eprintln!(
+            "\n=== R143 REEPLANE bit-plane NEON decode FEASIBILITY ===\n\
+             weights={n}  bits/weight={bits_per_weight:.3}  palette={p} w={w}\n\
+             NEON single-core: {neon_gw:.2} Gweight/s  ({:.1} ms/decode, materializing)\n\
+             scalar bitplane: {scalar_gw:.3} Gweight/s  (NEON speedup {:.1}x)\n\
+             aggregate (x3.5): {agg:.1} Gweight/s\n\
+             threshold: GO>=12, MARGINAL 5-12, NO-GO<5 (Gweight/s aggregate)\n\
+             VERDICT: {verdict}\n",
+            neon_s * 1000.0,
+            neon_gw / scalar_gw,
+        );
+    }
+
     #[test]
     fn bitplane_index_width_is_ceil_log2() {
         assert_eq!(index_width(1), 0);
