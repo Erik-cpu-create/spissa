@@ -373,6 +373,75 @@ mod bitplane_gemv_tests {
     }
 
     #[test]
+    #[ignore]
+    fn fused_kernel_multicore_bench() {
+        if !bf16_dot_available() {
+            eprintln!("FEAT_BF16 not present; skipping");
+            return;
+        }
+        // Set so the plain bf16 path also uses bfdot (apples-to-apples). This is an
+        // #[ignore] bench run alone, so the global env mutation is safe here.
+        std::env::set_var("RLLM_Q8_ACTIVATION", "1");
+        std::env::set_var("RLLM_BF16_DOT", "1");
+        let bf16 = std::fs::read("/tmp/rllm-bf16-sample.bin")
+            .expect("run dump_bf16_embedding_sample first");
+        let hidden = 2048usize;
+        let n_weights = bf16.len() / 2;
+        let vocab = n_weights / hidden;
+        let enc = BitplaneCodec
+            .encode(
+                &bf16,
+                &EncodeMeta { name: "e".into(), shape: vec![n_weights as u64], dtype: "bf16".into() },
+            )
+            .unwrap();
+        let p = enc.data[14] as usize;
+        let mut off = 16;
+        let palette = enc.data[off..off + p].to_vec();
+        off += p;
+        let idx_bytes = (n_weights * 5 + 7) / 8;
+        let idx_plane = enc.data[off..off + idx_bytes].to_vec();
+        off += idx_bytes;
+        let residuals = enc.data[off..off + n_weights].to_vec();
+        let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        let bf16_mb = bf16.len() as f64 / 1e6;
+        let plane_mb = (palette.len() + idx_plane.len() + residuals.len()) as f64 / 1e6;
+
+        eprintln!(
+            "\n=== R145 tile-fused GEMV multi-core BENCH ===\n\
+             resident: bf16 {bf16_mb:.0} MB vs bit-plane {plane_mb:.0} MB ({:.0}% less)\n\
+             threads | plain bf16 | R145 fused | speedup",
+            (1.0 - plane_mb / bf16_mb) * 100.0
+        );
+        let mut best = f64::INFINITY;
+        let mut best_plain = f64::INFINITY;
+        for &nt in &[1usize, 2, 4, 6, 8] {
+            let plain = time_par(vocab, nt, |base, slice| {
+                lm_head_logits_rows_bf16(&act, &bf16, hidden, base, slice)
+            });
+            let fused = time_par(vocab, nt, |base, slice| {
+                lm_head_logits_bitplane_fused(&act, &palette, &idx_plane, &residuals, hidden, base, slice)
+            });
+            eprintln!(
+                "   {nt:2}   |  {plain:6.1} ms |  {fused:6.1} ms | {:.2}x{}",
+                plain / fused,
+                if fused < plain { "  <-- WIN" } else { "" }
+            );
+            if fused < best {
+                best = fused;
+                best_plain = plain;
+            }
+        }
+        let verdict = if best <= best_plain {
+            "GO (faster + 19% less RAM, lossless)"
+        } else if best <= best_plain * 1.25 {
+            "MARGINAL (close; try 16-wide vqtbl2q / strategy B)"
+        } else {
+            "NO-GO (decode still loses)"
+        };
+        eprintln!("\nbest fused {best:.1} ms vs best plain {best_plain:.1} ms => VERDICT: {verdict}\n");
+    }
+
+    #[test]
     fn fused_kernel_matches_reference_bit_for_bit() {
         if !bf16_dot_available() {
             return; // FEAT_BF16 required; no-op on non-bf16 hardware
