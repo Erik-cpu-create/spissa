@@ -42,6 +42,14 @@ struct Args {
     /// Optional JSON output path for the first decode step's logits.
     #[arg(long)]
     logits_out: Option<String>,
+
+    /// Pin the whole model mapping in RAM (mlock) so the OS cannot evict it.
+    /// On a machine where the model fits available RAM this keeps the weights
+    /// resident across decode steps instead of re-faulting them from disk every
+    /// token — a large decode speedup (matches llama.cpp's --mlock). Opt-in
+    /// because it risks OOM when the working set exceeds physical RAM.
+    #[arg(long, default_value_t = false)]
+    mlock: bool,
 }
 
 fn parse_token_ids(raw: &str) -> Result<Vec<usize>> {
@@ -108,6 +116,15 @@ fn main() -> Result<()> {
     }
     if args.prompt.is_some() == args.token_ids.is_some() {
         anyhow::bail!("provide exactly one of --prompt or --token-ids");
+    }
+
+    // Residency: --mlock pins the model mapping in RAM. The reader reads this
+    // via RLLM_MLOCK (the same env-gated knob other runtime experiments use),
+    // so translate the flag before opening the model. The flag takes precedence
+    // only to enable; an externally-set RLLM_MLOCK=1 still works without --mlock.
+    if args.mlock {
+        std::env::set_var("RLLM_MLOCK", "1");
+        eprintln!("[gemma-test] --mlock: pinning model in RAM (mlock)");
     }
 
     let mut model = LazyRllmModel::open(&args.model)?;

@@ -71,6 +71,27 @@ impl RllmReader {
         // The file must not be modified externally while the reader is alive.
         let mmap = unsafe { Mmap::map(&file)? };
 
+        // Residency hints. A plain mmap faults pages in lazily and lets the OS
+        // evict them under pressure, so a decode loop that re-reads the whole
+        // weight set every token keeps re-faulting from disk (memory-bound on
+        // machines where the model nearly fits RAM). MADV_WILLNEED asks the
+        // kernel to read the mapping ahead so the weights land resident up
+        // front; it is a pure hint with no correctness impact, so we always
+        // issue it and ignore failures (unsupported platforms / large maps).
+        let _ = mmap.advise(memmap2::Advice::WillNeed);
+
+        // Opt-in hard residency: mlock pins the whole mapping so the OS cannot
+        // evict it. This guarantees the model stays in RAM (matching the
+        // resident behaviour of llama.cpp's --mlock) at the risk of OOM when
+        // the working set exceeds physical RAM, so it is gated behind an env
+        // flag and failures are tolerated rather than fatal.
+        if std::env::var("RLLM_MLOCK").map(|v| v == "1").unwrap_or(false) {
+            match mmap.lock() {
+                Ok(()) => {}
+                Err(e) => eprintln!("[rllm] RLLM_MLOCK=1 requested but mlock failed: {e}"),
+            }
+        }
+
         Ok(Self {
             mmap,
             header,
