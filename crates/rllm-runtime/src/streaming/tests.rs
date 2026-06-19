@@ -28,6 +28,69 @@ mod tests {
 
     #[cfg(target_arch = "aarch64")]
     #[test]
+    #[ignore = "feasibility measurement: cargo test -- --ignored --nocapture bfdot_feasibility"]
+    fn bfdot_feasibility() {
+        let has_bf16 = super::bf16_dot_available();
+        eprintln!("FEAT_BF16 detected: {has_bf16}");
+        if !has_bf16 {
+            eprintln!("NO-GO: bf16 absent; bfdot path will never engage on this CPU.");
+            return;
+        }
+        let hidden = 2048usize; // LLaMA-1B hidden
+        let rows = 2000usize; // a vocab slice
+        let mut hid = vec![0.0f32; hidden];
+        let mut weights = vec![0u8; rows * hidden * 2];
+        let mut s: u32 = 0xC0FF_EE11;
+        let mut next = || {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            s
+        };
+        for v in hid.iter_mut() {
+            *v = (next() as i32 as f32) / (i32::MAX as f32);
+        }
+        // Finite bf16 weights in [-2, 2) so the timed dot stays a real number.
+        for w in weights.chunks_exact_mut(2) {
+            let wf = (next() as i32 as f32) / (i32::MAX as f32) * 2.0;
+            let wb = super::f32_to_bf16_rne(wf);
+            w[0] = (wb & 0xFF) as u8;
+            w[1] = (wb >> 8) as u8;
+        }
+
+        // f32 path: per-row upcast dot.
+        let t0 = std::time::Instant::now();
+        let mut sink = 0.0f32;
+        for r in 0..rows {
+            let wrow = &weights[r * hidden * 2..(r + 1) * hidden * 2];
+            sink += super::bf16_row_dot_f32(&hid, wrow, hidden);
+        }
+        let f32_ns = t0.elapsed().as_nanos() as f64 / rows as f64;
+
+        // bfdot path: convert activation ONCE, then per-row bfdot.
+        let t1 = std::time::Instant::now();
+        let act = super::convert_f32_to_bf16(&hid);
+        let mut sink2 = 0.0f32;
+        for r in 0..rows {
+            let wrow = &weights[r * hidden * 2..(r + 1) * hidden * 2];
+            sink2 += unsafe { super::bf16_row_dot_bf16(&act, wrow, hidden) };
+        }
+        let bf_ns = t1.elapsed().as_nanos() as f64 / rows as f64;
+
+        eprintln!(
+            "f32-upcast: {f32_ns:.1} ns/row   bfdot: {bf_ns:.1} ns/row   speedup: {:.2}x   (sinks {sink} {sink2})",
+            f32_ns / bf_ns
+        );
+        eprintln!(
+            "DECISION: {}",
+            if bf_ns < f32_ns {
+                "GO (bfdot faster)"
+            } else {
+                "NO-GO (bfdot not faster)"
+            }
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
     fn bfdot_row_matches_f32_reference_within_bf16_tol() {
         if !super::bf16_dot_available() {
             eprintln!("skip: FEAT_BF16 not present on this CPU");
