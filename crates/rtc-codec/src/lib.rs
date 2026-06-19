@@ -3,6 +3,7 @@
 //! Lossless tensor compression codecs for RLLM.
 //! Every codec must satisfy: decode(encode(input)) == input (bit-identical).
 
+mod bitreader_fast;
 mod codec;
 mod dfloat;
 mod error;

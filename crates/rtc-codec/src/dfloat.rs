@@ -5,6 +5,7 @@
 //! Original implementation (technique from DFloat11, arXiv 2504.11651); no code
 //! was copied and no external dependency is used.
 
+use crate::bitreader_fast::BufferedBitReader;
 use crate::codec::{EncodeMeta, EncodedChunk, TensorCodec};
 
 /// Maximum Huffman code length in bits. Caps the decode LUT at 2^15 = 32 768 entries,
@@ -271,10 +272,62 @@ pub fn build_decode_lut(lengths: &[u8; 256]) -> DecodeLut {
     DecodeLut { max_len, entries }
 }
 
+/// Parse a rtc-dfloat-v1 chunk into its sections, shared by `decode` and
+/// `decode_fast` so the framing logic lives in exactly one place. Returns
+/// `(num_weights, lengths, exp_stream, residuals)`.
+fn parse_chunk(encoded: &[u8]) -> Result<(usize, [u8; 256], &[u8], &[u8])> {
+    let err = || CodecError::InvalidData("truncated rtc-dfloat-v1 chunk".to_string());
+    if encoded.len() < 8 + 256 + 8 {
+        return Err(err());
+    }
+    let num_weights = u64::from_le_bytes(encoded[0..8].try_into().map_err(|_| err())?) as usize;
+    let mut lengths = [0u8; 256];
+    lengths.copy_from_slice(&encoded[8..8 + 256]);
+    let exp_len = u64::from_le_bytes(encoded[264..272].try_into().map_err(|_| err())?) as usize;
+    let exp_start: usize = 272;
+    let exp_end = exp_start.checked_add(exp_len).ok_or_else(err)?;
+    let res_end = exp_end.checked_add(num_weights).ok_or_else(err)?;
+    if encoded.len() < res_end {
+        return Err(err());
+    }
+    Ok((num_weights, lengths, &encoded[exp_start..exp_end], &encoded[exp_end..res_end]))
+}
+
 pub struct DfloatCodec;
 
 impl DfloatCodec {
     pub const ID: &'static str = "rtc-dfloat-v1";
+
+    /// Fast decode: identical output to [`TensorCodec::decode`], but reads
+    /// exponents through the buffered 64-bit-window reader and writes the output
+    /// by index into a pre-allocated buffer (no per-bit div/mod, no per-element
+    /// push). Bit-identical and lossless; proven by
+    /// `decode_fast_matches_decode_bit_for_bit`. Additive and not yet wired into
+    /// the runtime — this is the R142 feasibility building block.
+    pub fn decode_fast(&self, encoded: &[u8]) -> Result<Vec<u8>> {
+        let (num_weights, lengths, exp_stream, residuals) = parse_chunk(encoded)?;
+        validate_lengths(&lengths)?;
+        let lut = build_decode_lut(&lengths);
+        let max_len = lut.max_len;
+        let mut reader = BufferedBitReader::new(exp_stream);
+        let mut out = vec![0u8; num_weights * 2];
+        for (i, &res) in residuals.iter().enumerate() {
+            reader.refill();
+            let window = reader.peek(max_len);
+            let (exp, len) = lut.entries[window as usize];
+            if len == 0 {
+                return Err(CodecError::InvalidData(
+                    "rtc-dfloat-v1: invalid Huffman code in exponent stream".into(),
+                ));
+            }
+            reader.consume(len);
+            let bits = join_bf16(exp, res);
+            let le = bits.to_le_bytes();
+            out[2 * i] = le[0];
+            out[2 * i + 1] = le[1];
+        }
+        Ok(out)
+    }
 }
 
 impl TensorCodec for DfloatCodec {
@@ -330,24 +383,7 @@ impl TensorCodec for DfloatCodec {
     }
 
     fn decode(&self, encoded: &[u8], _meta: &crate::codec::DecodeMeta) -> Result<Vec<u8>> {
-        let err = || CodecError::InvalidData("truncated rtc-dfloat-v1 chunk".to_string());
-        if encoded.len() < 8 + 256 + 8 {
-            return Err(err());
-        }
-        let num_weights =
-            u64::from_le_bytes(encoded[0..8].try_into().map_err(|_| err())?) as usize;
-        let mut lengths = [0u8; 256];
-        lengths.copy_from_slice(&encoded[8..8 + 256]);
-        let exp_len =
-            u64::from_le_bytes(encoded[264..272].try_into().map_err(|_| err())?) as usize;
-        let exp_start: usize = 272;
-        let exp_end = exp_start.checked_add(exp_len).ok_or_else(err)?;
-        let res_end = exp_end.checked_add(num_weights).ok_or_else(err)?;
-        if encoded.len() < res_end {
-            return Err(err());
-        }
-        let exp_stream = &encoded[exp_start..exp_end];
-        let residuals = &encoded[exp_end..res_end];
+        let (num_weights, lengths, exp_stream, residuals) = parse_chunk(encoded)?;
 
         validate_lengths(&lengths)?;
         let lut = build_decode_lut(&lengths);
@@ -573,6 +609,158 @@ mod tests {
         };
         let result = codec.decode(&corrupt, &dmeta);
         assert!(result.is_err(), "decode must return Err on corrupt length table");
+    }
+
+    #[test]
+    fn decode_fast_matches_decode_bit_for_bit() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        let codec = DfloatCodec;
+        let dmeta = DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: 0 };
+
+        let mut inputs: Vec<Vec<u8>> = Vec::new();
+        // (a) skewed exponents
+        {
+            let mut b = Vec::new();
+            for i in 0..4096u16 {
+                let exp: u16 = if i % 8 == 0 { 0x40 } else { 0x3F };
+                let bits = (((i >> 6) & 1) << 15) | (exp << 7) | (i & 0x7F);
+                b.extend_from_slice(&bits.to_le_bytes());
+            }
+            inputs.push(b);
+        }
+        // (b) single exponent
+        {
+            let mut b = Vec::new();
+            for i in 0..512u16 {
+                let bits = (((i >> 7) & 1) << 15) | (0x40u16 << 7) | (i & 0x7F);
+                b.extend_from_slice(&bits.to_le_bytes());
+            }
+            inputs.push(b);
+        }
+        // (c) full-entropy random bf16 (xorshift over the full 16-bit space)
+        {
+            let mut state = 0x2545F4914F6CDD1Du64;
+            let mut b = Vec::new();
+            for _ in 0..8192 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let bits = (state >> 32) as u16;
+                b.extend_from_slice(&bits.to_le_bytes());
+            }
+            inputs.push(b);
+        }
+
+        for (k, bytes) in inputs.iter().enumerate() {
+            let meta = EncodeMeta {
+                name: "w".into(),
+                shape: vec![(bytes.len() / 2) as u64],
+                dtype: "bf16".into(),
+            };
+            let enc = codec.encode(bytes, &meta).unwrap();
+            let slow = codec.decode(&enc.data, &dmeta).unwrap();
+            let fast = codec.decode_fast(&enc.data).unwrap();
+            assert_eq!(&slow, bytes, "case {k}: slow decode must roundtrip");
+            assert_eq!(fast, slow, "case {k}: decode_fast must equal decode byte-for-byte");
+        }
+    }
+
+    #[test]
+    fn decode_fast_matches_decode_on_tail_boundaries() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        let codec = DfloatCodec;
+        let dmeta = DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: 0 };
+        for n in [0usize, 1, 2, 3, 5, 7, 9, 15, 17, 31, 33] {
+            let mut state = 0x9E3779B97F4A7C15u64;
+            let mut bytes = Vec::new();
+            for _ in 0..n {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                bytes.extend_from_slice(&((state >> 48) as u16).to_le_bytes());
+            }
+            let meta = EncodeMeta { name: "w".into(), shape: vec![n as u64], dtype: "bf16".into() };
+            let enc = codec.encode(&bytes, &meta).unwrap();
+            let slow = codec.decode(&enc.data, &dmeta).unwrap();
+            let fast = codec.decode_fast(&enc.data).unwrap();
+            assert_eq!(fast, slow, "n={n}: decode_fast must equal decode at tail boundary");
+            assert_eq!(fast, bytes, "n={n}: decode_fast must be lossless");
+        }
+    }
+
+    #[test]
+    fn decode_fast_rejects_invalid_length_table() {
+        use crate::{EncodeMeta, TensorCodec};
+        let bits: u16 = 0x3F80;
+        let bytes: Vec<u8> = (0..8).flat_map(|_| bits.to_le_bytes()).collect();
+        let codec = DfloatCodec;
+        let emeta = EncodeMeta { name: "w".into(), shape: vec![8], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+        let mut corrupt = enc.data.clone();
+        corrupt[8] = 30; // length > MAX_CODE_LEN (15) → must be rejected
+        assert!(
+            codec.decode_fast(&corrupt).is_err(),
+            "decode_fast must reject corrupt length table"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn dfloat_fast_decode_feasibility() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        let bytes = std::fs::read("/tmp/rllm-bf16-sample.bin")
+            .expect("run dump_bf16_embedding_sample first (see plan Task 3, Step 2)");
+        let num_weights = bytes.len() / 2;
+        let codec = DfloatCodec;
+        let emeta =
+            EncodeMeta { name: "embed".into(), shape: vec![num_weights as u64], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+        let bits_per_weight = (enc.data.len() as f64 * 8.0) / num_weights as f64;
+        let dmeta =
+            DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: bytes.len() as u64 };
+
+        // Correctness on the real sample before timing.
+        let fast = codec.decode_fast(&enc.data).unwrap();
+        assert_eq!(fast, bytes, "decode_fast must be lossless on the real embedding");
+
+        // Warm, timed fast decode.
+        let iters = 5;
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            let d = codec.decode_fast(&enc.data).unwrap();
+            std::hint::black_box(&d);
+        }
+        let fast_s = t.elapsed().as_secs_f64() / iters as f64;
+        let fast_gw = (num_weights as f64 / 1e9) / fast_s; // Gweight/s
+        let fast_gbps = (bytes.len() as f64 / 1e9) / fast_s; // GB/s bf16-out
+
+        // One pass of the naive decoder for the speedup ratio (it is ~26 s).
+        let t = std::time::Instant::now();
+        let slow = codec.decode(&enc.data, &dmeta).unwrap();
+        std::hint::black_box(&slow);
+        let slow_s = t.elapsed().as_secs_f64();
+        let slow_gw = (num_weights as f64 / 1e9) / slow_s;
+
+        let agg = fast_gw * 3.5; // A18: 2 P + 4 E ≈ 3.5 P-equivalent
+        let verdict = if agg >= 12.0 {
+            "GO"
+        } else if agg >= 5.0 {
+            "MARGINAL"
+        } else {
+            "NO-GO"
+        };
+
+        eprintln!(
+            "\n=== R142 REEDRIP fast-decode FEASIBILITY ===\n\
+             weights={num_weights}  bits/weight={bits_per_weight:.3}\n\
+             fast single-core: {fast_gw:.2} Gweight/s  ({fast_gbps:.2} GB/s bf16-out, {:.1} ms/decode)\n\
+             naive single-core: {slow_gw:.4} Gweight/s  (speedup {:.0}x)\n\
+             aggregate (x3.5): {agg:.1} Gweight/s\n\
+             threshold: GO>=12, MARGINAL 5-12, NO-GO<5 (Gweight/s aggregate)\n\
+             VERDICT: {verdict}\n",
+            fast_s * 1000.0,
+            fast_gw / slow_gw,
+        );
     }
 
     #[test]
