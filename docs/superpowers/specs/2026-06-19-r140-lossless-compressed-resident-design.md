@@ -119,6 +119,21 @@ unaffected when the tensor isn't dfloat-coded.
   identical logits within the existing fast-path tolerance).
 - Existing q8/bf16 tests stay green (codec is additive, gated).
 
+## Originality & dependencies (doctrine)
+
+- **Original code, borrowed idea.** The exponent-split + entropy-decode TECHNIQUE
+  is DFloat11's (cited). The IMPLEMENTATION is written from scratch in Rust —
+  implemented from the technique/algorithm (canonical Huffman + LUT decode + bf16
+  field split are standard, well-understood building blocks), NOT by reading or
+  porting DFloat11's CUDA/Python. This matches the RLLM doctrine: studying prior
+  work to learn ≠ wrapping/copying.
+- **No external dependencies.** Reuses the in-house Huffman machinery
+  (`rtc-codec/src/huff.rs`, already custom) for the exponent stream, plus a new
+  LUT decoder and the bf16 field split — all pure Rust. The NEON kernel uses
+  `std::arch` (built in). No zstd/flate2/entropy crates. Consistent with RTC's
+  "custom codecs, no external generic compression libraries" rule; `cargo build`
+  stays the only requirement.
+
 ## Prior art (cited honestly)
 
 DFloat11 (arXiv 2504.11651, NeurIPS'25, this is the same exponent-split scheme),
