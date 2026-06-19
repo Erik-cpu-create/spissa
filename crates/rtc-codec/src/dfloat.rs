@@ -412,4 +412,41 @@ mod tests {
         let meta = EncodeMeta { name: "w".into(), shape: vec![2048], dtype: "bf16".into() };
         assert!(DfloatCodec.verify_roundtrip(&bytes, &meta).unwrap());
     }
+
+    #[test]
+    #[ignore]
+    fn dfloat_feasibility_ratio_and_throughput() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        let bytes = std::fs::read("/tmp/rllm-bf16-sample.bin")
+            .expect("run dump_bf16_embedding_sample first");
+        let num_weights = bytes.len() / 2;
+        let codec = DfloatCodec;
+        let emeta = EncodeMeta { name: "embed".into(), shape: vec![num_weights as u64], dtype: "bf16".into() };
+
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+        let bits_per_weight = (enc.data.len() as f64 * 8.0) / num_weights as f64;
+        let ratio = enc.data.len() as f64 / bytes.len() as f64;
+
+        let dmeta = DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: bytes.len() as u64 };
+        // Warm + timed decode (decode is what the fused kernel will run per tile).
+        let dec = codec.decode(&enc.data, &dmeta).unwrap();
+        assert_eq!(dec, bytes, "lossless");
+        let iters = 5;
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let d = codec.decode(&enc.data, &dmeta).unwrap();
+            std::hint::black_box(&d);
+        }
+        let secs = start.elapsed().as_secs_f64() / iters as f64;
+        let decode_gbps = (bytes.len() as f64 / 1e9) / secs;
+
+        eprintln!(
+            "\n=== rtc-dfloat-v1 FEASIBILITY ===\n\
+             weights={num_weights}  bits/weight={bits_per_weight:.3}  ratio={:.1}% of bf16\n\
+             decode throughput={decode_gbps:.2} GB/s (bf16-out)  ({:.1} ms/decode)\n\
+             GO/NO-GO for R140b: decode must beat the ~31% bandwidth it saves.\n",
+            ratio * 100.0,
+            secs * 1000.0
+        );
+    }
 }

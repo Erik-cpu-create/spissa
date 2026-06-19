@@ -148,3 +148,38 @@ implementation of this line.
 - Fused decode kernel (rllm-runtime streaming): decode-tile + bf16 dot; depends on
   the codec's tile decode + `bf16_row_dot_f32`.
 - Pack/runtime wiring: additive, gated on the new codec id.
+
+## Feasibility result (measured)
+
+**Measured on:** `model.embed_tokens.weight` from `Llama-3.2-1B-Instruct-raw.rllm`
+(262,668,288 bf16 weights = 525,336,576 bytes).
+
+| Metric | Value |
+|--------|-------|
+| bits/weight | **10.625** |
+| compressed ratio | 66.4% of raw bf16 |
+| decode throughput | **0.02 GB/s** (bf16-out) |
+| decode latency | ~29,990 ms/decode (full tensor) |
+
+**GO/NO-GO for R140b (fused compressed-resident kernel): NO-GO.**
+
+The codec ratio is excellent — 10.625 bits/weight (target was ~11), confirming the
+compression thesis. However, the scalar bit-reader decode runs at only 0.02 GB/s,
+roughly **800× slower** than the ~16 GB/s memory bandwidth it would save. Even
+tiled/per-row use does not rescue this: the Huffman bit-reader is inherently serial
+per symbol and will bottleneck any fused matmul kernel far harder than raw bf16
+bandwidth.
+
+**What this means:**
+
+- R140a (codec + lossless on-disk storage) is a **GO** — the codec is correct,
+  lossless, and achieves the target ratio. It is useful for producing smaller
+  `.rllm` files on disk.
+- R140b (compressed-resident + fused kernel) is a **NO-GO** at the current decode
+  speed. The gap (0.02 GB/s vs ~5 GB/s needed) requires a SIMD/NEON LUT decode
+  path (vectorized 8-weight-at-a-time LUT lookup + bf16 reassembly) before
+  compressed-resident makes sense on CPU. That is a substantially larger kernel
+  effort and should be a separate, explicitly-scoped plan if pursued.
+- This is recorded as a **useful negative result**, not a failure: the ratio
+  numbers validate the compression approach; the decode bottleneck is the expected
+  risk that the feasibility gate was designed to catch.

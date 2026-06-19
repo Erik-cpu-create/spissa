@@ -1219,6 +1219,28 @@ mod tests {
         std::env::temp_dir().join(format!("rllm-lazy-{name}-{}.rllm", std::process::id()))
     }
 
+    /// Dump the bf16 tied embedding of the raw Llama 1B model to /tmp for the
+    /// rtc-codec feasibility measurement. Needs the local artifact.
+    /// Run: `cargo test -p rllm-runtime --release dump_bf16_embedding_sample -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_bf16_embedding_sample() {
+        // Dump the bf16 tied embedding of the raw Llama 1B model to /tmp for the
+        // rtc-codec feasibility measurement. Needs the local artifact.
+        let path = "../../models/Llama-3.2-1B-Instruct-raw.rllm";
+        let mut m = LazyRllmModel::open(path).unwrap();
+        let name = "model.embed_tokens.weight";
+        let meta = m.tensor(name).unwrap().clone();
+        assert_eq!(format!("{:?}", meta.dtype), "Bf16");
+        // raw bf16 bytes straight from the mmap (one contiguous tensor).
+        let bytes = m
+            .with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec()))
+            .unwrap()
+            .expect("embedding is contiguous-raw");
+        std::fs::write("/tmp/rllm-bf16-sample.bin", &bytes).unwrap();
+        eprintln!("wrote {} bf16 bytes to /tmp/rllm-bf16-sample.bin", bytes.len());
+    }
+
     /// Measure the ACTUAL q8_0 quantization error of a packed model against its
     /// bf16 original, one tensor at a time (decode pair -> compare -> drop, so the
     /// transient is bounded to ~2 tensors). Needs both local artifacts. Run:
