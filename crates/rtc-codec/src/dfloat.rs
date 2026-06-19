@@ -6,6 +6,10 @@
 //! was copied and no external dependency is used.
 
 use crate::codec::{EncodeMeta, EncodedChunk, TensorCodec};
+
+/// Maximum Huffman code length in bits. Caps the decode LUT at 2^15 = 32 768 entries,
+/// which is safe even for singleton exponents in real LLM embedding tables.
+const MAX_CODE_LEN: u8 = 15;
 use crate::error::{CodecError, Result};
 
 /// Split a bf16 bit pattern into (exponent, residual=sign|mantissa).
@@ -153,9 +157,44 @@ pub fn huffman_code_lengths(freqs: &[u64; 256]) -> [u8; 256] {
         nodes.push(Node { weight: a.weight + b.weight, members });
     }
 
-    // No length cap: the min-merge above produces valid (Kraft-satisfying) Huffman
-    // lengths. Inputs are bf16 EXPONENT bytes (256 symbols, low-entropy), whose code
-    // lengths stay well under 16, so the decode LUT (2^max_len entries) stays small.
+    // Length-limit to MAX_CODE_LEN bits, then repair the Kraft inequality. A
+    // singleton exponent (e.g. one that occurs once among millions of weights, as
+    // in real LLM embeddings) gets a very long Huffman code; we clamp it and
+    // lengthen the rarest still-shrinkable codes until the set is a valid prefix
+    // code. The decode LUT is then bounded to 2^MAX_CODE_LEN entries. Lossless is
+    // preserved: only code LENGTHS change, and both encode and decode use the same
+    // stored lengths table.
+    for len in lengths.iter_mut() {
+        if *len > MAX_CODE_LEN {
+            *len = MAX_CODE_LEN;
+        }
+    }
+    let budget: u64 = 1u64 << MAX_CODE_LEN;
+    loop {
+        let mut k: u64 = 0;
+        for &len in lengths.iter() {
+            if len > 0 {
+                k += 1u64 << (MAX_CODE_LEN - len);
+            }
+        }
+        if k <= budget {
+            break;
+        }
+        // Overfull: lengthen the rarest still-shrinkable code (largest len < MAX).
+        let mut best: Option<usize> = None;
+        for s in 0..256 {
+            if lengths[s] > 0 && lengths[s] < MAX_CODE_LEN {
+                match best {
+                    Some(b) if lengths[b] >= lengths[s] => {}
+                    _ => best = Some(s),
+                }
+            }
+        }
+        match best {
+            Some(s) => lengths[s] += 1,
+            None => break, // all used symbols at MAX; k <= budget already holds
+        }
+    }
     lengths
 }
 
@@ -176,6 +215,33 @@ pub fn canonical_codes(lengths: &[u8; 256]) -> [u32; 256] {
         prev_len = len;
     }
     codes
+}
+
+/// Validate a decoded length table before building the LUT: bounded max length
+/// and the Kraft inequality, so canonical_codes/build_decode_lut cannot overflow
+/// or index out of bounds on corrupt input.
+fn validate_lengths(lengths: &[u8; 256]) -> Result<()> {
+    let max_len = lengths.iter().copied().max().unwrap_or(0);
+    if max_len > MAX_CODE_LEN {
+        return Err(CodecError::InvalidData(format!(
+            "rtc-dfloat-v1: corrupt length table, max length {max_len} > {MAX_CODE_LEN}"
+        )));
+    }
+    if max_len == 0 {
+        return Ok(());
+    }
+    let mut sum: u64 = 0;
+    for &len in lengths.iter() {
+        if len > 0 {
+            sum += 1u64 << (max_len - len);
+        }
+    }
+    if sum > (1u64 << max_len) {
+        return Err(CodecError::InvalidData(
+            "rtc-dfloat-v1: corrupt length table violates the Kraft inequality".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Flat decode LUT: index by the next `max_len` bits, get (symbol, code_len).
@@ -283,6 +349,7 @@ impl TensorCodec for DfloatCodec {
         let exp_stream = &encoded[exp_start..exp_end];
         let residuals = &encoded[exp_end..res_end];
 
+        validate_lengths(&lengths)?;
         let lut = build_decode_lut(&lengths);
         let mut reader = BitReader::new(exp_stream);
         let mut out = Vec::with_capacity(num_weights * 2);
@@ -411,6 +478,101 @@ mod tests {
         let bytes: Vec<u8> = (0..2048u16).flat_map(|i| i.to_le_bytes()).collect();
         let meta = EncodeMeta { name: "w".into(), shape: vec![2048], dtype: "bf16".into() };
         assert!(DfloatCodec.verify_roundtrip(&bytes, &meta).unwrap());
+    }
+
+    #[test]
+    fn dfloat_roundtrip_empty_tensor() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        let bytes: Vec<u8> = Vec::new();
+        let codec = DfloatCodec;
+        let emeta = EncodeMeta { name: "w".into(), shape: vec![0], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: 0,
+        };
+        let dec = codec.decode(&enc.data, &dmeta).unwrap();
+        assert_eq!(dec, bytes);
+    }
+
+    #[test]
+    fn dfloat_roundtrip_single_weight() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        // one bf16 = 2 bytes
+        let bits: u16 = 0x3F80; // 1.0 in bf16
+        let bytes = bits.to_le_bytes().to_vec();
+        let codec = DfloatCodec;
+        let emeta = EncodeMeta { name: "w".into(), shape: vec![1], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: bytes.len() as u64,
+        };
+        let dec = codec.decode(&enc.data, &dmeta).unwrap();
+        assert_eq!(dec, bytes);
+    }
+
+    #[test]
+    fn dfloat_roundtrip_all_identical() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        let bits: u16 = 0x4000; // 2.0 in bf16
+        let bytes: Vec<u8> =
+            (0..512).flat_map(|_| bits.to_le_bytes()).collect();
+        let codec = DfloatCodec;
+        let emeta =
+            EncodeMeta { name: "w".into(), shape: vec![512], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: bytes.len() as u64,
+        };
+        let dec = codec.decode(&enc.data, &dmeta).unwrap();
+        assert_eq!(dec, bytes);
+    }
+
+    #[test]
+    fn dfloat_roundtrip_single_exponent() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        // 512 weights all with exponent 0x40, varying sign and low 7 mantissa bits.
+        let mut bytes = Vec::with_capacity(512 * 2);
+        for i in 0..512u16 {
+            let exp: u16 = 0x40;
+            let mantissa = i & 0x7F;
+            let sign = (i >> 7) & 1;
+            let bits = (sign << 15) | (exp << 7) | mantissa;
+            bytes.extend_from_slice(&bits.to_le_bytes());
+        }
+        let codec = DfloatCodec;
+        let emeta =
+            EncodeMeta { name: "w".into(), shape: vec![512], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: bytes.len() as u64,
+        };
+        let dec = codec.decode(&enc.data, &dmeta).unwrap();
+        assert_eq!(dec, bytes, "single-exponent round-trip must be bit-exact");
+    }
+
+    #[test]
+    fn dfloat_decode_rejects_invalid_length_table() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        // Encode a few weights to get a valid payload.
+        let bits: u16 = 0x3F80;
+        let bytes: Vec<u8> = (0..8).flat_map(|_| bits.to_le_bytes()).collect();
+        let codec = DfloatCodec;
+        let emeta = EncodeMeta { name: "w".into(), shape: vec![8], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+
+        // Corrupt the length-table region (bytes 8..264) by setting one entry to 30.
+        let mut corrupt = enc.data.clone();
+        corrupt[8] = 30; // length > MAX_CODE_LEN (15) → must be rejected
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: bytes.len() as u64,
+        };
+        let result = codec.decode(&corrupt, &dmeta);
+        assert!(result.is_err(), "decode must return Err on corrupt length table");
     }
 
     #[test]
