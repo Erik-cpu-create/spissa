@@ -206,6 +206,7 @@ fn raw_16bit_argmax_rows_range(
     // default keeps the scalar accumulation so its bit-for-bit tests hold.
     let fast_bf16 = q8_activation_path_enabled() && matches!(dtype, rllm_container::DType::Bf16);
     let n = config.in_features;
+    let bf16_act = fast_bf16.then(|| Bf16DotActivation::new(input));
     let mut best = ArgmaxCandidate::empty();
     for row_idx in 0..rows {
         let out_feature = out_feature_start + row_idx;
@@ -214,8 +215,8 @@ fn raw_16bit_argmax_rows_range(
             .and_then(|values| values.get(out_feature))
             .copied()
             .unwrap_or(0.0);
-        if fast_bf16 {
-            acc += bf16_row_dot_f32(input, &raw_bytes[row_start * 2..(row_start + n) * 2], n);
+        if let Some(act) = &bf16_act {
+            acc += act.row_dot(&raw_bytes[row_start * 2..(row_start + n) * 2], n);
         } else {
             let mut input_idx = 0usize;
             while input_idx < n {

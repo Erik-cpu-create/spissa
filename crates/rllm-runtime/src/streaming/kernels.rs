@@ -3375,6 +3375,7 @@ fn accumulate_fused_raw_16bit_chunk_batch1_row_blocked(
     // EXACT default keeps the scalar accumulation so its bit-for-bit tests hold;
     // the NEON path differs only in f32 accumulation order (a few ULPs).
     let fast_bf16 = q8_activation_path_enabled() && matches!(dtype, rllm_container::DType::Bf16);
+    let bf16_act = fast_bf16.then(|| Bf16DotActivation::new(input));
     while local_idx + row_block_elements <= weight_elements {
         let out_feature = global_idx / config.in_features;
         if out_feature + 3 >= config.out_features {
@@ -3386,9 +3387,9 @@ fn accumulate_fused_raw_16bit_chunk_batch1_row_blocked(
         let row2_start = row1_start + config.in_features;
         let row3_start = row2_start + config.in_features;
 
-        if fast_bf16 {
+        if let Some(act) = &bf16_act {
             let n = config.in_features;
-            let dot = |rs: usize| bf16_row_dot_f32(input, &raw_bytes[rs * 2..(rs + n) * 2], n);
+            let dot = |rs: usize| act.row_dot(&raw_bytes[rs * 2..(rs + n) * 2], n);
             output[out_feature] += dot(row0_start);
             output[out_feature + 1] += dot(row1_start);
             output[out_feature + 2] += dot(row2_start);
