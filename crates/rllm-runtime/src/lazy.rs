@@ -187,6 +187,81 @@ impl LazyRllmModel {
         Ok(Some(result))
     }
 
+    /// Verify every not-yet-verified chunk's SHA-256 up front, in parallel.
+    ///
+    /// In VerifyOnce, the per-chunk integrity pass would otherwise run serially
+    /// inline during the first prefill (a multi-second stall for a multi-GB
+    /// model), and the decode fast-path's whole-tensor hash is skipped once the
+    /// chunks are verified (see the bridge in `with_raw_tensor`). SHA over
+    /// independent chunks is embarrassingly parallel, so front-loading it across
+    /// cores turns that serial stall into a brief startup cost. Returns the
+    /// number of chunks verified. No-op for Strict (which must re-verify on
+    /// every access) and Unchecked (which never verifies).
+    pub fn prewarm_chunk_integrity(&mut self) -> Result<usize> {
+        if self.integrity_mode != RamaIntegrityMode::VerifyOnce {
+            return Ok(0);
+        }
+        let pending: Vec<ChunkMeta> = self
+            .chunks_by_id
+            .values()
+            .filter(|chunk| !self.verified_compressed_chunks.contains(&chunk.chunk_id))
+            .cloned()
+            .collect();
+        if pending.is_empty() {
+            return Ok(0);
+        }
+
+        let threads = prewarm_thread_count().min(pending.len()).max(1);
+        let shard_len = pending.len().div_ceil(threads);
+        let bytes: &[u8] = self.reader.as_slice();
+
+        // Each thread verifies a disjoint shard of chunks against the shared,
+        // read-only mmap and returns the ids it confirmed. Failures propagate
+        // (a corrupt chunk fails the whole prewarm, same as inline verification).
+        let verified: Vec<u64> = std::thread::scope(|scope| -> Result<Vec<u64>> {
+            let mut handles = Vec::new();
+            for shard in pending.chunks(shard_len) {
+                handles.push(scope.spawn(move || -> Result<Vec<u64>> {
+                    let mut ok = Vec::with_capacity(shard.len());
+                    for chunk in shard {
+                        let start = chunk.file_offset as usize;
+                        let end = start.checked_add(chunk.compressed_size as usize).ok_or_else(
+                            || {
+                                RuntimeError::InvalidTensorData(format!(
+                                    "chunk {} span overflow",
+                                    chunk.chunk_id
+                                ))
+                            },
+                        )?;
+                        let slice = bytes.get(start..end).ok_or_else(|| {
+                            RuntimeError::InvalidTensorData(format!(
+                                "chunk {} out of file bounds",
+                                chunk.chunk_id
+                            ))
+                        })?;
+                        verify_compressed_chunk_checksum(chunk, slice)?;
+                        ok.push(chunk.chunk_id);
+                    }
+                    Ok(ok)
+                }));
+            }
+            let mut all = Vec::with_capacity(pending.len());
+            for handle in handles {
+                let ids = handle.join().map_err(|_| {
+                    RuntimeError::InvalidTensorData("integrity prewarm thread panicked".to_string())
+                })??;
+                all.extend(ids);
+            }
+            Ok(all)
+        })?;
+
+        let count = verified.len();
+        for id in verified {
+            self.verified_compressed_chunks.insert(id);
+        }
+        Ok(count)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -1092,6 +1167,20 @@ impl LazyRllmModel {
     }
 }
 
+/// Thread count for the parallel integrity prewarm. Honors `RLLM_THREADS`
+/// (the same knob the q8 kernels use) and otherwise uses the available
+/// parallelism, falling back to single-threaded.
+fn prewarm_thread_count() -> usize {
+    if let Ok(raw) = std::env::var("RLLM_THREADS") {
+        if let Ok(n) = raw.trim().parse::<usize>() {
+            if n >= 1 {
+                return n;
+            }
+        }
+    }
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
 pub(crate) fn runtime_f32_bytes_for_tensor(tensor: &TensorMeta) -> Result<usize> {
     let elements = if tensor.dtype.is_quantized() {
         tensor.shape.iter().product::<u64>()
@@ -1361,6 +1450,46 @@ mod tests {
             model.with_raw_chunk(0, &mut budget, |bytes, _b| Ok(bytes.len())).unwrap();
             let got = model.with_raw_tensor(0, |bytes| Ok(bytes.len())).unwrap();
             assert_eq!(got, None, "Strict must re-verify the whole tensor on every call");
+        }
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn prewarm_chunk_integrity_verifies_chunks_and_enables_the_bridge() {
+        // Tensor with a WRONG whole-tensor checksum but correct chunk checksums:
+        // only a working chunk->tensor bridge (fed by the prewarm) lets
+        // with_raw_tensor succeed.
+        let path = temp_path("prewarm-integrity");
+        let data: Vec<u8> = (0..48).collect();
+        let mut writer = RllmWriter::new(&path, GlobalMetadata::new_test()).unwrap();
+        writer.add_tensor(TensorMeta {
+            tensor_id: 0,
+            name: "w".to_string(),
+            shape: vec![48],
+            dtype: DType::U8,
+            original_size_bytes: 48,
+            compressed_size_bytes: 48,
+            original_sha256: [0xCD; 32], // wrong on purpose
+            chunk_count: 1,
+            chunk_start_index: 0,
+        });
+        writer.write_chunk(0, "rtc-raw-v1", &data, &data, 0).unwrap();
+        writer.finalize().unwrap();
+
+        let mut model = LazyRllmModel::open(&path).unwrap();
+        model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
+        assert_eq!(model.prewarm_chunk_integrity().unwrap(), 1, "verifies the one chunk");
+        // Idempotent: nothing left to verify on a second call.
+        assert_eq!(model.prewarm_chunk_integrity().unwrap(), 0);
+        // Bridge active: with_raw_tensor skips the (wrong) whole-tensor hash.
+        assert_eq!(model.with_raw_tensor(0, |b| Ok(b.len())).unwrap(), Some(48));
+
+        // No-op outside VerifyOnce.
+        for mode in [RamaIntegrityMode::Unchecked, RamaIntegrityMode::Strict] {
+            let mut other = LazyRllmModel::open(&path).unwrap();
+            other.set_rama_integrity_mode(mode);
+            assert_eq!(other.prewarm_chunk_integrity().unwrap(), 0);
         }
 
         std::fs::remove_file(&path).ok();

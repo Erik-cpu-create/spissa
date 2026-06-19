@@ -157,6 +157,14 @@ impl RllmReader {
         Ok(self.read_chunk_slice(chunk_id)?.to_vec())
     }
 
+    /// The entire memory-mapped file as a zero-copy slice. Used for bulk
+    /// operations that index many spans at once across threads (e.g. parallel
+    /// integrity verification), where a single shared `&[u8]` is cheaper than a
+    /// borrow-per-chunk through `read_span`.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.mmap
+    }
+
     /// Read an arbitrary file span as a zero-copy mmap slice. Used by the q8
     /// decode fast-path to view a whole tensor's contiguous raw chunks as one
     /// slice (skipping per-chunk dispatch).
