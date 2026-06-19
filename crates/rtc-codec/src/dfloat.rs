@@ -263,8 +263,42 @@ impl TensorCodec for DfloatCodec {
         })
     }
 
-    fn decode(&self, _encoded: &[u8], _meta: &crate::codec::DecodeMeta) -> Result<Vec<u8>> {
-        Err(CodecError::InvalidData("decode implemented in the next task".into()))
+    fn decode(&self, encoded: &[u8], _meta: &crate::codec::DecodeMeta) -> Result<Vec<u8>> {
+        let err = || CodecError::InvalidData("truncated rtc-dfloat-v1 chunk".to_string());
+        if encoded.len() < 8 + 256 + 8 {
+            return Err(err());
+        }
+        let num_weights =
+            u64::from_le_bytes(encoded[0..8].try_into().map_err(|_| err())?) as usize;
+        let mut lengths = [0u8; 256];
+        lengths.copy_from_slice(&encoded[8..8 + 256]);
+        let exp_len =
+            u64::from_le_bytes(encoded[264..272].try_into().map_err(|_| err())?) as usize;
+        let exp_start: usize = 272;
+        let exp_end = exp_start.checked_add(exp_len).ok_or_else(err)?;
+        let res_end = exp_end.checked_add(num_weights).ok_or_else(err)?;
+        if encoded.len() < res_end {
+            return Err(err());
+        }
+        let exp_stream = &encoded[exp_start..exp_end];
+        let residuals = &encoded[exp_end..res_end];
+
+        let lut = build_decode_lut(&lengths);
+        let mut reader = BitReader::new(exp_stream);
+        let mut out = Vec::with_capacity(num_weights * 2);
+        for &res in residuals.iter() {
+            let window = reader.peek(lut.max_len);
+            let (exp, len) = lut.entries[window as usize];
+            if len == 0 {
+                return Err(CodecError::InvalidData(
+                    "rtc-dfloat-v1: invalid Huffman code in exponent stream".into(),
+                ));
+            }
+            reader.advance(len);
+            let bits = join_bf16(exp, res);
+            out.extend_from_slice(&bits.to_le_bytes());
+        }
+        Ok(out)
     }
 }
 
@@ -348,5 +382,34 @@ mod tests {
         assert_eq!(enc.original_size, bytes.len() as u64);
         // header(8) + table(256) + 8 + exp_bits + residuals(1024). Must beat raw 2048.
         assert!(enc.data.len() < bytes.len(), "encoded {} !< raw {}", enc.data.len(), bytes.len());
+    }
+
+    #[test]
+    fn dfloat_roundtrip_is_bit_exact() {
+        use crate::{DecodeMeta, EncodeMeta, TensorCodec};
+        // Deterministic pseudo-random bf16 bytes (full 16-bit space exercised).
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut bytes = Vec::new();
+        for _ in 0..4096 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let bits = (state >> 32) as u16;
+            bytes.extend_from_slice(&bits.to_le_bytes());
+        }
+        let codec = DfloatCodec;
+        let emeta = EncodeMeta { name: "w".into(), shape: vec![4096], dtype: "bf16".into() };
+        let enc = codec.encode(&bytes, &emeta).unwrap();
+        let dmeta = DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: bytes.len() as u64 };
+        let dec = codec.decode(&enc.data, &dmeta).unwrap();
+        assert_eq!(dec, bytes, "rtc-dfloat-v1 must be bit-exact lossless");
+    }
+
+    #[test]
+    fn dfloat_satisfies_verify_roundtrip_contract() {
+        use crate::{EncodeMeta, TensorCodec};
+        let bytes: Vec<u8> = (0..2048u16).flat_map(|i| i.to_le_bytes()).collect();
+        let meta = EncodeMeta { name: "w".into(), shape: vec![2048], dtype: "bf16".into() };
+        assert!(DfloatCodec.verify_roundtrip(&bytes, &meta).unwrap());
     }
 }
