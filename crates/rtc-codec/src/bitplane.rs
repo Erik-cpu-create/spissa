@@ -244,8 +244,22 @@ unsafe fn decode_w5_neon_inner(
 #[cfg(target_arch = "aarch64")]
 pub fn decode_neon_w5(palette: &[u8], idx_plane: &[u8], residuals: &[u8], n: usize) -> Vec<u8> {
     let mut out = vec![0u8; n * 2];
-    unsafe { decode_w5_neon_inner(palette, idx_plane, residuals, n, &mut out) };
+    decode_neon_w5_into(palette, idx_plane, residuals, n, &mut out);
     out
+}
+
+/// NEON `w=5` bit-plane decode into a caller-provided buffer (`out.len() >= n*2`),
+/// no allocation. Used by the fused per-row GEMV so decode lands in an L1 scratch.
+#[cfg(target_arch = "aarch64")]
+pub fn decode_neon_w5_into(
+    palette: &[u8],
+    idx_plane: &[u8],
+    residuals: &[u8],
+    n: usize,
+    out: &mut [u8],
+) {
+    assert!(out.len() >= n * 2, "decode_neon_w5_into: out too small");
+    unsafe { decode_w5_neon_inner(palette, idx_plane, residuals, n, out) };
 }
 
 #[cfg(test)]
@@ -407,6 +421,30 @@ mod tests {
             neon_s * 1000.0,
             neon_gw / scalar_gw,
         );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn decode_neon_w5_into_matches_allocating_variant() {
+        let codec = BitplaneCodec;
+        for &n in &[32usize, 33, 100, 4096, 4099] {
+            let bytes = make_bf16(32, n);
+            let meta = EncodeMeta { name: "w".into(), shape: vec![n as u64], dtype: "bf16".into() };
+            let enc = codec.encode(&bytes, &meta).unwrap();
+            let p = enc.data[14] as usize;
+            let mut off = 16;
+            let palette = &enc.data[off..off + p];
+            off += p;
+            let idx_bytes = (n * 5 + 7) / 8;
+            let idx_plane = &enc.data[off..off + idx_bytes];
+            off += idx_bytes;
+            let residuals = &enc.data[off..off + n];
+
+            let alloc = decode_neon_w5(palette, idx_plane, residuals, n);
+            let mut into = vec![0u8; n * 2];
+            decode_neon_w5_into(palette, idx_plane, residuals, n, &mut into);
+            assert_eq!(into, alloc, "n={n}: decode_neon_w5_into must match decode_neon_w5");
+        }
     }
 
     #[test]
