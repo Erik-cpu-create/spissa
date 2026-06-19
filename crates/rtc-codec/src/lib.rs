@@ -4,12 +4,14 @@
 //! Every codec must satisfy: decode(encode(input)) == input (bit-identical).
 
 mod codec;
+mod dfloat;
 mod error;
 mod huff;
 mod raw;
 mod rle;
 
 pub use codec::*;
+pub use dfloat::*;
 pub use error::*;
 pub use huff::*;
 pub use raw::*;
@@ -23,3 +25,6 @@ pub const CODEC_RLE_V1: &str = "rtc-rle-v1";
 
 /// Codec ID for the byte-level Huffman codec
 pub const CODEC_HUFF_V1: &str = "rtc-huff-v1";
+
+/// Codec ID for the lossless bf16 codec
+pub const CODEC_DFLOAT_V1: &str = "rtc-dfloat-v1";

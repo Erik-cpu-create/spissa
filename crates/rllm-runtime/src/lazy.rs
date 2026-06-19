@@ -1219,6 +1219,105 @@ mod tests {
         std::env::temp_dir().join(format!("rllm-lazy-{name}-{}.rllm", std::process::id()))
     }
 
+    /// Dump the bf16 tied embedding of the raw Llama 1B model to /tmp for the
+    /// rtc-codec feasibility measurement. Needs the local artifact.
+    /// Run: `cargo test -p rllm-runtime --release dump_bf16_embedding_sample -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_bf16_embedding_sample() {
+        // Dump the bf16 tied embedding of the raw Llama 1B model to /tmp for the
+        // rtc-codec feasibility measurement. Needs the local artifact.
+        let path = "../../models/Llama-3.2-1B-Instruct-raw.rllm";
+        let mut m = LazyRllmModel::open(path).unwrap();
+        let name = "model.embed_tokens.weight";
+        let meta = m.tensor(name).unwrap().clone();
+        assert_eq!(format!("{:?}", meta.dtype), "Bf16");
+        // raw bf16 bytes straight from the mmap (one contiguous tensor).
+        let bytes = m
+            .with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec()))
+            .unwrap()
+            .expect("embedding is contiguous-raw");
+        std::fs::write("/tmp/rllm-bf16-sample.bin", &bytes).unwrap();
+        eprintln!("wrote {} bf16 bytes to /tmp/rllm-bf16-sample.bin", bytes.len());
+    }
+
+    /// Measure the ACTUAL q8_0 quantization error of a packed model against its
+    /// bf16 original, one tensor at a time (decode pair -> compare -> drop, so the
+    /// transient is bounded to ~2 tensors). Needs both local artifacts. Run:
+    /// `cargo test -p rllm-runtime --release q8_vs_bf16_quantization_error -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn q8_vs_bf16_quantization_error() {
+        let q8_path = "../../models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm";
+        let raw_path = "../../models/Llama-3.2-1B-Instruct-raw.rllm";
+        let mut q8 = LazyRllmModel::open(q8_path).expect("open q8");
+        let mut raw = LazyRllmModel::open(raw_path).expect("open raw bf16");
+
+        // Representative transformer weights across the stack (these are Q8_0 in
+        // the keep-io pack, Bf16 in the raw pack).
+        let names = [
+            "model.layers.0.self_attn.q_proj.weight",
+            "model.layers.0.self_attn.v_proj.weight",
+            "model.layers.0.mlp.gate_proj.weight",
+            "model.layers.0.mlp.down_proj.weight",
+            "model.layers.7.mlp.up_proj.weight",
+            "model.layers.15.self_attn.o_proj.weight",
+            "model.layers.15.mlp.down_proj.weight",
+        ];
+
+        let mut tot_sq_err = 0.0f64;
+        let mut tot_sq_ref = 0.0f64;
+        let mut tot_n = 0u64;
+        let mut global_max = 0.0f32;
+
+        for name in names {
+            let dq = {
+                let mut b = MemoryBudget::unbounded();
+                q8.decode_tensor(name, &mut b).expect("decode q8").data
+            };
+            let bf = {
+                let mut b = MemoryBudget::unbounded();
+                raw.decode_tensor(name, &mut b).expect("decode raw").data
+            };
+            assert_eq!(dq.len(), bf.len(), "{name} length mismatch");
+
+            let mut sq_err = 0.0f64;
+            let mut sq_ref = 0.0f64;
+            let mut max_abs = 0.0f32;
+            for (x, y) in dq.iter().zip(bf.iter()) {
+                let d = (x - y).abs();
+                sq_err += (d as f64) * (d as f64);
+                sq_ref += (*y as f64) * (*y as f64);
+                if d > max_abs {
+                    max_abs = d;
+                }
+            }
+            let n = dq.len() as f64;
+            let rms_err = (sq_err / n).sqrt();
+            let rms_ref = (sq_ref / n).sqrt();
+            eprintln!(
+                "{name:55} rel_rms={:.4}%  max_abs={:.6}  (rms_ref={:.6})",
+                100.0 * rms_err / rms_ref,
+                max_abs,
+                rms_ref
+            );
+            tot_sq_err += sq_err;
+            tot_sq_ref += sq_ref;
+            tot_n += dq.len() as u64;
+            if max_abs > global_max {
+                global_max = max_abs;
+            }
+            // dq + bf drop here -> next pair reuses the memory.
+        }
+
+        let overall_rel =
+            100.0 * (tot_sq_err / tot_n as f64).sqrt() / (tot_sq_ref / tot_n as f64).sqrt();
+        eprintln!(
+            "\n=== OVERALL q8_0 vs bf16: rel_rms_error = {:.4}%  global_max_abs = {:.6}  (weights={}) ===",
+            overall_rel, global_max, tot_n
+        );
+    }
+
     #[test]
     fn open_reads_metadata_without_decoding_payloads() {
         let path = temp_path("metadata");
