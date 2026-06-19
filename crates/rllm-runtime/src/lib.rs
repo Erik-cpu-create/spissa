@@ -85,7 +85,8 @@ pub use speed::{
     RamaLayerAttributionProbeStats, RamaLayerDriftProbeStats,
 };
 pub use streaming::{
-    input_tile_sidecar_weight_name, lm_head_logits_parallel, streaming_attention_from_model,
+    input_tile_sidecar_weight_name, lm_head_logits_parallel, lm_head_logits_parallel_bf16,
+    streaming_attention_from_model,
     streaming_attention_with_runtime_from_model,
     streaming_column_cached_sparse_silu_gate_up_from_model,
     streaming_column_cached_sparse_tile_linear_from_model,

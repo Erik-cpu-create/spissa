@@ -42,6 +42,24 @@ struct Args {
     /// Optional JSON output path for the first decode step's logits.
     #[arg(long)]
     logits_out: Option<String>,
+
+    /// Pin the whole model mapping in RAM (mlock) so the OS cannot evict it.
+    /// On a machine where the model fits available RAM this keeps the weights
+    /// resident across decode steps instead of re-faulting them from disk every
+    /// token — a large decode speedup (matches llama.cpp's --mlock). Opt-in
+    /// because it risks OOM when the working set exceeds physical RAM.
+    #[arg(long, default_value_t = false)]
+    mlock: bool,
+
+    /// Turbo mode: enable BOTH residency (mlock) and the int8-activation
+    /// sdot/i8mm kernels at once. These two levers only pay off together —
+    /// residency keeps the weights in RAM so the int8 kernels run at full
+    /// speed instead of stalling on page faults (~10x steady-state decode in
+    /// testing). Uses near-exact int8 activation (quant-only diff vs the exact
+    /// scalar path, same approach as llama.cpp q8). Opt-in (implies --mlock's
+    /// OOM caveat).
+    #[arg(long, default_value_t = false)]
+    fast: bool,
 }
 
 fn parse_token_ids(raw: &str) -> Result<Vec<usize>> {
@@ -110,8 +128,48 @@ fn main() -> Result<()> {
         anyhow::bail!("provide exactly one of --prompt or --token-ids");
     }
 
+    // Residency + turbo. --fast bundles both levers (residency + int8 kernels),
+    // which only pay off together. --mlock enables residency alone. The reader
+    // and kernels read these via RLLM_MLOCK / RLLM_Q8_ACTIVATION (the env-gated
+    // knobs other runtime experiments use), so translate the flags before
+    // opening the model. Externally-set env vars still work without the flags.
+    if args.fast {
+        std::env::set_var("RLLM_MLOCK", "1");
+        std::env::set_var("RLLM_Q8_ACTIVATION", "1");
+        eprintln!(
+            "[gemma-test] --fast: residency (mlock) + int8-activation kernels (near-exact, quant-only diff)"
+        );
+    } else if args.mlock {
+        std::env::set_var("RLLM_MLOCK", "1");
+        eprintln!("[gemma-test] --mlock: pinning model in RAM (mlock)");
+    }
+
     let mut model = LazyRllmModel::open(&args.model)?;
-    model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
+    // Integrity mode defaults to VerifyOnce (SHA-256 each tensor's bytes once
+    // per session). RLLM_INTEGRITY={unchecked,verifyonce,strict} overrides it —
+    // a diagnostic/operational knob to measure or skip the verification cost.
+    let integrity_mode = match std::env::var("RLLM_INTEGRITY").ok().as_deref() {
+        Some("unchecked") => RamaIntegrityMode::Unchecked,
+        Some("strict") => RamaIntegrityMode::Strict,
+        Some("verifyonce") | None => RamaIntegrityMode::VerifyOnce,
+        Some(other) => anyhow::bail!(
+            "invalid RLLM_INTEGRITY={other:?} (expected unchecked|verifyonce|strict)"
+        ),
+    };
+    model.set_rama_integrity_mode(integrity_mode);
+
+    // Front-load the per-chunk SHA-256 integrity pass across cores. In VerifyOnce
+    // this moves the multi-second verification out of the first prefill (where it
+    // would run serially inline) into a brief parallel startup step, and lets the
+    // decode fast-path skip its whole-tensor hash. No-op for Strict/Unchecked.
+    let prewarm_start = Instant::now();
+    let verified_chunks = model.prewarm_chunk_integrity()?;
+    if verified_chunks > 0 {
+        eprintln!(
+            "[gemma-test] integrity prewarm: verified {verified_chunks} chunks in {:.2}s",
+            prewarm_start.elapsed().as_secs_f64()
+        );
+    }
 
     let tokenizer = model
         .metadata()

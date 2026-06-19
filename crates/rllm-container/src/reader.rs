@@ -71,6 +71,27 @@ impl RllmReader {
         // The file must not be modified externally while the reader is alive.
         let mmap = unsafe { Mmap::map(&file)? };
 
+        // Residency hints. A plain mmap faults pages in lazily and lets the OS
+        // evict them under pressure, so a decode loop that re-reads the whole
+        // weight set every token keeps re-faulting from disk (memory-bound on
+        // machines where the model nearly fits RAM). MADV_WILLNEED asks the
+        // kernel to read the mapping ahead so the weights land resident up
+        // front; it is a pure hint with no correctness impact, so we always
+        // issue it and ignore failures (unsupported platforms / large maps).
+        let _ = mmap.advise(memmap2::Advice::WillNeed);
+
+        // Opt-in hard residency: mlock pins the whole mapping so the OS cannot
+        // evict it. This guarantees the model stays in RAM (matching the
+        // resident behaviour of llama.cpp's --mlock) at the risk of OOM when
+        // the working set exceeds physical RAM, so it is gated behind an env
+        // flag and failures are tolerated rather than fatal.
+        if std::env::var("RLLM_MLOCK").map(|v| v == "1").unwrap_or(false) {
+            match mmap.lock() {
+                Ok(()) => {}
+                Err(e) => eprintln!("[rllm] RLLM_MLOCK=1 requested but mlock failed: {e}"),
+            }
+        }
+
         Ok(Self {
             mmap,
             header,
@@ -134,6 +155,14 @@ impl RllmReader {
     /// Read a chunk's compressed data (allocating copy, for backward compatibility).
     pub fn read_chunk(&self, chunk_id: u64) -> Result<Vec<u8>> {
         Ok(self.read_chunk_slice(chunk_id)?.to_vec())
+    }
+
+    /// The entire memory-mapped file as a zero-copy slice. Used for bulk
+    /// operations that index many spans at once across threads (e.g. parallel
+    /// integrity verification), where a single shared `&[u8]` is cheaper than a
+    /// borrow-per-chunk through `read_span`.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.mmap
     }
 
     /// Read an arbitrary file span as a zero-copy mmap slice. Used by the q8
