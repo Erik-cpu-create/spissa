@@ -39,6 +39,74 @@ See [`docs/rllm-rama-architecture.md`](docs/rllm-rama-architecture.md) for the P
 - ❌ Use external generic compression libraries by default; RTC codecs are custom/in-house unless explicitly approved
 - ❌ Claim to simulate a biological brain, consciousness, or self-learning cognition
 
+## Chat
+
+RLLM runs an **interactive, multi-turn chat** from lossless q8 weights on CPU. The
+model loads once and keeps a **resident KV cache** across turns, so each message
+prefills only the new text.
+
+```bash
+# Gemma 3 4B
+./try-gemma.sh chat
+
+# Llama 3.2 — 1B (default, faster) or 3B (better quality)
+./try-llama.sh chat
+./try-llama.sh -m 3b chat
+
+# one-shot
+./try-gemma.sh "What is the capital of Australia?"
+./try-llama.sh -m 3b "Explain photosynthesis in two sentences."
+```
+
+In chat: just type. Gemma uses `/reset` `/exit`; Llama uses `quit`/`exit`.
+`-v` shows prefill/decode timing, `-h` prints help.
+
+### `--fast` mode
+
+The wrappers always pass `--fast`, which turns on two levers that only pay off
+together (so it is opt-in, not the default):
+
+- **residency** — `mlock` the weight mmap so the OS cannot evict it (also issues
+  `MADV_WILLNEED`); without this the int8 kernels stall on page faults.
+- **int8-activation kernels** — quantize the activation to int8 and use NEON
+  `sdot`/`i8mm` (near-exact, quant-only diff vs the exact scalar path, the same
+  approach llama.cpp uses for q8). The integrity SHA-256 pass is front-loaded in
+  parallel at startup.
+
+Everything stays **lossless**: weights are read exactly, only the f32 activation
+is quantized, and per-byte SHA-256 integrity is still verified once per run
+(something Ollama/llama.cpp do not do).
+
+### Supported models
+
+| Model | Pack | Notes |
+|---|---|---|
+| Gemma 3 4B Instruct | `gemma-3-4b-it-q8.rllm` | tied bf16 embedding, sandwich-norm, dual-RoPE |
+| Llama 3.2 1B / 3B Instruct | `Llama-3.2-{1B,3B}-Instruct-q8…rllm` | tied bf16 embedding |
+
+### Performance (Apple A18 Pro, CPU, vs Ollama CPU same chip)
+
+Honest measured numbers in `--fast` mode (decode is steady-state):
+
+| | Gemma 3 4B | Llama 3.2 1B | Llama 3.2 3B |
+|---|---|---|---|
+| Prefill | ~36 tok/s (≈ Ollama parity) | ~0.5s/turn | ~1.4s/turn |
+| Decode | ~8 tok/s | ~17 tok/s | ~7–8 tok/s |
+| RAM | ~5 GB | ~1.05 GB (< Ollama 1.8 GB) | ~1.6 GB |
+
+Output is coherent and on-par with Ollama (no hallucination). Remaining decode gap
+vs Ollama is the 2-performance-core hardware ceiling, not kernel quality.
+
+### Packing your own model
+
+```bash
+# Download a HF checkpoint (safetensors + config.json + tokenizer.json), then:
+./target/release/rllm pack <model.safetensors | *.index.json | model-dir> \
+  --out models/<name>-q8.rllm \
+  --quantize q8_transformer_keep_io \
+  --codec raw          # raw (rtc-raw-v1) is required for the zero-copy fast path
+```
+
 ## Current Status
 
 Implemented:
@@ -91,6 +159,7 @@ Implemented:
   - Phase 7.12B generic eight-row projection reuse: the shared tiled-linear hot loop now reuses each decoded weight row fragment across 8 prompt-token rows before falling back to the existing 4-row/scalar tails, improving the measured Pythia-160M 512-token speed-policy row from 13.21s to 12.34s wall time while keeping tracked transient memory unchanged at 3.79 MiB.
   - R57 edge attention locality cache for the Llama experimental-speed path: optional per-layer recent-index caches can reuse a tiny number of previous edge-attention input features for sparse Q/K/V. The retained `window=8, extra=1` preset preserved the 30 tok/s floor on Llama 3.2 1B Instruct and slightly improved cheap quality counters, while the wider `window=16, extra=4` probe was rejected.
   - R58 Llama3 chat-template baseline: `llama-test --chat-template llama3` formats Llama 3.x Instruct prompts with BOS/header/EOT tokens and uses raw special-token stop fallbacks when older `.rllm` metadata lacks `eos_token_id`. Exact mode now has a coherent chat baseline before sparse AIP quality is judged.
+  - q8 `--fast` runtime + interactive chat (see the [Chat](#chat) section). R134–R139 made q8 decode/prefill production-usable on CPU: `mlock`/`MADV_WILLNEED` residency, int8 `sdot`/`i8mm` decode, row-parallel prefill, NEON `i8mm` weight packing (prefill reaches llama.cpp/Ollama CPU parity on the same chip), parallel SHA-256 integrity prewarm, and a NEON bf16 LM-head. Gemma 3 4B and Llama 3.2 1B/3B run multi-turn chat with a resident KV cache (`GemmaChatSession` / the Llama token-native session), bit-identical byte-level UTF-8 decode (emoji/accents), and `./try-gemma.sh` / `./try-llama.sh` runners. Lossless preserved: weights read exactly, per-byte SHA-256 verified once per run; only the f32 activation is int8-quantized in `--fast`.
 
 
 Not yet implemented:
