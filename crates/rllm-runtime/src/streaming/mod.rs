@@ -185,14 +185,85 @@ fn lm_head_logits_rows_bf16(
 ) {
     for (r, logit) in out.iter_mut().enumerate() {
         let row_base = (row_offset + r) * hidden * 2;
-        let mut sum = 0.0f32;
-        for h in 0..hidden {
-            let off = row_base + h * 2;
-            let bits = u16::from_le_bytes([weight_bf16[off], weight_bf16[off + 1]]);
-            sum += last_hidden[h] * crate::tensor::bf16_to_f32(bits);
-        }
-        *logit = sum;
+        let wrow = &weight_bf16[row_base..row_base + hidden * 2];
+        *logit = bf16_row_dot_f32(last_hidden, wrow, hidden);
     }
+}
+
+/// Dot product of an f32 activation row with one bf16 weight row (stored as
+/// little-endian u16). bf16 is the high 16 bits of f32, so the upcast is the
+/// exact bit op `(bits as u32) << 16` — vectorizable. NEON path on aarch64,
+/// scalar elsewhere. The two paths differ only in f32 accumulation ORDER (lane
+/// reduction vs left-to-right), so logits differ by a few ULPs; argmax is
+/// preserved (covered by tests).
+#[inline]
+fn bf16_row_dot_f32(hid: &[f32], wrow: &[u8], hidden: usize) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is baseline on aarch64; hid has `hidden` f32 and wrow has
+        // `hidden` little-endian u16 (hidden*2 bytes), bounds asserted below.
+        debug_assert!(hid.len() >= hidden && wrow.len() >= hidden * 2);
+        unsafe { bf16_row_dot_f32_neon(hid, wrow, hidden) }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        bf16_row_dot_f32_scalar(hid, wrow, hidden)
+    }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn bf16_row_dot_f32_scalar(hid: &[f32], wrow: &[u8], hidden: usize) -> f32 {
+    let mut sum = 0.0f32;
+    for h in 0..hidden {
+        let off = h * 2;
+        let bits = u16::from_le_bytes([wrow[off], wrow[off + 1]]);
+        sum += hid[h] * crate::tensor::bf16_to_f32(bits);
+    }
+    sum
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn bf16_row_dot_f32_neon(hid: &[f32], wrow: &[u8], hidden: usize) -> f32 {
+    use std::arch::aarch64::*;
+    let wptr = wrow.as_ptr();
+    let hptr = hid.as_ptr();
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut i = 0usize;
+    // 16 bf16 per iteration across 4 independent FMA chains.
+    while i + 16 <= hidden {
+        let w0 = vld1q_u16(wptr.add(i * 2) as *const u16); // bf16 [i..i+8]
+        let w1 = vld1q_u16(wptr.add((i + 8) * 2) as *const u16); // bf16 [i+8..i+16]
+        let f0 = vreinterpretq_f32_u32(vshlq_n_u32::<16>(vmovl_u16(vget_low_u16(w0))));
+        let f1 = vreinterpretq_f32_u32(vshlq_n_u32::<16>(vmovl_high_u16(w0)));
+        let f2 = vreinterpretq_f32_u32(vshlq_n_u32::<16>(vmovl_u16(vget_low_u16(w1))));
+        let f3 = vreinterpretq_f32_u32(vshlq_n_u32::<16>(vmovl_high_u16(w1)));
+        acc0 = vfmaq_f32(acc0, f0, vld1q_f32(hptr.add(i)));
+        acc1 = vfmaq_f32(acc1, f1, vld1q_f32(hptr.add(i + 4)));
+        acc2 = vfmaq_f32(acc2, f2, vld1q_f32(hptr.add(i + 8)));
+        acc3 = vfmaq_f32(acc3, f3, vld1q_f32(hptr.add(i + 12)));
+        i += 16;
+    }
+    let mut sum =
+        vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
+    // 4 bf16 at a time.
+    while i + 4 <= hidden {
+        let w = vld1_u16(wptr.add(i * 2) as *const u16);
+        let f = vreinterpretq_f32_u32(vshlq_n_u32::<16>(vmovl_u16(w)));
+        sum += vaddvq_f32(vmulq_f32(f, vld1q_f32(hptr.add(i))));
+        i += 4;
+    }
+    // scalar tail.
+    while i < hidden {
+        let off = i * 2;
+        let bits = u16::from_le_bytes([*wptr.add(off), *wptr.add(off + 1)]);
+        sum += *hptr.add(i) * f32::from_bits((bits as u32) << 16);
+        i += 1;
+    }
+    sum
 }
 
 #[derive(Debug, Clone, Copy)]
