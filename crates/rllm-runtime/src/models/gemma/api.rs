@@ -271,6 +271,7 @@ pub fn gemma_generate_from_model(
         let last_hidden = &hidden_states[(seq_len - 1) * hidden..];
         // R131: parallel LM-head GEMV over the 262k-row vocabulary (bf16-direct
         // from mmap, or f32 fallback).
+        let lm_head_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
         let logits = gemma_lm_head(
             model,
             embedding_f32.as_deref(),
@@ -279,6 +280,12 @@ pub fn gemma_generate_from_model(
             vocab_size,
             hidden,
         )?;
+        if let Some(t) = lm_head_started {
+            eprintln!(
+                "[gemma-profile] step {step} lm_head {:.0}ms (vocab={vocab_size})",
+                t.elapsed().as_secs_f64() * 1000.0
+            );
+        }
 
         let next_token = match build.sampling {
             StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
