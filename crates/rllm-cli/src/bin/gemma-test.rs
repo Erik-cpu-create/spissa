@@ -162,7 +162,6 @@ fn run_interactive(
     const PER_TURN_MAX: usize = 512;
     let mut budget = MemoryBudget::unbounded();
     let mut session = GemmaChatSession::new(model, prepared, &mut budget, max_context)?;
-    let stdout_is_tty = io::stdout().is_terminal();
 
     println!("\nRLLM Gemma chat — model loaded, KV cache resident (cap {max_context} tokens).");
     println!("Type a message. Commands: /reset (new conversation), /exit.\n");
@@ -207,15 +206,22 @@ fn run_interactive(
         print!("bot> ");
         io::stdout().flush().ok();
         let started = Instant::now();
-        let mut acc = String::new();
+        // Stream incrementally: re-decode the whole reply each token (so multi-token
+        // glyphs like emoji render correctly) but print only the NEW suffix. No `\r`
+        // redraw — that re-prints the whole line and breaks on terminal wrapping
+        // (the "doubled answer" artifact).
+        let mut reply_tokens: Vec<usize> = Vec::new();
+        let mut shown = String::new();
         let mut on_token = |token: usize| -> bool {
-            let piece = tokenizer.decode(&[token]).unwrap_or_default();
-            acc.push_str(&piece);
-            if stdout_is_tty {
-                print!("\rbot> {acc}");
+            reply_tokens.push(token);
+            let full = tokenizer.decode(&reply_tokens).unwrap_or_default();
+            if let Some(rest) = full.strip_prefix(&shown) {
+                print!("{rest}");
             } else {
-                print!("{piece}");
+                // A late token rewrote earlier text (rare): reprint the reply fresh.
+                print!("\rbot> {full}");
             }
+            shown = full;
             io::stdout().flush().ok();
             true
         };
