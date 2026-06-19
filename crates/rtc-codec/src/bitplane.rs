@@ -165,6 +165,89 @@ impl TensorCodec for BitplaneCodec {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn decode_w5_neon_inner(
+    palette: &[u8],
+    idx_plane: &[u8],
+    residuals: &[u8],
+    n: usize,
+    out: &mut [u8],
+) {
+    use std::arch::aarch64::*;
+
+    // Palette padded to 32 bytes for vtbl4 (indices < palette.len() <= 32).
+    let mut pal = [0u8; 32];
+    pal[..palette.len()].copy_from_slice(palette);
+    let pal_tbl = uint8x8x4_t(
+        vld1_u8(pal.as_ptr()),
+        vld1_u8(pal.as_ptr().add(8)),
+        vld1_u8(pal.as_ptr().add(16)),
+        vld1_u8(pal.as_ptr().add(24)),
+    );
+
+    // For 8 indices (5 bits each) packed MSB-first in 5 bytes: index j occupies
+    // bits [5j, 5j+5); read a 2-byte big-endian window at byte 5j/8, then
+    // right-shift by (11 - 5j%8) and mask 0x1f.
+    let bidx_hi: [u8; 8] = [0, 0, 1, 1, 2, 3, 3, 4];
+    let bidx_lo: [u8; 8] = [1, 1, 2, 2, 3, 4, 4, 5];
+    let neg_shift: [i16; 8] = [-11, -6, -9, -4, -7, -10, -5, -8];
+    let vhi = vld1_u8(bidx_hi.as_ptr());
+    let vlo = vld1_u8(bidx_lo.as_ptr());
+    let vshift = vld1q_s16(neg_shift.as_ptr());
+    let mask5 = vdupq_n_u16(0x1f);
+    let mask80 = vdupq_n_u16(0x80);
+    let mask7f = vdupq_n_u16(0x7f);
+
+    // SIMD-safe groups: each iteration loads 8 bytes at offset g*5, so require
+    // g*5 + 8 <= idx_plane.len(); also g*8 + 8 <= n.
+    let groups_by_bytes = if idx_plane.len() >= 8 { (idx_plane.len() - 8) / 5 + 1 } else { 0 };
+    let simd_groups = core::cmp::min(n / 8, groups_by_bytes);
+
+    let out_u16 = out.as_mut_ptr() as *mut u16;
+    for g in 0..simd_groups {
+        let grp = vld1_u8(idx_plane.as_ptr().add(g * 5)); // 8 bytes (need up to byte 5)
+        let hi = vtbl1_u8(grp, vhi);
+        let lo = vtbl1_u8(grp, vlo);
+        let window = vorrq_u16(vshlq_n_u16(vmovl_u8(hi), 8), vmovl_u8(lo));
+        let idx16 = vandq_u16(vshlq_u16(window, vshift), mask5);
+        let idx8 = vmovn_u16(idx16);
+        let exp8 = vtbl4_u8(pal_tbl, idx8);
+        let res8 = vld1_u8(residuals.as_ptr().add(g * 8));
+        let res16 = vmovl_u8(res8);
+        let exp16 = vmovl_u8(exp8);
+        let sign = vshlq_n_u16(vandq_u16(res16, mask80), 8);
+        let ep = vshlq_n_u16(exp16, 7);
+        let mant = vandq_u16(res16, mask7f);
+        let bf16 = vorrq_u16(vorrq_u16(sign, ep), mant);
+        vst1q_u16(out_u16.add(g * 8), bf16);
+    }
+
+    // Scalar tail: weights [simd_groups*8 .. n]. simd_groups*8 is a multiple of 8,
+    // so its bit offset (×5) is a multiple of 40 bits = 5 bytes => byte-aligned.
+    let tail_start = simd_groups * 8;
+    if tail_start < n {
+        let byte_off = (tail_start / 8) * 5;
+        let mut reader = BufferedBitReader::new(&idx_plane[byte_off..]);
+        for i in tail_start..n {
+            reader.refill();
+            let idx = reader.peek(5) as usize;
+            reader.consume(5);
+            let bits = join_bf16(palette[idx], residuals[i]);
+            out[2 * i] = bits as u8;
+            out[2 * i + 1] = (bits >> 8) as u8;
+        }
+    }
+}
+
+/// NEON `w=5` bit-plane decode to bf16 bytes. Bit-identical to scalar `decode`.
+#[cfg(target_arch = "aarch64")]
+pub fn decode_neon_w5(palette: &[u8], idx_plane: &[u8], residuals: &[u8], n: usize) -> Vec<u8> {
+    let mut out = vec![0u8; n * 2];
+    unsafe { decode_w5_neon_inner(palette, idx_plane, residuals, n, &mut out) };
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,6 +308,40 @@ mod tests {
             let enc = codec.encode(&bytes, &meta).unwrap();
             let dec = codec.decode(&enc.data, &dmeta()).unwrap();
             assert_eq!(dec, bytes, "n={n}: must be bit-exact");
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn decode_neon_w5_matches_scalar_bit_for_bit() {
+        let codec = BitplaneCodec;
+        // Sizes >= 32 so make_bf16(32, n) yields all 32 distinct exponents (w=5),
+        // covering tail cases (n%8 in {0,1,7,3}) and the SIMD/scalar boundary.
+        for &n in &[32usize, 33, 39, 40, 47, 64, 1000, 4096, 4099] {
+            let bytes = make_bf16(32, n);
+            let meta = EncodeMeta { name: "w".into(), shape: vec![n as u64], dtype: "bf16".into() };
+            let enc = codec.encode(&bytes, &meta).unwrap();
+            assert_eq!(&enc.data[0..4], b"RTCB");
+            let p = enc.data[14] as usize;
+            let w = enc.data[15];
+            assert_eq!(w, 5, "n={n}: expected w=5 for 32 exponents");
+            let mut off = 16;
+            let palette = &enc.data[off..off + p];
+            off += p;
+            let idx_bytes = (n * 5 + 7) / 8;
+            let idx_plane = &enc.data[off..off + idx_bytes];
+            off += idx_bytes;
+            let residuals = &enc.data[off..off + n];
+
+            let scalar = codec
+                .decode(
+                    &enc.data,
+                    &DecodeMeta { codec_id: "rtc-bitplane-v1".into(), uncompressed_size: 0 },
+                )
+                .unwrap();
+            let neon = decode_neon_w5(palette, idx_plane, residuals, n);
+            assert_eq!(neon, scalar, "n={n}: NEON decode must equal scalar bit-for-bit");
+            assert_eq!(neon, bytes, "n={n}: NEON decode must be lossless");
         }
     }
 
