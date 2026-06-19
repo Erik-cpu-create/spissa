@@ -97,4 +97,83 @@ mod bitplane_gemv_tests {
 
         assert_eq!(fused, plain, "fused bit-plane GEMV must equal plain bf16 GEMV bit-for-bit");
     }
+
+    #[test]
+    #[ignore]
+    fn fused_bitplane_gemv_feasibility() {
+        // Both paths use bfdot for an apples-to-apples compute comparison.
+        std::env::set_var("RLLM_Q8_ACTIVATION", "1");
+        std::env::set_var("RLLM_BF16_DOT", "1");
+
+        let bf16 = std::fs::read("/tmp/rllm-bf16-sample.bin")
+            .expect("run dump_bf16_embedding_sample first");
+        let hidden = 2048usize;
+        let n_weights = bf16.len() / 2;
+        let vocab = n_weights / hidden;
+        assert_eq!(vocab * hidden, n_weights, "sample must be vocab*2048");
+
+        let enc = BitplaneCodec
+            .encode(
+                &bf16,
+                &EncodeMeta {
+                    name: "e".into(),
+                    shape: vec![n_weights as u64],
+                    dtype: "bf16".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(enc.data[15], 5, "expected w=5");
+        let p = enc.data[14] as usize;
+        let mut off = 16;
+        let palette = enc.data[off..off + p].to_vec();
+        off += p;
+        let idx_bytes = (n_weights * 5 + 7) / 8;
+        let idx_plane = enc.data[off..off + idx_bytes].to_vec();
+        off += idx_bytes;
+        let residuals = enc.data[off..off + n_weights].to_vec();
+
+        let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+
+        // Correctness + parity on the real sample.
+        let mut plain = vec![0f32; vocab];
+        lm_head_logits_rows_bf16(&act, &bf16, hidden, 0, &mut plain);
+        let mut fused = vec![0f32; vocab];
+        lm_head_logits_rows_bitplane(&act, &palette, &idx_plane, &residuals, hidden, 0, &mut fused);
+        assert_eq!(fused, plain, "fused must equal plain bf16 (lossless) on the real embedding");
+
+        let iters = 5;
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            lm_head_logits_rows_bf16(&act, &bf16, hidden, 0, &mut plain);
+            std::hint::black_box(&plain);
+        }
+        let plain_ms = t.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            lm_head_logits_rows_bitplane(&act, &palette, &idx_plane, &residuals, hidden, 0, &mut fused);
+            std::hint::black_box(&fused);
+        }
+        let fused_ms = t.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        let bf16_mb = bf16.len() as f64 / 1e6;
+        let plane_mb = (palette.len() + idx_plane.len() + residuals.len()) as f64 / 1e6;
+        let speedup = plain_ms / fused_ms;
+        let ram_save = (1.0 - plane_mb / bf16_mb) * 100.0;
+        let verdict = if speedup >= 1.05 && plane_mb < bf16_mb {
+            "GO (faster + smaller)"
+        } else if plane_mb < bf16_mb && speedup >= 0.95 {
+            "MARGINAL (smaller, ~same speed)"
+        } else {
+            "NO-GO (slower)"
+        };
+        eprintln!(
+            "\n=== R144 REEFUSE-PLANE-DOT fused GEMV FEASIBILITY (single-core) ===\n\
+             vocab={vocab} hidden={hidden}  (lossless parity: OK)\n\
+             plain bf16 GEMV:   {plain_ms:.1} ms/token  (resident {bf16_mb:.0} MB)\n\
+             fused bit-plane:   {fused_ms:.1} ms/token  (resident {plane_mb:.0} MB, {ram_save:.0}% less)\n\
+             speedup: {speedup:.2}x\n\
+             VERDICT: {verdict}\n",
+        );
+    }
 }
