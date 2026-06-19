@@ -2,8 +2,22 @@
 
 Date: 2026-06-19
 Owner: RLLM
-Status: accepted (~10x steady-state decode vs scalar-resident; ~11 tok/s, matches Ollama CPU)
+Status: accepted (int8 sdot layers ~10x vs scalar-resident) — but see CORRECTION: the "~11 tok/s" was a layers-only mis-read; true decode ~3.9 tok/s
 Folder: success
+
+## CORRECTION (2026-06-19, same day)
+
+The "~11 tok/s decode, matches Ollama" headline below was WRONG: the
+`[gemma-profile] ... 34 layers Xms` line times ONLY the transformer-layer loop,
+not the whole decode token. lm_head (the 262k-row vocab GEMV over the bf16 tied
+embedding) runs after the timed region and is the LARGER cost. Corrected
+per-token decode breakdown (--fast, steady-state): layers ~90ms + lm_head
+~165ms = ~255ms/token = **~3.9 tok/s**, not 11. The int8 sdot result for the
+LAYERS is real (~88ms layers, ~10x over scalar-resident); the error was reading
+layers-only time as the whole token. vs Ollama 12.4 tok/s, decode is ~3.2x
+behind (not matched). lm_head bf16 is now the dominant decode lever. The tables
+below are kept as-recorded with this correction noted; R136 carries the honest
+end-to-end numbers.
 
 ## Hypothesis
 
