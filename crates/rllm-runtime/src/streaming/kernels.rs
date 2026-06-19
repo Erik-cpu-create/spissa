@@ -1265,6 +1265,106 @@ pub(crate) fn accumulate_q8_0_full_tensor_int8_batch1(
     Ok(())
 }
 
+/// R138 prefill fast-path: whole-tensor Q8_0 panel matmul for batch>=2,
+/// parallelized across OUTPUT ROWS once per projection (not once per chunk).
+///
+/// Decode got the whole-tensor treatment in R133; prefill needs the same. The
+/// per-chunk path spawned worker threads for EVERY chunk (~238/token), so for a
+/// short prompt the thread-spawn overhead beat the work. Splitting by BATCH rows
+/// is also wrong: each worker would re-read the WHOLE weight tensor for its few
+/// batch rows, tripling weight bandwidth and defeating the point of batching.
+///
+/// So split by OUTPUT ROWS: each worker reads a DISJOINT slice of weight rows
+/// ONCE and computes all batch tokens for them, keeping batch whole (panel stays
+/// engaged) and weights read once total. The output is `[batch, out_features]`
+/// (batch-major), so a worker's output rows are strided across batch — to keep
+/// the parallel section sound (no aliased `&mut`), each worker writes a local
+/// `[batch, rows]` buffer and we scatter it into the final output single-threaded
+/// afterward (a cheap `out_features*batch` copy).
+pub(crate) fn accumulate_q8_0_full_tensor_panel_batch(
+    input: &[f32],
+    output: &mut [f32],
+    q8_bytes: &[u8],
+    config: StreamingLinearConfig,
+    weight_name: &str,
+) -> Result<()> {
+    let in_features = config.in_features;
+    let out_features = config.out_features;
+    let batch = config.batch;
+    if batch < 2 || !in_features.is_multiple_of(32) || in_features == 0 {
+        return Err(RuntimeError::Shape(
+            "q8 panel prefill fast-path requires batch>=2 and in_features%32==0".to_string(),
+        ));
+    }
+    let blocks_per_row = in_features / 32;
+    let row_bytes = blocks_per_row * 34;
+    let expected_bytes = out_features
+        .checked_mul(row_bytes)
+        .ok_or_else(|| RuntimeError::Shape("q8 panel prefill size overflow".to_string()))?;
+    if q8_bytes.len() != expected_bytes {
+        return Err(RuntimeError::Shape(format!(
+            "q8 panel prefill byte len {} != expected {expected_bytes} (out={out_features}, bpr={blocks_per_row})",
+            q8_bytes.len()
+        )));
+    }
+    if input.len() != batch * in_features || output.len() != batch * out_features {
+        return Err(RuntimeError::Shape(
+            "q8 panel prefill input/output shape mismatch".to_string(),
+        ));
+    }
+
+    let threads = effective_runtime_threads(
+        std::env::var(RLLM_THREADS_ENV).ok().as_deref(),
+        available_runtime_threads(),
+    );
+    // Enough output rows per worker to amortize the spawn + scatter-merge.
+    const MIN_OUT_ROWS_PER_WORKER: usize = 16;
+    let workers = threads.min(out_features / MIN_OUT_ROWS_PER_WORKER).max(1);
+    if workers <= 1 {
+        return accumulate_q8_0_chunk(input, output, q8_bytes, 0, config, weight_name);
+    }
+    let rows_per_worker = out_features.div_ceil(workers);
+
+    // Each worker computes a disjoint output-row slice into a local [batch, rows]
+    // buffer, reading only its weight rows. Returns (row_start, rows, buffer).
+    type WorkerOut = Result<(usize, usize, Vec<f32>)>;
+    let mut results: Vec<WorkerOut> = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        let mut row_start = 0usize;
+        while row_start < out_features {
+            let rows = rows_per_worker.min(out_features - row_start);
+            let w_bytes = &q8_bytes[row_start * row_bytes..(row_start + rows) * row_bytes];
+            let worker_config = StreamingLinearConfig { batch, in_features, out_features: rows };
+            handles.push(scope.spawn(move || -> WorkerOut {
+                let mut local = vec![0.0f32; batch * rows];
+                accumulate_q8_0_chunk(input, &mut local, w_bytes, 0, worker_config, weight_name)?;
+                Ok((row_start, rows, local))
+            }));
+            row_start += rows;
+        }
+        for handle in handles {
+            results.push(handle.join().unwrap_or_else(|_| {
+                Err(RuntimeError::Shape(
+                    "R138 panel prefill worker panicked".to_string(),
+                ))
+            }));
+        }
+    });
+
+    // Scatter each worker's local [batch, rows] buffer into the [batch, out_features]
+    // output at its column range (single-threaded; disjoint columns).
+    for result in results {
+        let (row_start, rows, local) = result?;
+        for b in 0..batch {
+            let src = &local[b * rows..b * rows + rows];
+            let dst_off = b * out_features + row_start;
+            output[dst_off..dst_off + rows].copy_from_slice(src);
+        }
+    }
+    Ok(())
+}
+
 fn accumulate_q8_0_chunk_int8_activation(
     input: &[f32],
     output: &mut [f32],
@@ -1361,6 +1461,13 @@ fn accumulate_q8_0_chunk_int8_activation(
 }
 
 /// Minimum batch rows per worker before the Q8 prefill matmul is parallelized.
+///
+/// Kept at 4 (threshold `batch >= 8`): below this, the by-batch split spawns
+/// threads PER CHUNK (~238 chunks/token) with too little work each, so the
+/// thread-spawn overhead makes it SLOWER than single-threaded (measured: batch=6
+/// went 1249ms -> 2189ms at threads=8 when this was lowered to 2). Parallelizing
+/// short-prompt prefill needs a whole-tensor row-parallel path (R133-style, one
+/// spawn per projection), not a lower threshold here.
 const MIN_ROWS_PER_PARALLEL_Q8_PREFILL: usize = 4;
 
 /// REEWEAVE-Q8-PREFILL: parallelize one already-decoded Q8 chunk across CPU cores

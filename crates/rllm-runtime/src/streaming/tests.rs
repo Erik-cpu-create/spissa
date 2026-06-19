@@ -336,6 +336,57 @@ mod tests {
     }
 
     #[test]
+    fn r138_full_tensor_panel_batch_matches_single_thread_within_tolerance() {
+        // R138 prefill fast-path: whole-tensor panel matmul split across BATCH rows.
+        // Each worker runs the panel kernel on disjoint batch rows. The kernel tiles
+        // differently for batch=6 (single thread) vs batch=2 (per worker), so the f32
+        // accumulation ORDER differs by a few ULPs — correct within tolerance, same
+        // class as the other int8/bf16 fast paths. batch=6 -> up to 3 workers.
+        let in_features = 64usize; // 2 blocks/row
+        let out_features = 10usize;
+        let batch = 6usize;
+        let blocks_per_row = in_features / 32;
+
+        let mut q8: Vec<u8> = Vec::new();
+        for idx in 0..(out_features * blocks_per_row) {
+            let scale_bits = 0x2400u16 + (idx as u16 % 256);
+            q8.extend_from_slice(&scale_bits.to_le_bytes());
+            for k in 0..32usize {
+                q8.push((((idx * 13 + k * 5) % 251) as i32 - 125) as i8 as u8);
+            }
+        }
+        let input: Vec<f32> =
+            (0..batch * in_features).map(|i| (i as f32 * 0.013 - 0.7).sin() * 1.3).collect();
+        let config = StreamingLinearConfig { batch, in_features, out_features };
+
+        let mut got = vec![0.0f32; batch * out_features];
+        accumulate_q8_0_full_tensor_panel_batch(&input, &mut got, &q8, config, "r138-test").unwrap();
+
+        // Single-threaded reference: the same kernel on the whole batch at once.
+        let mut want = vec![0.0f32; batch * out_features];
+        accumulate_q8_0_chunk(&input, &mut want, &q8, 0, config, "r138-ref").unwrap();
+
+        let max_abs_diff = got
+            .iter()
+            .zip(want.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        let max_mag = want.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff <= 1e-3 * max_mag.max(1.0),
+            "R138 panel-batch must match the single-threaded kernel within tolerance: \
+             max_abs_diff={max_abs_diff}, max_mag={max_mag}"
+        );
+
+        // Guards: batch<2 and wrong byte length are rejected.
+        let b1 = StreamingLinearConfig { batch: 1, in_features, out_features };
+        let mut o1 = vec![0.0f32; out_features];
+        assert!(accumulate_q8_0_full_tensor_panel_batch(&input[..in_features], &mut o1, &q8, b1, "x").is_err());
+        let mut oshort = vec![0.0f32; batch * out_features];
+        assert!(accumulate_q8_0_full_tensor_panel_batch(&input, &mut oshort, &q8[..q8.len() - 34], config, "x").is_err());
+    }
+
+    #[test]
     fn streaming_linear_matches_full_decode_linear_across_chunk_boundary() {
         let path = temp_path("linear");
         write_chunked_weight(&path);
