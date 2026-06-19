@@ -10,6 +10,174 @@ mod tests {
         Sha256::digest(bytes).into()
     }
 
+    #[test]
+    fn bf16_rne_matches_known_values() {
+        // 1.0f32 = 0x3F800000 -> bf16 0x3F80; exact, no rounding.
+        assert_eq!(super::f32_to_bf16_rne(1.0), 0x3F80);
+        // 0.0 -> 0x0000
+        assert_eq!(super::f32_to_bf16_rne(0.0), 0x0000);
+        // round-to-nearest-even: 0x3F808000 ties -> even (0x3F80, not 0x3F81).
+        assert_eq!(super::f32_to_bf16_rne(f32::from_bits(0x3F80_8000)), 0x3F80);
+        // just above the tie rounds up to 0x3F81.
+        assert_eq!(super::f32_to_bf16_rne(f32::from_bits(0x3F80_8001)), 0x3F81);
+        // NaN stays NaN (exponent all ones, nonzero mantissa).
+        let n = super::f32_to_bf16_rne(f32::NAN);
+        assert_eq!(n & 0x7F80, 0x7F80);
+        assert_ne!(n & 0x007F, 0);
+    }
+
+    #[test]
+    fn bf16_activation_holder_matches_f32_argmax() {
+        // Holder over many rows selects the same argmax as the pure-f32 path.
+        let hidden = 96usize;
+        let rows = 40usize;
+        let mut hid = vec![0.0f32; hidden];
+        let mut weights = vec![0u8; rows * hidden * 2];
+        let mut s: u32 = 0x55AA_1234;
+        let mut next = || {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            s
+        };
+        for v in hid.iter_mut() {
+            *v = (next() as i32 as f32) / (i32::MAX as f32) * 2.0;
+        }
+        for r in 0..rows {
+            for i in 0..hidden {
+                let wf = (next() as i32 as f32) / (i32::MAX as f32) * 2.0;
+                let wb = super::f32_to_bf16_rne(wf);
+                weights[(r * hidden + i) * 2] = (wb & 0xFF) as u8;
+                weights[(r * hidden + i) * 2 + 1] = (wb >> 8) as u8;
+            }
+        }
+        let row = |r: usize| &weights[r * hidden * 2..(r + 1) * hidden * 2];
+
+        // f32 reference argmax.
+        let mut ref_best = (0usize, f32::MIN);
+        for r in 0..rows {
+            let v = super::bf16_row_dot_f32(&hid, row(r), hidden);
+            if v > ref_best.1 {
+                ref_best = (r, v);
+            }
+        }
+        // Holder argmax (uses bfdot when available, else f32 — both must agree).
+        let act = super::Bf16DotActivation::new(&hid);
+        let mut got_best = (0usize, f32::MIN);
+        for r in 0..rows {
+            let v = act.row_dot(row(r), hidden);
+            if v > got_best.1 {
+                got_best = (r, v);
+            }
+        }
+        assert_eq!(
+            ref_best.0, got_best.0,
+            "bfdot holder argmax must match f32 argmax"
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "feasibility measurement: cargo test -- --ignored --nocapture bfdot_feasibility"]
+    fn bfdot_feasibility() {
+        let has_bf16 = super::bf16_dot_available();
+        eprintln!("FEAT_BF16 detected: {has_bf16}");
+        if !has_bf16 {
+            eprintln!("NO-GO: bf16 absent; bfdot path will never engage on this CPU.");
+            return;
+        }
+        let hidden = 2048usize; // LLaMA-1B hidden
+        let rows = 2000usize; // a vocab slice
+        let mut hid = vec![0.0f32; hidden];
+        let mut weights = vec![0u8; rows * hidden * 2];
+        let mut s: u32 = 0xC0FF_EE11;
+        let mut next = || {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            s
+        };
+        for v in hid.iter_mut() {
+            *v = (next() as i32 as f32) / (i32::MAX as f32);
+        }
+        // Finite bf16 weights in [-2, 2) so the timed dot stays a real number.
+        for w in weights.chunks_exact_mut(2) {
+            let wf = (next() as i32 as f32) / (i32::MAX as f32) * 2.0;
+            let wb = super::f32_to_bf16_rne(wf);
+            w[0] = (wb & 0xFF) as u8;
+            w[1] = (wb >> 8) as u8;
+        }
+
+        // f32 path: per-row upcast dot.
+        let t0 = std::time::Instant::now();
+        let mut sink = 0.0f32;
+        for r in 0..rows {
+            let wrow = &weights[r * hidden * 2..(r + 1) * hidden * 2];
+            sink += super::bf16_row_dot_f32(&hid, wrow, hidden);
+        }
+        let f32_ns = t0.elapsed().as_nanos() as f64 / rows as f64;
+
+        // bfdot path: convert activation ONCE, then per-row bfdot.
+        let t1 = std::time::Instant::now();
+        let act = super::convert_f32_to_bf16(&hid);
+        let mut sink2 = 0.0f32;
+        for r in 0..rows {
+            let wrow = &weights[r * hidden * 2..(r + 1) * hidden * 2];
+            sink2 += unsafe { super::bf16_row_dot_bf16(&act, wrow, hidden) };
+        }
+        let bf_ns = t1.elapsed().as_nanos() as f64 / rows as f64;
+
+        eprintln!(
+            "f32-upcast: {f32_ns:.1} ns/row   bfdot: {bf_ns:.1} ns/row   speedup: {:.2}x   (sinks {sink} {sink2})",
+            f32_ns / bf_ns
+        );
+        eprintln!(
+            "DECISION: {}",
+            if bf_ns < f32_ns {
+                "GO (bfdot faster)"
+            } else {
+                "NO-GO (bfdot not faster)"
+            }
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn bfdot_row_matches_f32_reference_within_bf16_tol() {
+        if !super::bf16_dot_available() {
+            eprintln!("skip: FEAT_BF16 not present on this CPU");
+            return;
+        }
+        // Deterministic pseudo-random hidden + bf16 weight row, length 70 (covers the
+        // 32-wide main loop twice + a 6-element scalar tail).
+        let hidden = 70usize;
+        let mut hid = vec![0.0f32; hidden];
+        let mut wrow = vec![0u8; hidden * 2];
+        let mut s: u32 = 0x1234_5678;
+        let mut next = || {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            s
+        };
+        for i in 0..hidden {
+            hid[i] = (next() as i32 as f32) / (i32::MAX as f32) * 3.0;
+            let wf = (next() as i32 as f32) / (i32::MAX as f32) * 2.0;
+            let wb = super::f32_to_bf16_rne(wf);
+            wrow[i * 2] = (wb & 0xFF) as u8;
+            wrow[i * 2 + 1] = (wb >> 8) as u8;
+        }
+        // Reference: dot of bf16(hid) against bf16(wrow), accumulated in f32.
+        let mut reference = 0.0f64;
+        for i in 0..hidden {
+            let a = f32::from_bits((super::f32_to_bf16_rne(hid[i]) as u32) << 16);
+            let wb = u16::from_le_bytes([wrow[i * 2], wrow[i * 2 + 1]]);
+            let w = f32::from_bits((wb as u32) << 16);
+            reference += (a as f64) * (w as f64);
+        }
+        let act = super::convert_f32_to_bf16(&hid);
+        let got = unsafe { super::bf16_row_dot_bf16(&act, &wrow, hidden) } as f64;
+        let denom = reference.abs().max(1e-3);
+        assert!(
+            (got - reference).abs() / denom < 1e-2,
+            "bfdot {got} vs reference {reference} (rel err too large)"
+        );
+    }
+
     fn f32_bytes(values: &[f32]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(values.len() * 4);
         for value in values {
