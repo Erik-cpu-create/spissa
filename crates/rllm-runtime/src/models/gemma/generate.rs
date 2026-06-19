@@ -65,10 +65,22 @@ pub fn streaming_gemma_transformer_block(
     cache: Option<&mut KvCache>,
 ) -> Result<Vec<f32>> {
     let mut residual = input.to_vec();
+    // Profile (gated): time attention vs MLP on a representative layer (0) to
+    // locate the decode cost without 34 lines/token of noise.
+    let profile = crate::q8_kernel_profile_enabled() && runtime.layer_index == 0;
+    let attn_t = profile.then(std::time::Instant::now);
     let attn_delta =
         gemma_attention_sublayer(model, input, names, norms, build, runtime, budget, cache)?;
+    let attn_ms = attn_t.map(|t| t.elapsed().as_secs_f64() * 1000.0);
     add_inplace(&mut residual, &attn_delta)?;
+    let mlp_t = profile.then(std::time::Instant::now);
     let mlp_delta = gemma_mlp_sublayer(model, &residual, names, norms, build, runtime, budget)?;
+    if let (Some(a), Some(t)) = (attn_ms, mlp_t) {
+        eprintln!(
+            "[gemma-profile] layer0 attn {a:.1}ms mlp {:.1}ms",
+            t.elapsed().as_secs_f64() * 1000.0
+        );
+    }
     add_inplace(&mut residual, &mlp_delta)?;
     Ok(residual)
 }

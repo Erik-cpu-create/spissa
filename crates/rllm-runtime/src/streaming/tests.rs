@@ -156,6 +156,45 @@ mod tests {
     }
 
     #[test]
+    fn lm_head_bf16_direct_matches_f32_upcast_within_accumulation_tolerance() {
+        // The bf16-direct LM head (reads bf16 from mmap, upcasts the exact high-16
+        // bits) must agree with the f32 path fed the same bf16→f32 upcast. The
+        // bf16 path is SIMD (lane-parallel FMA), so it differs from the scalar
+        // f32 path only in f32 ACCUMULATION ORDER — a few ULPs — not in the
+        // weights (the upcast is exact). Assert a tiny tolerance + identical
+        // argmax rather than bit-for-bit.
+        let hidden = 5usize;
+        let vocab = 37usize;
+        let last_hidden: Vec<f32> = (0..hidden).map(|h| (h as f32 * 0.41 - 0.6).cos()).collect();
+
+        let bf16_bits: Vec<u16> = (0..vocab * hidden)
+            .map(|i| (((i as f32 * 0.017 - 0.3).sin() * 0.5).to_bits() >> 16) as u16)
+            .collect();
+        let mut bf16_bytes = Vec::with_capacity(bf16_bits.len() * 2);
+        for b in &bf16_bits {
+            bf16_bytes.extend_from_slice(&b.to_le_bytes());
+        }
+        let f32_weight: Vec<f32> = bf16_bits.iter().map(|&b| crate::tensor::bf16_to_f32(b)).collect();
+
+        let from_bf16 = lm_head_logits_parallel_bf16(&last_hidden, &bf16_bytes, vocab, hidden);
+        let from_f32 = lm_head_logits_parallel(&last_hidden, &f32_weight, vocab, hidden);
+
+        let max_abs_diff = from_bf16
+            .iter()
+            .zip(from_f32.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff < 1e-4,
+            "bf16-direct LM head must match the f32-upcast path within accumulation tolerance: {max_abs_diff}"
+        );
+        let argmax = |v: &[f32]| {
+            v.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i, _)| i).unwrap()
+        };
+        assert_eq!(argmax(&from_bf16), argmax(&from_f32), "bf16-direct LM head must preserve argmax");
+    }
+
+    #[test]
     fn r132_parallel_batch1_q8_rows_match_serial_bit_for_bit() {
         // in_features=64 → 2 blocks/row; out_features=20 > 2*MIN_ROWS_PER_PARALLEL_Q8_PREFILL
         // so the parallel split engages on multi-core hosts.
@@ -3827,5 +3866,68 @@ mod tests {
         assert_eq!(budget.current_bytes(), 0);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn lm_head_bf16_simd_matches_scalar_reference_and_preserves_argmax() {
+        // Deterministic activation + bf16 weight matrix; compare the vectorized
+        // lm_head against a straight scalar reference. The SIMD path differs only
+        // in f32 accumulation order, so logits must match to a tiny tolerance and
+        // argmax must be identical.
+        let hidden = 2560usize; // Gemma 3 4B hidden (exercises the 16-wide body)
+        let vocab = 257usize; // not a multiple of the worker split
+        // Pseudo-random but deterministic (no Math::random / time in tests).
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 40) as f32 / 16_777_216.0) - 0.5
+        };
+        let last_hidden: Vec<f32> = (0..hidden).map(|_| next() * 2.0).collect();
+        let mut weight_bf16 = Vec::with_capacity(vocab * hidden * 2);
+        let mut weight_vals = vec![0.0f32; vocab * hidden];
+        for (i, slot) in weight_vals.iter_mut().enumerate() {
+            let v = next();
+            // bf16 = high 16 bits of the f32, exact round-trip for our reference.
+            let bits = (v.to_bits() >> 16) as u16;
+            *slot = f32::from_bits((bits as u32) << 16);
+            weight_bf16.extend_from_slice(&bits.to_le_bytes());
+            let _ = i;
+        }
+
+        let logits = lm_head_logits_parallel_bf16(&last_hidden, &weight_bf16, vocab, hidden);
+
+        // Scalar reference (left-to-right accumulation).
+        let mut reference = vec![0.0f32; vocab];
+        for (row, out) in reference.iter_mut().enumerate() {
+            let mut sum = 0.0f32;
+            for h in 0..hidden {
+                sum += last_hidden[h] * weight_vals[row * hidden + h];
+            }
+            *out = sum;
+        }
+
+        let mut max_abs_diff = 0.0f32;
+        for (a, b) in logits.iter().zip(reference.iter()) {
+            max_abs_diff = max_abs_diff.max((a - b).abs());
+        }
+        let argmax = |v: &[f32]| {
+            v.iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap()
+        };
+        // Accumulation-order-only diff over 2560 terms: a few ULPs.
+        assert!(
+            max_abs_diff < 1e-2,
+            "lm_head SIMD vs scalar max_abs_diff too large: {max_abs_diff}"
+        );
+        assert_eq!(
+            argmax(&logits),
+            argmax(&reference),
+            "lm_head SIMD must preserve argmax"
+        );
     }
 }
