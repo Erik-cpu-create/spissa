@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::time::Instant;
 
 use rllm_runtime::{
@@ -244,15 +244,24 @@ fn main() -> Result<()> {
 
     let mut budget = MemoryBudget::unbounded();
     let started = Instant::now();
+    // On a real terminal, redraw the whole running line with `\r` so multi-token
+    // glyphs render smoothly. When stdout is piped/captured the `\r` isn't
+    // honored and the redraws pile up (looking like duplicated output), so there
+    // just append each newly decoded piece once.
+    let stdout_is_tty = io::stdout().is_terminal();
     let mut decoded_so_far = String::new();
     let mut on_token = |token: usize| -> bool {
         if stop_token_ids.contains(&token) {
             return false;
         }
         if let Some(tokenizer) = tokenizer.as_ref() {
-            // Re-decode the running sequence so multi-token glyphs render.
-            decoded_so_far.push_str(&tokenizer.decode(&[token]).unwrap_or_default());
-            print!("\r{decoded_so_far}");
+            let piece = tokenizer.decode(&[token]).unwrap_or_default();
+            decoded_so_far.push_str(&piece);
+            if stdout_is_tty {
+                print!("\r{decoded_so_far}");
+            } else {
+                print!("{piece}");
+            }
             let _ = io::stdout().flush();
         }
         true
