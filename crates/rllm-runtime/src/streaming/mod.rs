@@ -353,14 +353,18 @@ unsafe fn bf16_row_dot_bf16(hid_bf16: &[u16], wrow: &[u8], hidden: usize) -> f32
     sum
 }
 
-/// bfdot is the `--fast` LM-head/embedding kernel: it engages only when the fast
-/// (int8-activation) path is on, the CPU has FEAT_BF16, and it is not disabled via
-/// `RLLM_BF16_DOT=0`. The exact (non-fast) default stays on the f32-upcast path, so
-/// the lossless-by-default behavior is unchanged. False on non-aarch64.
+/// bfdot is an OPT-IN LM-head/embedding kernel, enabled with `RLLM_BF16_DOT=1`
+/// (plus `--fast` and FEAT_BF16). It is OFF by default because the bf16 LM-head
+/// GEMV is memory-bandwidth-bound (it reads the full bf16 vocab per token), so bfdot
+/// yields no decode speedup today AND its bf16 activations are slightly less precise
+/// than the f32-upcast default — enabling it by default would trade precision for no
+/// speed. The kernel is retained, validated, and opt-in as the compute half of the
+/// Phase 2 compressed-resident decode (where bytes-read drops and bfdot's compute win
+/// surfaces). False on non-aarch64.
 fn bf16_dot_enabled() -> bool {
     #[cfg(target_arch = "aarch64")]
     {
-        if matches!(std::env::var("RLLM_BF16_DOT").as_deref(), Ok("0")) {
+        if !matches!(std::env::var("RLLM_BF16_DOT").as_deref(), Ok("1")) {
             return false;
         }
         q8_activation_path_enabled() && bf16_dot_available()
