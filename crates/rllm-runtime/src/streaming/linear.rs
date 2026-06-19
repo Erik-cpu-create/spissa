@@ -422,6 +422,25 @@ pub fn streaming_tile_linear_from_model(
         }
     }
 
+    // R138 prefill fast-path: raw-codec Q8_0 + batch>=2 (gated on RLLM_Q8_ACTIVATION).
+    // Same whole-tensor view as R133, but split the BATCH rows across workers ONCE
+    // per projection (output is contiguous per batch row, so the split is sound) and
+    // run the i8mm panel kernel per worker — avoiding the per-chunk thread-spawn that
+    // made naive prefill parallelization slower than single-threaded.
+    if tensor.dtype == rllm_container::DType::Q8_0
+        && config.linear.batch >= 2
+        && q8_activation_path_enabled()
+    {
+        let lin = config.linear;
+        let weight = weight_name;
+        let handled = model.with_raw_tensor(tensor.tensor_id, |q8_bytes| {
+            accumulate_q8_0_full_tensor_panel_batch(input, &mut output, q8_bytes, lin, weight)
+        })?;
+        if handled.is_some() {
+            return Ok(output);
+        }
+    }
+
     let dtype_size = tensor.dtype.size_bytes();
     let mut byte_offset = 0usize;
     for chunk in chunks {
