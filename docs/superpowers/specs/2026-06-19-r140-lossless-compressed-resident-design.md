@@ -127,8 +127,9 @@ unaffected when the tensor isn't dfloat-coded.
   field split are standard, well-understood building blocks), NOT by reading or
   porting DFloat11's CUDA/Python. This matches the RLLM doctrine: studying prior
   work to learn ≠ wrapping/copying.
-- **No external dependencies.** Reuses the in-house Huffman machinery
-  (`rtc-codec/src/huff.rs`, already custom) for the exponent stream, plus a new
+- **No external dependencies.** Implements its own self-contained canonical Huffman
+  (lengths + length-limiting to 15 bits + canonical code assignment + LUT decode)
+  directly in `rtc-codec/src/dfloat.rs` — no import from `huff.rs`. Plus a new
   LUT decoder and the bf16 field split — all pure Rust. The NEON kernel uses
   `std::arch` (built in). No zstd/flate2/entropy crates. Consistent with RTC's
   "custom codecs, no external generic compression libraries" rule; `cargo build`
@@ -143,8 +144,9 @@ implementation of this line.
 
 ## Components / isolation
 
-- `rtc-dfloat-v1` (rtc-codec crate): `encode`/`decode`/`decode_range`; depends on
-  the existing Huffman machinery for the exponent stream. Testable standalone.
+- `rtc-dfloat-v1` (rtc-codec crate): `encode`/`decode`/`decode_range`; implements
+  its own self-contained canonical Huffman in `dfloat.rs` — no import from `huff.rs`.
+  Testable standalone.
 - Fused decode kernel (rllm-runtime streaming): decode-tile + bf16 dot; depends on
   the codec's tile decode + `bf16_row_dot_f32`.
 - Pack/runtime wiring: additive, gated on the new codec id.
