@@ -671,4 +671,5 @@ include!("block.rs");
 include!("validation.rs");
 include!("argmax.rs");
 include!("kernels.rs");
+include!("bitplane_gemv.rs");
 include!("tests.rs");
