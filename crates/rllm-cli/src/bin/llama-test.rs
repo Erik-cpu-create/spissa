@@ -52,6 +52,13 @@ struct Args {
     #[arg(long, default_value = "verify-once")]
     rama_integrity: String,
 
+    /// Turbo mode: residency (mlock) + int8-activation sdot/i8mm kernels, plus a
+    /// parallel integrity prewarm. The same shared q8 fast path Gemma uses; these
+    /// levers only pay off together. Near-exact int8 activation (quant-only diff).
+    /// Opt-in (mlock can OOM if the working set exceeds RAM).
+    #[arg(long, default_value_t = false)]
+    fast: bool,
+
     /// Optional JSON output path for the first turn's prefill->first-token logits.
     /// Used for parity comparison (e.g. f32 vs int8-activation matmul).
     #[arg(long)]
@@ -480,6 +487,14 @@ fn main() -> Result<()> {
     if args.max_new_tokens == 0 {
         anyhow::bail!("--max-new-tokens must be greater than zero");
     }
+    // --fast: residency + int8 kernels (the same shared q8 path Gemma uses), via
+    // the env-gated knobs the reader/kernels read. Set before opening the model
+    // so the mmap is mlocked at load.
+    if args.fast {
+        std::env::set_var("RLLM_MLOCK", "1");
+        std::env::set_var("RLLM_Q8_ACTIVATION", "1");
+        eprintln!("[llama-test] --fast: residency (mlock) + int8-activation kernels");
+    }
     let mut model = LazyRllmModel::open(&args.model)?;
     if args.rama_trace.is_some() {
         model.enable_rama_trace();
@@ -504,6 +519,13 @@ fn main() -> Result<()> {
     };
 
     model.set_rama_integrity_mode(rama_integrity);
+
+    // Front-load the per-chunk SHA-256 integrity pass across cores (no-op outside
+    // verify-once). Moves the multi-second verification out of the first prefill.
+    let verified_chunks = model.prewarm_chunk_integrity()?;
+    if verified_chunks > 0 {
+        eprintln!("[llama-test] integrity prewarm: verified {verified_chunks} chunks");
+    }
 
     let prepared = prepare_llama_rama_layer_decode_transformer_from_metadata(&mut model, config)?;
     let mut budget = MemoryBudget::unbounded();
