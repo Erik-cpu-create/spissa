@@ -262,6 +262,84 @@ pub fn decode_neon_w5_into(
     unsafe { decode_w5_neon_inner(palette, idx_plane, residuals, n, out) };
 }
 
+/// R146 SCOUT: 16-wide w=5 decode (vqtbl2q gathers 16 exponents/lookup vs the
+/// 8-wide vtbl4's 8). Processes 16 weights/iter; scalar tail via the 8-wide path.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+pub unsafe fn decode16_w5_into(
+    palette: &[u8],
+    idx_plane: &[u8],
+    residuals: &[u8],
+    n: usize,
+    out: &mut [u8],
+) {
+    use std::arch::aarch64::*;
+    // Palette in 2x uint8x16 for vqtbl2q (indices < 32).
+    let mut pal = [0u8; 32];
+    pal[..palette.len()].copy_from_slice(palette);
+    let pal2 = uint8x16x2_t(vld1q_u8(pal.as_ptr()), vld1q_u8(pal.as_ptr().add(16)));
+
+    // 16 indices (5 bits) packed in 10 bytes; lane j reads a 2-byte window at
+    // byte 5j/8, right-shift (11 - 5j%8), mask 0x1f. The shift pattern repeats
+    // every 8 lanes (5*8=40 is byte-aligned).
+    let bidx_hi: [u8; 16] = [0, 0, 1, 1, 2, 3, 3, 4, 5, 5, 6, 6, 7, 8, 8, 9];
+    let bidx_lo: [u8; 16] = [1, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 7, 8, 9, 9, 10];
+    let neg_shift: [i16; 8] = [-11, -6, -9, -4, -7, -10, -5, -8];
+    let vhi = vld1q_u8(bidx_hi.as_ptr());
+    let vlo = vld1q_u8(bidx_lo.as_ptr());
+    let vshift = vld1q_s16(neg_shift.as_ptr());
+    let mask5 = vdupq_n_u16(0x1f);
+    let mask80 = vdupq_n_u16(0x80);
+    let mask7f = vdupq_n_u16(0x7f);
+
+    // 16-group is safe while its 16-byte load stays in bounds (needs up to byte 10).
+    let groups16 = if idx_plane.len() >= 16 { (idx_plane.len() - 16) / 10 + 1 } else { 0 };
+    let simd16 = core::cmp::min(n / 16, groups16);
+    let out_u16 = out.as_mut_ptr() as *mut u16;
+
+    for g in 0..simd16 {
+        let grp = vld1q_u8(idx_plane.as_ptr().add(g * 10));
+        let hi = vqtbl1q_u8(grp, vhi);
+        let lo = vqtbl1q_u8(grp, vlo);
+        // 16-bit windows, low and high halves.
+        let win_lo = vorrq_u16(vshlq_n_u16(vmovl_u8(vget_low_u8(hi)), 8), vmovl_u8(vget_low_u8(lo)));
+        let win_hi = vorrq_u16(vshlq_n_u16(vmovl_u8(vget_high_u8(hi)), 8), vmovl_u8(vget_high_u8(lo)));
+        let idx_lo = vandq_u16(vshlq_u16(win_lo, vshift), mask5);
+        let idx_hi = vandq_u16(vshlq_u16(win_hi, vshift), mask5);
+        let idx16 = vcombine_u8(vmovn_u16(idx_lo), vmovn_u16(idx_hi));
+        let exp16 = vqtbl2q_u8(pal2, idx16);
+        let res16 = vld1q_u8(residuals.as_ptr().add(g * 16));
+        // reconstruct bf16 in two halves
+        let res_lo = vmovl_u8(vget_low_u8(res16));
+        let exp_lo = vmovl_u8(vget_low_u8(exp16));
+        let bf_lo = vorrq_u16(
+            vorrq_u16(vshlq_n_u16(vandq_u16(res_lo, mask80), 8), vshlq_n_u16(exp_lo, 7)),
+            vandq_u16(res_lo, mask7f),
+        );
+        let res_hi = vmovl_u8(vget_high_u8(res16));
+        let exp_hi = vmovl_u8(vget_high_u8(exp16));
+        let bf_hi = vorrq_u16(
+            vorrq_u16(vshlq_n_u16(vandq_u16(res_hi, mask80), 8), vshlq_n_u16(exp_hi, 7)),
+            vandq_u16(res_hi, mask7f),
+        );
+        vst1q_u16(out_u16.add(g * 16), bf_lo);
+        vst1q_u16(out_u16.add(g * 16 + 8), bf_hi);
+    }
+
+    // Scalar/8-wide tail for the remaining weights, reusing the proven path.
+    let done = simd16 * 16;
+    if done < n {
+        let byte_off = (done / 8) * 5; // done is a multiple of 16 => byte-aligned
+        decode_w5_neon_inner(
+            palette,
+            &idx_plane[byte_off..],
+            &residuals[done..],
+            n - done,
+            &mut out[done * 2..],
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +498,179 @@ mod tests {
              VERDICT: {verdict}\n",
             neon_s * 1000.0,
             neon_gw / scalar_gw,
+        );
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn decode16_matches_8wide_bit_for_bit() {
+        let codec = BitplaneCodec;
+        // n >= 32 so make_bf16(32, n) yields all 32 distinct exponents (w=5).
+        for &n in &[32usize, 48, 64, 1000, 4096, 4099, 65536] {
+            let bytes = make_bf16(32, n);
+            let meta = EncodeMeta { name: "w".into(), shape: vec![n as u64], dtype: "bf16".into() };
+            let enc = codec.encode(&bytes, &meta).unwrap();
+            assert_eq!(enc.data[15], 5, "n={n}: expected w=5");
+            let p = enc.data[14] as usize;
+            let mut off = 16;
+            let palette = &enc.data[off..off + p];
+            off += p;
+            let idx_bytes = (n * 5 + 7) / 8;
+            let idx_plane = &enc.data[off..off + idx_bytes];
+            off += idx_bytes;
+            let residuals = &enc.data[off..off + n];
+            let eight = decode_neon_w5(palette, idx_plane, residuals, n);
+            let mut sixteen = vec![0u8; n * 2];
+            unsafe { decode16_w5_into(palette, idx_plane, residuals, n, &mut sixteen) };
+            assert_eq!(sixteen, eight, "n={n}: 16-wide must equal 8-wide bit-for-bit");
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore]
+    fn decode16_throughput_scout() {
+        let bytes = std::fs::read("/tmp/rllm-bf16-sample.bin")
+            .expect("run dump_bf16_embedding_sample first");
+        let n = bytes.len() / 2;
+        let codec = BitplaneCodec;
+        let enc = codec
+            .encode(&bytes, &EncodeMeta { name: "e".into(), shape: vec![n as u64], dtype: "bf16".into() })
+            .unwrap();
+        let p = enc.data[14] as usize;
+        let mut off = 16;
+        let palette = enc.data[off..off + p].to_vec();
+        off += p;
+        let idx_bytes = (n * 5 + 7) / 8;
+        let idx_plane = enc.data[off..off + idx_bytes].to_vec();
+        off += idx_bytes;
+        let residuals = enc.data[off..off + n].to_vec();
+        let mut out = vec![0u8; n * 2];
+
+        // correctness
+        unsafe { decode16_w5_into(&palette, &idx_plane, &residuals, n, &mut out) };
+        assert_eq!(out, bytes, "16-wide lossless on real sample");
+
+        let mut bench = |label: &str, f: &dyn Fn(&mut [u8])| -> f64 {
+            f(&mut out); // warm
+            let iters = 8;
+            let t = std::time::Instant::now();
+            for _ in 0..iters {
+                f(&mut out);
+                std::hint::black_box(&out);
+            }
+            let s = t.elapsed().as_secs_f64() / iters as f64;
+            let gw = (n as f64 / 1e9) / s;
+            eprintln!("  {label:10} {gw:.2} Gweight/s  ({:.1} ms)", s * 1000.0);
+            gw
+        };
+        eprintln!("\n=== R146 16-wide decode THROUGHPUT SCOUT (single-core) ===");
+        let g8 = bench("8-wide", &|o| decode_neon_w5_into(&palette, &idx_plane, &residuals, n, o));
+        let g16 = bench("16-wide", &|o| unsafe {
+            decode16_w5_into(&palette, &idx_plane, &residuals, n, o)
+        });
+        let agg = g16 * 3.5;
+        eprintln!(
+            "  16-wide vs 8-wide: {:.2}x   aggregate(x3.5): {:.1} Gweight/s   (need ~34 for the win)\n  VERDICT: {}\n",
+            g16 / g8,
+            agg,
+            if agg >= 34.0 { "GO scout (build pipelined R146)" }
+            else if g16 / g8 >= 1.3 { "PARTIAL (faster but short of 34 agg)" }
+            else { "NO-GO (16-wide not enough)" }
+        );
+    }
+
+    // R147: end-to-end capacity-bound proof. Streams >RAM raw-bf16 vs bit-plane
+    // files COLD from SSD (F_NOCACHE), decoding the compressed one, and times both.
+    // Proves the regime where lossless compression wins on CPU: model > RAM.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore]
+    fn capacity_bound_stream_scout() {
+        use std::io::{Read, Write};
+        use std::os::unix::io::AsRawFd;
+        extern "C" {
+            fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
+        }
+        const F_NOCACHE: i32 = 48;
+
+        let bytes = std::fs::read("/tmp/rllm-bf16-sample.bin")
+            .expect("run dump_bf16_embedding_sample first");
+        let n = bytes.len() / 2;
+        let codec = BitplaneCodec;
+        let enc = codec
+            .encode(&bytes, &EncodeMeta { name: "e".into(), shape: vec![n as u64], dtype: "bf16".into() })
+            .unwrap();
+        let p = enc.data[14] as usize;
+        let mut off = 16;
+        let palette = enc.data[off..off + p].to_vec();
+        off += p;
+        let idx_bytes = (n * 5 + 7) / 8;
+        let idx_plane = enc.data[off..off + idx_bytes].to_vec();
+        off += idx_bytes;
+        let residuals = enc.data[off..off + n].to_vec();
+        // one "copy" of compressed = idx_plane ++ residuals
+        let comp_copy: Vec<u8> = idx_plane.iter().chain(residuals.iter()).copied().collect();
+
+        // K copies so both files exceed RAM (~3 GB free) => true cold SSD reads.
+        let k = 12usize;
+        let raw_path = "/tmp/r147_raw.bin";
+        let comp_path = "/tmp/r147_comp.bin";
+        {
+            let mut fr = std::fs::File::create(raw_path).unwrap();
+            let mut fc = std::fs::File::create(comp_path).unwrap();
+            for _ in 0..k {
+                fr.write_all(&bytes).unwrap();
+                fc.write_all(&comp_copy).unwrap();
+            }
+        }
+        let raw_gb = (bytes.len() * k) as f64 / 1e9;
+        let comp_gb = (comp_copy.len() * k) as f64 / 1e9;
+
+        // stream RAW cold: read each 525MB copy, cheap dot (sum bf16 as f32).
+        let raw_ms = {
+            let mut f = std::fs::File::open(raw_path).unwrap();
+            unsafe { fcntl(f.as_raw_fd(), F_NOCACHE, 1) };
+            let mut buf = vec![0u8; bytes.len()];
+            let t = std::time::Instant::now();
+            for _ in 0..k {
+                f.read_exact(&mut buf).unwrap();
+                std::hint::black_box(&buf); // real dot (bfdot) is ~9ms/copy, negligible vs read
+            }
+            t.elapsed().as_secs_f64() * 1000.0
+        };
+
+        // stream COMPRESSED cold: read each copy, decode16 -> bf16, cheap dot.
+        let comp_ms = {
+            let mut f = std::fs::File::open(comp_path).unwrap();
+            unsafe { fcntl(f.as_raw_fd(), F_NOCACHE, 1) };
+            let mut buf = vec![0u8; comp_copy.len()];
+            let mut decoded = vec![0u8; n * 2];
+            let t = std::time::Instant::now();
+            for _ in 0..k {
+                f.read_exact(&mut buf).unwrap();
+                unsafe {
+                    decode16_w5_into(&palette, &buf[..idx_bytes], &buf[idx_bytes..], n, &mut decoded)
+                };
+                std::hint::black_box(&decoded);
+            }
+            t.elapsed().as_secs_f64() * 1000.0
+        };
+
+        let _ = std::fs::remove_file(raw_path);
+        let _ = std::fs::remove_file(comp_path);
+
+        eprintln!(
+            "\n=== R147 CAPACITY-BOUND e2e stream SCOUT (cold SSD, files > RAM) ===\n\
+             raw bf16   stream {raw_gb:.1} GB -> {raw_ms:.0} ms  ({:.2} GB/s)\n\
+             bit-plane  stream {comp_gb:.1} GB -> {comp_ms:.0} ms  ({:.2} GB/s, incl. decode)\n\
+             SPEEDUP: {:.2}x   (compressed reads 19% fewer bytes; decode hidden under SSD)\n\
+             VERDICT: {}\n",
+            raw_gb / (raw_ms / 1e3),
+            comp_gb / (comp_ms / 1e3),
+            raw_ms / comp_ms,
+            if comp_ms < raw_ms { "GO -- lossless compression WINS when model streams from SSD" }
+            else { "NO-GO" }
         );
     }
 
