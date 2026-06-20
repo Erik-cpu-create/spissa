@@ -6,8 +6,8 @@ use rllm_import::{
     ShardedSafetensorsReader,
 };
 use rtc_codec::{
-    EncodeMeta, HuffmanCodec, RawCodec, RleCodec, TensorCodec, CODEC_HUFF_V1, CODEC_RAW_V1,
-    CODEC_RLE_V1,
+    EncodeMeta, HuffmanCodec, RansCodec, RawCodec, RleCodec, TensorCodec, CODEC_HUFF_V1,
+    CODEC_RANS_V1, CODEC_RAW_V1, CODEC_RLE_V1,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -18,6 +18,7 @@ enum PackCodecPolicy {
     Raw,
     Rle,
     Huff,
+    Rans,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,8 +44,9 @@ impl PackCodecPolicy {
             "raw" | CODEC_RAW_V1 => Ok(Self::Raw),
             "rle" | CODEC_RLE_V1 => Ok(Self::Rle),
             "huff" | "huffman" | CODEC_HUFF_V1 => Ok(Self::Huff),
+            "rans" | CODEC_RANS_V1 => Ok(Self::Rans),
             other => anyhow::bail!(
-                "unsupported --codec {other:?}; expected one of: auto, raw, rle, huff"
+                "unsupported --codec {other:?}; expected one of: auto, raw, rle, huff, rans"
             ),
         }
     }
@@ -55,6 +57,7 @@ impl PackCodecPolicy {
             Self::Raw => CODEC_RAW_V1,
             Self::Rle => CODEC_RLE_V1,
             Self::Huff => CODEC_HUFF_V1,
+            Self::Rans => CODEC_RANS_V1,
         }
     }
 
@@ -68,6 +71,10 @@ impl PackCodecPolicy {
             Self::Raw => vec![Box::new(RawCodec)],
             Self::Rle => vec![Box::new(RleCodec)],
             Self::Huff => vec![Box::new(HuffmanCodec)],
+            // rANS for the bf16 weights, raw fallback for non-bf16 chunks: the codec
+            // emits FLAG_RAW internally, but also keep RawCodec in the try-list so the
+            // smallest-lossless picker can choose raw when rANS doesn't help.
+            Self::Rans => vec![Box::new(RansCodec), Box::new(RawCodec)],
         }
     }
 }

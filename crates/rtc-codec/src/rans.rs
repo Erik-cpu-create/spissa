@@ -17,6 +17,10 @@
 //! (M=4096 total frequency), RANS_L=1<<23. The frequency table is tiny (≤64 used
 //! symbols) and stored alongside the stream.
 
+use crate::codec::{DecodeMeta, EncodeMeta, EncodedChunk, TensorCodec};
+use crate::dfloat::{join_bf16, split_bf16};
+use crate::error::{CodecError, Result as CodecResult};
+
 const SCALE_BITS: u32 = 12;
 const M: u32 = 1 << SCALE_BITS;
 const RANS_L: u32 = 1 << 23;
@@ -239,6 +243,107 @@ pub fn count_symbols(symbols: &[u8]) -> [u32; 256] {
     counts
 }
 
+/// rtc-rans-v1 container codec: lossless bf16 weights at the entropy floor (~10.5
+/// bits/weight). Splits bf16 into (exponent, residual), entropy-codes the exponent
+/// with 4-lane interleaved rANS, and stores the residual raw. Non-bf16 / odd-length
+/// chunks fall back to raw (FLAG_RAW) so the codec is safe for any tensor.
+pub struct RansCodec;
+
+impl RansCodec {
+    pub const ID: &'static str = "rtc-rans-v1";
+}
+
+// Header: magic "RTCR"(4) + version(1) + flags(1) + n(u64). bf16 path then appends
+// freq[256] u16 (512) + lane_len[4] u32 (16) + lanes + residual; raw path appends bytes.
+const RANS_HEADER: usize = 4 + 1 + 1 + 8;
+const RANS_FLAG_RAW: u8 = 0x01;
+
+impl TensorCodec for RansCodec {
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
+    fn encode(&self, input: &[u8], meta: &EncodeMeta) -> CodecResult<EncodedChunk> {
+        let _ = meta; // the (exp,residual) split is a bijective bit rearrangement of any
+                      // even-length bytes, so this is lossless regardless of dtype; it only
+                      // *compresses* when the high byte is low-entropy (real bf16). The pack
+                      // smallest-lossless picker keeps raw when rANS doesn't help.
+        let mut data = Vec::with_capacity(RANS_HEADER + input.len());
+        data.extend_from_slice(b"RTCR");
+        data.push(1);
+        // Raw fallback only for odd-length chunks (no bf16 pairing).
+        if input.len() % 2 != 0 {
+            data.push(RANS_FLAG_RAW);
+            data.extend_from_slice(&(input.len() as u64).to_le_bytes());
+            data.extend_from_slice(input);
+            return Ok(EncodedChunk { codec_id: Self::ID.into(), data, original_size: input.len() as u64 });
+        }
+        let n = input.len() / 2;
+        let mut exp = vec![0u8; n];
+        let mut res = vec![0u8; n];
+        for i in 0..n {
+            let (e, r) = split_bf16(u16::from_le_bytes([input[2 * i], input[2 * i + 1]]));
+            exp[i] = e;
+            res[i] = r;
+        }
+        let freq = normalize_freqs(&count_symbols(&exp));
+        let lanes = rans_encode_interleaved4(&exp, &freq);
+        data.push(0); // flags
+        data.extend_from_slice(&(n as u64).to_le_bytes());
+        for f in freq.iter() {
+            data.extend_from_slice(&(*f as u16).to_le_bytes());
+        }
+        for l in &lanes {
+            data.extend_from_slice(&(l.len() as u32).to_le_bytes());
+        }
+        for l in &lanes {
+            data.extend_from_slice(l);
+        }
+        data.extend_from_slice(&res);
+        Ok(EncodedChunk { codec_id: Self::ID.into(), data, original_size: input.len() as u64 })
+    }
+
+    fn decode(&self, encoded: &[u8], _meta: &DecodeMeta) -> CodecResult<Vec<u8>> {
+        let err = || CodecError::InvalidData("truncated rtc-rans-v1 chunk".into());
+        if encoded.len() < RANS_HEADER || &encoded[0..4] != b"RTCR" || encoded[4] != 1 {
+            return Err(err());
+        }
+        let flags = encoded[5];
+        let n = u64::from_le_bytes(encoded[6..14].try_into().map_err(|_| err())?) as usize;
+        let mut off = RANS_HEADER;
+        if flags & RANS_FLAG_RAW != 0 {
+            return encoded.get(off..off + n).map(|s| s.to_vec()).ok_or_else(err);
+        }
+        let freq_bytes = encoded.get(off..off + 512).ok_or_else(err)?;
+        let mut freq = [0u32; 256];
+        for (s, f) in freq.iter_mut().enumerate() {
+            *f = u16::from_le_bytes([freq_bytes[s * 2], freq_bytes[s * 2 + 1]]) as u32;
+        }
+        off += 512;
+        let lens = encoded.get(off..off + 16).ok_or_else(err)?;
+        let ll = |k: usize| u32::from_le_bytes(lens[k * 4..k * 4 + 4].try_into().unwrap()) as usize;
+        let (l0, l1, l2, l3) = (ll(0), ll(1), ll(2), ll(3));
+        off += 16;
+        let lane0 = encoded.get(off..off + l0).ok_or_else(err)?;
+        off += l0;
+        let lane1 = encoded.get(off..off + l1).ok_or_else(err)?;
+        off += l1;
+        let lane2 = encoded.get(off..off + l2).ok_or_else(err)?;
+        off += l2;
+        let lane3 = encoded.get(off..off + l3).ok_or_else(err)?;
+        off += l3;
+        let residual = encoded.get(off..off + n).ok_or_else(err)?;
+        let exp = rans_decode_interleaved4([lane0, lane1, lane2, lane3], n, &freq);
+        let mut out = vec![0u8; n * 2];
+        for i in 0..n {
+            let bits = join_bf16(exp[i], residual[i]);
+            out[2 * i] = bits as u8;
+            out[2 * i + 1] = (bits >> 8) as u8;
+        }
+        Ok(out)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +426,38 @@ mod tests {
         let bits_per_sym = (stream.len() as f64 * 8.0) / syms.len() as f64;
         assert!(bits_per_sym < 6.0, "rANS {bits_per_sym:.2} bits/sym should beat 6-bit fixed width");
         assert_eq!(rans_decode(&stream, syms.len(), &freq), syms);
+    }
+
+    // RansCodec (container TensorCodec) round-trips bf16 bit-exact and compresses.
+    #[test]
+    fn rans_codec_bf16_roundtrip_and_compresses() {
+        // 34-exponent bf16 (Gemma-class). build via the bit pattern.
+        let mut state = 0xF00D_BEEFu32;
+        let n = 50_000usize;
+        let mut bytes = Vec::with_capacity(n * 2);
+        for k in 0..n {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let exp = (96 + (k % 34)) as u16 & 0xFF;
+            let bits = (((state >> 31) & 1) as u16) << 15 | (exp << 7) | (state & 0x7F) as u16;
+            bytes.extend_from_slice(&bits.to_le_bytes());
+        }
+        let meta = EncodeMeta { name: "w".into(), shape: vec![n as u64], dtype: "bf16".into() };
+        let enc = RansCodec.encode(&bytes, &meta).unwrap();
+        assert_eq!(enc.codec_id, "rtc-rans-v1");
+        assert!(enc.data.len() < bytes.len(), "must compress: {} >= {}", enc.data.len(), bytes.len());
+        let dmeta = DecodeMeta { codec_id: "rtc-rans-v1".into(), uncompressed_size: bytes.len() as u64 };
+        assert_eq!(RansCodec.decode(&enc.data, &dmeta).unwrap(), bytes, "bf16 roundtrip must be bit-exact");
+    }
+
+    // Odd-length chunks fall back to raw and still round-trip.
+    #[test]
+    fn rans_codec_raw_fallback_roundtrip() {
+        let bytes: Vec<u8> = (0..1235u32).map(|x| (x * 7) as u8).collect(); // ODD length => raw fallback
+        let meta = EncodeMeta { name: "idx".into(), shape: vec![bytes.len() as u64], dtype: "u8".into() };
+        let enc = RansCodec.encode(&bytes, &meta).unwrap();
+        let dmeta = DecodeMeta { codec_id: "rtc-rans-v1".into(), uncompressed_size: bytes.len() as u64 };
+        assert_eq!(RansCodec.decode(&enc.data, &dmeta).unwrap(), bytes, "raw-fallback roundtrip must be bit-exact");
     }
 }

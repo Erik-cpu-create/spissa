@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use rllm_container::RllmReader;
 use rllm_import::SafetensorsReader;
-use rtc_codec::{DecodeMeta, HuffmanCodec, RawCodec, RleCodec, TensorCodec};
+use rtc_codec::{DecodeMeta, HuffmanCodec, RansCodec, RawCodec, RleCodec, TensorCodec};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -10,6 +10,7 @@ fn get_codec(codec_id: &str) -> Result<Box<dyn TensorCodec>> {
         "rtc-raw-v1" => Ok(Box::new(RawCodec)),
         "rtc-rle-v1" => Ok(Box::new(RleCodec)),
         "rtc-huff-v1" => Ok(Box::new(HuffmanCodec)),
+        "rtc-rans-v1" => Ok(Box::new(RansCodec)),
         _ => anyhow::bail!("Unknown codec: {}", codec_id),
     }
 }
