@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Erik. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! rtc-bitplane-v1: SIMD-decodable lossless bf16 codec.
 //!
 //! Like rtc-dfloat-v1 it splits bf16 into (exponent, residual), but instead of

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Erik. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! rtc-dfloat-v1: lossless bf16 codec.
 //!
 //! bf16 = [sign:1][exponent:8][mantissa:7]. The exponent has low entropy for LLM

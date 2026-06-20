@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Erik. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+//
 // Pipelined streaming bit-plane GEMV (R148 REESTREAM, capacity-bound runtime kernel).
 //
 // Reads block-framed compressed planes sequentially from a file while decoding +
