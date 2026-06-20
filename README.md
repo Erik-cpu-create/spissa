@@ -41,25 +41,31 @@ See [`docs/rllm-rama-architecture.md`](docs/rllm-rama-architecture.md) for the P
 
 ## Chat
 
-RLLM runs an **interactive, multi-turn chat** from lossless q8 weights on CPU. The
-model loads once and keeps a **resident KV cache** across turns, so each message
-prefills only the new text.
+RLLM runs an **interactive, multi-turn chat** on CPU. It is **codec-agnostic** — run
+fully **lossless** weights (rANS / bit-plane) or lossy **q8** (fastest); the model loads
+once and keeps a **resident KV cache** across turns, so each message prefills only the
+new text. Architecture (Gemma / Llama) is auto-detected from the packed metadata.
 
 ```bash
-# Gemma 3 4B
-./try-gemma.sh chat
+# canonical command — any packed model, any codec:
+./target/release/rllm chat models/gemma-3-1b-it-q8-raw.rllm --fast   # q8, fastest
+./target/release/rllm chat models/gemma-3-1b-it-rans.rllm            # rANS, LOSSLESS
+./target/release/rllm chat <model.rllm> --low-ram                    # stream embedding (>RAM regime)
 
-# Llama 3.2 — 1B (default, faster) or 3B (better quality)
+# convenience wrappers (Gemma 4B / Llama 1B|3B):
+./try-gemma.sh chat
 ./try-llama.sh chat
 ./try-llama.sh -m 3b chat
 
 # one-shot
 ./try-gemma.sh "What is the capital of Australia?"
-./try-llama.sh -m 3b "Explain photosynthesis in two sentences."
 ```
 
-In chat: just type. Gemma uses `/reset` `/exit`; Llama uses `quit`/`exit`.
-`-v` shows prefill/decode timing, `-h` prints help.
+In chat: just type. `/reset` starts a new conversation, `/exit` (or `exit`/`quit`) ends it.
+`--fast` is q8 turbo (see below). On big.LITTLE ARM (Apple Silicon, phones) the decode
+GEMV **auto-pins to the performance cores** (~2× vs all-cores; override with
+`RLLM_THREADS`). Note: lossless rANS holds up better over long multi-turn than lossy q8,
+which can degrade into empty replies on a tiny model.
 
 ### `--fast` mode
 
@@ -81,8 +87,12 @@ is quantized, and per-byte SHA-256 integrity is still verified once per run
 
 | Model | Pack | Notes |
 |---|---|---|
+| Gemma 3 1B Instruct | `gemma-3-1b-it-{q8-raw,rans}.rllm` | q8 (fast) or rANS (lossless); best for phones |
 | Gemma 3 4B Instruct | `gemma-3-4b-it-q8.rllm` | tied bf16 embedding, sandwich-norm, dual-RoPE |
 | Llama 3.2 1B / 3B Instruct | `Llama-3.2-{1B,3B}-Instruct-q8…rllm` | tied bf16 embedding |
+
+Each codec (`--codec raw` for q8, `--codec rans`/`bitplane` for lossless bf16) packs the
+same model; pick by the size/speed/lossless trade-off you want.
 
 ### Performance (Apple A18 Pro, CPU, vs Ollama CPU same chip)
 
@@ -96,6 +106,24 @@ Honest measured numbers in `--fast` mode (decode is steady-state):
 
 Output is coherent and on-par with Ollama (no hallucination). Remaining decode gap
 vs Ollama is the 2-performance-core hardware ceiling, not kernel quality.
+
+### Devices (universal)
+
+RLLM is built to run on **all devices, not just Apple Silicon**. The `.rllm` file format
+is platform-independent (copy it as-is), and the kernels are `cfg`-gated with fallbacks:
+
+| Device | Status |
+|---|---|
+| ARM laptop (Apple Silicon) | ✅ fully optimized — NEON / `sdot` / `smmla` |
+| Android (Snapdragon / MediaTek) | ✅ same ARM path; big.LITTLE perf-cores auto-detected |
+| ARM SBC / server | ✅ optimized |
+| x86 laptop (Intel / AMD) | ⚠️ compiles & runs, but **scalar** (AVX kernels are future work) |
+
+The fast paths are portable ARM (NEON/i8mm), never an Apple-only library, so the same
+optimizations carry from a Mac to a phone. To run on **Android**, build natively in
+Termux — see [docs/android-termux.md](docs/android-termux.md). Use a 1B model on phones
+(`gemma-3-1b-it-q8-raw.rllm` 1.38 GB, or `…-rans.rllm` 1.36 GB lossless); the 4B is too
+big for most phones' usable RAM.
 
 ### Packing your own model
 
@@ -151,7 +179,12 @@ model bit-identical. The codec is chosen *per chunk* at pack time, which lets on
 - **`rtc-huff-v1`** — in-house **byte-level Huffman** entropy codec for real
   lossless size reduction on disk (e.g. Pythia-70M packs to ~76% of the original
   safetensors, bit-exact).
-- planned: `rtc-delta-v1`, `rtc-bitplane-v1`, `rtc-entropy-v1`.
+- **`rtc-rans-v1`** — interleaved **rANS** codec on the bf16 exponent — lossless at the
+  measured entropy floor (~10.5 bits/weight, ~34% smaller than raw bf16). Smallest
+  lossless `.rllm`; decode-once at load runs at bf16 speed (`pack --codec rans`).
+- **`rtc-bitplane-v1`** — fixed-width **bit-plane** layout with branchless NEON
+  `tbl`-gather decode — lossless, the fastest-decoding lossless codec (`pack --codec bitplane`).
+- planned: `rtc-delta-v1`, `rtc-entropy-v1`, AVX decode for x86.
 
 The key design point: RTC separates **storage compression** (entropy codecs like
 Huffman, smaller on disk) from **runtime residency** (raw, zero-copy, fast). A
@@ -167,12 +200,14 @@ Implemented:
 - Cargo workspace with five crates
 - `.rllm` v1 container reader/writer
 - Safetensors import
-- CLI commands: `pack`, `inspect`, `verify`, `run`, `doctor`
-- Stubbed future commands: `import`, `benchmark`
+- CLI commands: `pack`, `unpack`, `inspect`, `verify`, `run`, `chat` (interactive, codec-agnostic), `bench`, `doctor`
+- Stubbed future command: `import`
 - RTC codecs:
-  - `rtc-raw-v1`
+  - `rtc-raw-v1` (zero-copy identity layout)
   - `rtc-rle-v1`
   - `rtc-huff-v1` (custom byte-level Huffman)
+  - `rtc-rans-v1` (interleaved rANS exponent codec — **lossless**, ~10.5 bits/weight, at the bf16 entropy floor)
+  - `rtc-bitplane-v1` (fixed-width bit-plane — **lossless**, fast NEON `tbl`-gather decode)
 - Per-chunk SHA-256 verification
 - Multi-tensor safetensors verification
 - Phase 5A runtime foundation:
@@ -554,8 +589,9 @@ decode(encode(input)) == input
 | `rtc-raw-v1` | Identity/no compression; baseline fallback | ✅ Implemented |
 | `rtc-rle-v1` | Run-length encoding | ✅ Implemented |
 | `rtc-huff-v1` | In-house byte-level Huffman entropy codec | ✅ Implemented |
+| `rtc-rans-v1` | Interleaved rANS exponent codec (lossless, ~10.5 bits/weight, entropy floor) | ✅ Implemented |
+| `rtc-bitplane-v1` | Fixed-width bit-plane, NEON `tbl`-gather decode (lossless, fastest) | ✅ Implemented |
 | `rtc-delta-v1` | Delta encoding | 🔜 Future |
-| `rtc-bitplane-v1` | Bitplane packing | 🔜 Future |
 | `rtc-entropy-v1` | Advanced entropy coding beyond Huffman | 🔜 Future |
 
 See [docs/codec-rtc-v1.md](docs/codec-rtc-v1.md) for codec design details.

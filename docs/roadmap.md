@@ -1,5 +1,11 @@
 # RLLM Roadmap
 
+> **Note (2026-06-20):** This is the original phase-based roadmap (Phases 0–8) and is
+> kept for history. It predates the R-series work (q8 int8 kernels, the lossless rANS /
+> bit-plane codecs, `rllm chat`, big.LITTLE P-core scheduling, Android/Termux). For the
+> **current** capabilities and status, see the [README](../README.md); for the live
+> research log, see the project memory. Treat the phase list below as background.
+
 ## Phase 0 — Project Skeleton ✅
 
 **Status:** Complete
