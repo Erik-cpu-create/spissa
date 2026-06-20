@@ -428,6 +428,14 @@ impl LazyRllmModel {
     ///
     /// This is still tensor-level materialization. Tile-stream code should use
     /// `with_decoded_chunk` to bound the decode window to one chunk/tile.
+    /// Decode a tensor to its ORIGINAL raw bytes (e.g. bf16) without the f32 conversion
+    /// `decode_tensor` performs. Lets a non-raw (e.g. rANS-compressed) bf16 embedding be
+    /// held resident as bf16 (604 MB) instead of f32 (1.2 GB) — R158b.
+    pub fn decode_tensor_raw_bytes(&mut self, name: &str) -> Result<Vec<u8>> {
+        let tensor_meta = self.tensor(name)?.clone();
+        crate::loader::decode_tensor_bytes(&self.reader, &tensor_meta)
+    }
+
     pub fn decode_tensor(&mut self, name: &str, budget: &mut MemoryBudget) -> Result<Tensor> {
         let tensor_meta = self.tensor(name)?.clone();
         budget.reserve(

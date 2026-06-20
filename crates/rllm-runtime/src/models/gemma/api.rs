@@ -190,6 +190,9 @@ struct GemmaEmbedCtx<'a> {
     embed_id: u64,
     vocab_size: usize,
     embedding_f32: Option<&'a [f32]>,
+    // R158b: a resident bf16 embedding (604 MB) for a non-raw bf16 tensor (e.g. rANS),
+    // instead of the 1.2 GB f32 table. Tried before f32 / with_raw_tensor.
+    embedding_bf16: Option<&'a [u8]>,
 }
 
 /// One transformer forward over `current_tokens` (prefill chunk or a single
@@ -214,6 +217,7 @@ fn gemma_forward_logits(
     let mut hidden_states = gemma_embed_input(
         model,
         embed.embedding_f32,
+        embed.embedding_bf16,
         embed.embed_id,
         current_tokens,
         embed.vocab_size,
@@ -248,7 +252,7 @@ fn gemma_forward_logits(
     // R131: parallel LM-head GEMV over the 262k-row vocabulary (bf16-direct from
     // mmap, or f32 fallback).
     let lm_head_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
-    let logits = gemma_lm_head(model, embed.embedding_f32, embed.embed_id, last_hidden, embed.vocab_size, hidden)?;
+    let logits = gemma_lm_head(model, embed.embedding_f32, embed.embedding_bf16, embed.embed_id, last_hidden, embed.vocab_size, hidden)?;
     if let Some(t) = lm_head_started {
         eprintln!(
             "[gemma-profile] step {profile_step} lm_head {:.0}ms (vocab={})",
@@ -283,8 +287,13 @@ pub fn gemma_generate_from_model(
     // and dequant-on-the-fly for both the input lookup and the LM head. Fall back
     // to a one-time f32 decode only if the embedding isn't a contiguous bf16 raw
     // tensor (e.g. a different codec/dtype).
-    let (embed_id, vocab_size, embedding_f32) = resolve_gemma_embedding(model, prepared, budget)?;
-    let embed_ctx = GemmaEmbedCtx { embed_id, vocab_size, embedding_f32: embedding_f32.as_deref() };
+    let (embed_id, vocab_size, embedding_f32, embedding_bf16) = resolve_gemma_embedding(model, prepared, budget)?;
+    let embed_ctx = GemmaEmbedCtx {
+        embed_id,
+        vocab_size,
+        embedding_f32: embedding_f32.as_deref(),
+        embedding_bf16: embedding_bf16.as_deref(),
+    };
 
     // For parity we keep the first decode step's logits (the prefill → first
     // predicted token over the raw prompt), which is the most directly
@@ -341,18 +350,25 @@ fn resolve_gemma_embedding(
     model: &mut LazyRllmModel,
     prepared: &PreparedGemmaTransformer,
     budget: &mut MemoryBudget,
-) -> Result<(u64, usize, Option<Vec<f32>>)> {
+) -> Result<(u64, usize, Option<Vec<f32>>, Option<Vec<u8>>)> {
     let embed_meta = model.tensor(&prepared.embedding_weight)?.clone();
     let vocab_size = embed_meta.shape.first().copied().unwrap_or(0) as usize;
     let embed_id = embed_meta.tensor_id;
-    let bf16_direct = embed_meta.dtype == DType::Bf16
-        && model.with_raw_tensor(embed_id, |_| Ok::<(), RuntimeError>(()))?.is_some();
-    let embedding_f32 = if bf16_direct {
-        None
-    } else {
-        Some(model.decode_tensor(&prepared.embedding_weight, budget)?.data)
-    };
-    Ok((embed_id, vocab_size, embedding_f32))
+    let is_bf16 = embed_meta.dtype == DType::Bf16;
+    let raw_bf16 = is_bf16 && model.with_raw_tensor(embed_id, |_| Ok::<(), RuntimeError>(()))?.is_some();
+    if raw_bf16 {
+        // Zero-copy bf16 from the mmap — no resident table at all.
+        return Ok((embed_id, vocab_size, None, None));
+    }
+    if is_bf16 {
+        // R158b: non-raw bf16 (e.g. rANS-compressed) — decode ONCE to resident bf16
+        // bytes (604 MB) instead of the f32 table (1.2 GB).
+        let bf16 = model.decode_tensor_raw_bytes(&prepared.embedding_weight)?;
+        return Ok((embed_id, vocab_size, None, Some(bf16)));
+    }
+    // Non-bf16 embedding (e.g. q8) — keep the f32 table.
+    let f32 = model.decode_tensor(&prepared.embedding_weight, budget)?.data;
+    Ok((embed_id, vocab_size, Some(f32), None))
 }
 
 /// A multi-turn Gemma chat with a RESIDENT KV cache. Built once (model load +
@@ -366,6 +382,7 @@ pub struct GemmaChatSession {
     embed_id: u64,
     vocab_size: usize,
     embedding_f32: Option<Vec<f32>>,
+    embedding_bf16: Option<Vec<u8>>,
 }
 
 impl GemmaChatSession {
@@ -382,8 +399,8 @@ impl GemmaChatSession {
         for _ in 0..prepared.layers.len() {
             caches.push(KvCache::new(build.num_key_value_heads, build.head_dim, max_context)?);
         }
-        let (embed_id, vocab_size, embedding_f32) = resolve_gemma_embedding(model, prepared, budget)?;
-        Ok(Self { caches, total_tokens: 0, max_context, embed_id, vocab_size, embedding_f32 })
+        let (embed_id, vocab_size, embedding_f32, embedding_bf16) = resolve_gemma_embedding(model, prepared, budget)?;
+        Ok(Self { caches, total_tokens: 0, max_context, embed_id, vocab_size, embedding_f32, embedding_bf16 })
     }
 
     /// Tokens currently held in the KV cache (the running conversation length).
@@ -436,6 +453,7 @@ impl GemmaChatSession {
             embed_id: self.embed_id,
             vocab_size: self.vocab_size,
             embedding_f32: self.embedding_f32.as_deref(),
+            embedding_bf16: self.embedding_bf16.as_deref(),
         };
         let mut generated = Vec::new();
         let mut current: Vec<usize> = new_tokens.to_vec();
@@ -471,12 +489,17 @@ impl GemmaChatSession {
 fn gemma_embed_input(
     model: &mut LazyRllmModel,
     embedding_f32: Option<&[f32]>,
+    embedding_bf16: Option<&[u8]>,
     embed_id: u64,
     token_ids: &[usize],
     vocab_size: usize,
     hidden: usize,
     embed_scale: f32,
 ) -> Result<Vec<f32>> {
+    // R158b: resident bf16 table (non-raw bf16, e.g. rANS) — half the f32 footprint.
+    if let Some(bf16) = embedding_bf16 {
+        return gemma_embed_lookup_bf16(bf16, token_ids, hidden, vocab_size, embed_scale);
+    }
     if let Some(emb) = embedding_f32 {
         let mut h = embedding_lookup(emb, vocab_size, hidden, token_ids)?;
         for value in h.iter_mut() {
@@ -497,6 +520,7 @@ fn gemma_embed_input(
 fn gemma_lm_head(
     model: &mut LazyRllmModel,
     embedding_f32: Option<&[f32]>,
+    embedding_bf16: Option<&[u8]>,
     embed_id: u64,
     last_hidden: &[f32],
     vocab_size: usize,
@@ -506,9 +530,13 @@ fn gemma_lm_head(
     #[cfg(target_arch = "aarch64")]
     if let Ok(sidecar) = std::env::var("RLLM_STREAM_LMHEAD") {
         if !sidecar.is_empty() {
-            let _ = (embedding_f32, embed_id); // resident inputs unused on this path
+            let _ = (embedding_f32, embedding_bf16, embed_id); // resident inputs unused here
             return crate::streaming::stream_lmhead_from_sidecar(&sidecar, last_hidden);
         }
+    }
+    // R158b: resident bf16 table (non-raw bf16, e.g. rANS).
+    if let Some(bf16) = embedding_bf16 {
+        return Ok(lm_head_logits_parallel_bf16(last_hidden, bf16, vocab_size, hidden));
     }
     if let Some(emb) = embedding_f32 {
         return Ok(lm_head_logits_parallel(last_hidden, emb, vocab_size, hidden));
