@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Erik. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! rtc-rans-v1: static range-ANS (rANS) entropy coder for the bit-plane exponent
 //! symbols (R152).
 //!
