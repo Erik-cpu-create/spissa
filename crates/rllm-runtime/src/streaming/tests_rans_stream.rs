@@ -193,3 +193,65 @@ fn r153_rans_capacity_bound() {
         (1.0 - rans_total as f64 / raw_total as f64) * 100.0,
     );
 }
+
+// R154 lever #1: oversubscribe threads so a worker blocked on a cold (F_NOCACHE) read
+// lets others decode — the cheap form of read/decode overlap. Sweep thread counts for
+// both raw and rANS; if rANS's best approaches the 1.51x byte ratio, oversubscription
+// alone closes R153's gap (1.05x).
+#[test]
+#[ignore]
+fn r154_rans_thread_sweep() {
+    use std::io::{Read, Seek, SeekFrom};
+    let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+    let tname = "model.embed_tokens.weight";
+    let one = "/tmp/r154_rans_one.sidecar";
+    let rans_big = "/tmp/r154_rans_big.bin";
+    let raw_big = "/tmp/r154_raw_big.bin";
+    write_lmhead_sidecar_rans(model, tname, 256, one).unwrap();
+    let (hidden, vocab, block_rows, freq, block_lens, header_len) = read_rans_header(one).unwrap();
+    let num_blocks = block_lens.len();
+    let mut bf = std::fs::File::open(one).unwrap();
+    bf.seek(SeekFrom::Start(header_len)).unwrap();
+    let mut body = Vec::new();
+    bf.read_to_end(&mut body).unwrap();
+    let _ = std::fs::remove_file(one);
+    let mut m = crate::LazyRllmModel::open(model).unwrap();
+    let meta = m.tensor(tname).unwrap().clone();
+    let raw = m.with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec())).unwrap().unwrap();
+
+    let k = 20usize;
+    replicate(&raw, k, raw_big);
+    replicate(&body, k, rans_big);
+    let raw_total = raw.len() * k;
+    drop(raw);
+    drop(body);
+    let mut ext_lens = Vec::with_capacity(num_blocks * k);
+    let mut offsets = Vec::with_capacity(num_blocks * k);
+    let mut acc = 0u64;
+    for _ in 0..k {
+        for &l in &block_lens {
+            offsets.push(acc);
+            ext_lens.push(l);
+            acc += l as u64;
+        }
+    }
+    let cores = std::thread::available_parallelism().map(usize::from).unwrap_or(6);
+    let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.011).sin() * 0.4).collect();
+    let mut out = vec![0f32; vocab * k];
+
+    eprintln!("\n=== R154 thread sweep (Gemma lm-head, >RAM cold, {cores} cores, k={k}) ===");
+    eprintln!("  nt | raw bf16 (12GB) | rANS (8GB)      | rANS vs raw");
+    for &nt in &[cores, cores * 2, cores * 3] {
+        let raw_ms = cold_parallel_read_ms(raw_big, raw_total, block_rows * hidden * 2, nt);
+        let t = std::time::Instant::now();
+        streaming_rans_gemv_parallel(
+            rans_big, &freq, hidden, block_rows, num_blocks * k, &offsets, &ext_lens, &act, &mut out, true, nt,
+        );
+        std::hint::black_box(&out);
+        let rans_ms = t.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("  {nt:2} | {raw_ms:6.0} ms       | {rans_ms:6.0} ms        | {:.2}x", raw_ms / rans_ms);
+    }
+    let _ = std::fs::remove_file(raw_big);
+    let _ = std::fs::remove_file(rans_big);
+    eprintln!();
+}

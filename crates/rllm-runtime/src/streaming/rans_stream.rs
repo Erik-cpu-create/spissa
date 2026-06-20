@@ -134,6 +134,36 @@ fn read_rans_header(path: &str) -> crate::Result<(usize, usize, usize, [u32; 256
     Ok((hidden, vocab, block_rows, freq, block_lens, header_len))
 }
 
+/// NEON reconstruct of `n` bf16 weights from exponent + residual planes into `out`
+/// (`out.len() >= n*2`). bf16 = (sign<<15) | (exp<<7) | mantissa, where the residual
+/// byte holds sign (bit 7) + mantissa (bits 0..6). 8 weights/iter; scalar tail.
+/// SAFETY: caller guarantees `exp.len()>=n`, `residual.len()>=n`, `out.len()>=n*2`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn reconstruct_bf16_neon(exp: &[u8], residual: &[u8], n: usize, out: &mut [u8]) {
+    use std::arch::aarch64::*;
+    let mask80 = vdupq_n_u16(0x80);
+    let mask7f = vdupq_n_u16(0x7f);
+    let out16 = out.as_mut_ptr() as *mut u16;
+    let groups = n / 8;
+    for g in 0..groups {
+        let e = vld1_u8(exp.as_ptr().add(g * 8));
+        let r = vld1_u8(residual.as_ptr().add(g * 8));
+        let e16 = vmovl_u8(e);
+        let r16 = vmovl_u8(r);
+        let sign = vshlq_n_u16(vandq_u16(r16, mask80), 8);
+        let ep = vshlq_n_u16(e16, 7);
+        let mant = vandq_u16(r16, mask7f);
+        let bf = vorrq_u16(vorrq_u16(sign, ep), mant);
+        vst1q_u16(out16.add(g * 8), bf);
+    }
+    for i in groups * 8..n {
+        let bits = rtc_codec::join_bf16(exp[i], residual[i]);
+        out[2 * i] = bits as u8;
+        out[2 * i + 1] = (bits >> 8) as u8;
+    }
+}
+
 /// Reconstruct each row's bf16 from (exponent, residual) and dot it against the
 /// activation, writing `block_rows` logits.
 #[cfg(target_arch = "aarch64")]
@@ -147,13 +177,7 @@ fn rans_decode_dot_block(
     out_block: &mut [f32],
 ) {
     for r in 0..block_rows {
-        let e = &exp[r * hidden..];
-        let rr = &residual[r * hidden..];
-        for c in 0..hidden {
-            let bits = rtc_codec::join_bf16(e[c], rr[c]);
-            scratch[2 * c] = bits as u8;
-            scratch[2 * c + 1] = (bits >> 8) as u8;
-        }
+        unsafe { reconstruct_bf16_neon(&exp[r * hidden..], &residual[r * hidden..], hidden, scratch) };
         out_block[r] = bf16_row_dot_f32(last_hidden, &scratch[..hidden * 2], hidden);
     }
 }
@@ -253,11 +277,14 @@ pub(crate) fn stream_lmhead_from_rans_sidecar(path: &str, last_hidden: &[f32]) -
         acc += l as u64;
     }
     let nocache = matches!(std::env::var("RLLM_STREAM_NOCACHE").as_deref(), Ok("1") | Ok("true"));
+    // R154: oversubscribe (2x cores) by default — workers block on cold reads, so extra
+    // threads overlap I/O-wait with rANS decode (1.10x -> 1.39x in the >RAM cold bench).
+    // RLLM_STREAM_THREADS overrides.
     let n_threads = std::env::var("RLLM_STREAM_THREADS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or_else(|| std::thread::available_parallelism().map(usize::from).unwrap_or(1));
+        .unwrap_or_else(|| 2 * std::thread::available_parallelism().map(usize::from).unwrap_or(1));
     let mut logits = vec![0f32; vocab];
     streaming_rans_gemv_parallel(
         path, &freq, hidden, block_rows, num_blocks, &offsets, &block_lens, last_hidden, &mut logits, nocache, n_threads,
