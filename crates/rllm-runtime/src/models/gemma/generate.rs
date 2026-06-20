@@ -45,6 +45,79 @@ fn project(
     )
 }
 
+/// Capacity-bound (RLLM_STREAM_EMBEDDING) tied LM head: compute logits by streaming
+/// the embedding `[vocab, hidden]` as an output projection (`logits = embedding ·
+/// last_hidden`) WITHOUT holding the 604 MB bf16 table resident. Reuses the same
+/// fused-bf16 streaming kernel as the body projections (R161), so an rANS/bit-plane
+/// embedding decodes per chunk and never materializes — peak resident stays near the
+/// compressed size. Bit-identical weights to the resident path (lossless).
+pub(super) fn gemma_lm_head_streaming(
+    model: &mut LazyRllmModel,
+    embedding_weight: &str,
+    last_hidden: &[f32],
+    vocab_size: usize,
+    hidden: usize,
+    budget: &mut MemoryBudget,
+) -> Result<Vec<f32>> {
+    project(model, embedding_weight, last_hidden, 1, hidden, vocab_size, budget)
+}
+
+/// Capacity-bound input embedding: gather `token_ids` rows from the tied embedding by
+/// decoding ONLY the chunk(s) that contain them (peak transient = one chunk), then
+/// dequant bf16→f32 scaled by `embed_scale`. No resident table — the companion of
+/// [`gemma_lm_head_streaming`]. Rows never straddle a chunk boundary (the packer pads
+/// each chunk to a whole number of rows), so a row lives entirely in one chunk.
+pub(super) fn gemma_embed_input_streaming(
+    model: &mut LazyRllmModel,
+    embedding_weight: &str,
+    token_ids: &[usize],
+    hidden: usize,
+    embed_scale: f32,
+    budget: &mut MemoryBudget,
+) -> Result<Vec<f32>> {
+    let tensor = model.tensor(embedding_weight)?.clone();
+    let row_bytes = hidden * 2; // bf16 = 2 bytes/element
+    let mut out = vec![0.0f32; token_ids.len() * hidden];
+
+    let mut chunks = model.chunks_for_tensor(tensor.tensor_id).to_vec();
+    chunks.sort_by_key(|chunk| chunk.chunk_offset_in_tensor);
+    let mut byte_offset = 0usize;
+    for chunk in chunks {
+        let chunk_start = byte_offset;
+        let chunk_len = chunk.uncompressed_size as usize;
+        byte_offset += chunk_len;
+        let chunk_end = chunk_start + chunk_len;
+
+        // (output index, byte offset within this chunk) for each requested row here.
+        let hits: Vec<(usize, usize)> = token_ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &row)| {
+                let row_start = row.checked_mul(row_bytes)?;
+                (row_start >= chunk_start && row_start + row_bytes <= chunk_end)
+                    .then_some((i, row_start - chunk_start))
+            })
+            .collect();
+        if hits.is_empty() {
+            continue; // skip the decode entirely — only touch chunks we need
+        }
+
+        model.with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+            for (out_idx, local) in &hits {
+                let dst = &mut out[out_idx * hidden..(out_idx + 1) * hidden];
+                for (h, value) in dst.iter_mut().enumerate() {
+                    let lo = bytes[local + 2 * h];
+                    let hi = bytes[local + 2 * h + 1];
+                    let bits = (u16::from_le_bytes([lo, hi]) as u32) << 16;
+                    *value = f32::from_bits(bits) * embed_scale;
+                }
+            }
+            Ok(())
+        })?;
+    }
+    Ok(out)
+}
+
 /// One Gemma 3 decoder layer with the sandwich-norm residual structure:
 ///
 /// ```text

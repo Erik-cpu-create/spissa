@@ -1,4 +1,7 @@
-use crate::models::gemma::generate::{streaming_gemma_transformer_block, GemmaBlockRuntime};
+use crate::models::gemma::generate::{
+    gemma_embed_input_streaming, gemma_lm_head_streaming, streaming_gemma_transformer_block,
+    GemmaBlockRuntime,
+};
 use crate::models::gemma::model::*;
 use crate::rotary::KvCache;
 use crate::{
@@ -219,10 +222,12 @@ fn gemma_forward_logits(
         embed.embedding_f32,
         embed.embedding_bf16,
         embed.embed_id,
+        &prepared.embedding_weight,
         current_tokens,
         embed.vocab_size,
         hidden,
         build.embed_scale,
+        budget,
     )?;
 
     let layers_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
@@ -252,7 +257,7 @@ fn gemma_forward_logits(
     // R131: parallel LM-head GEMV over the 262k-row vocabulary (bf16-direct from
     // mmap, or f32 fallback).
     let lm_head_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
-    let logits = gemma_lm_head(model, embed.embedding_f32, embed.embedding_bf16, embed.embed_id, last_hidden, embed.vocab_size, hidden)?;
+    let logits = gemma_lm_head(model, embed.embedding_f32, embed.embedding_bf16, embed.embed_id, &prepared.embedding_weight, last_hidden, embed.vocab_size, hidden, budget)?;
     if let Some(t) = lm_head_started {
         eprintln!(
             "[gemma-profile] step {profile_step} lm_head {:.0}ms (vocab={})",
@@ -344,6 +349,16 @@ pub fn gemma_generate_from_model(
     })
 }
 
+/// Capacity-bound mode (RLLM_STREAM_EMBEDDING): stream the tied embedding from the
+/// container instead of holding it resident. Trades decode-per-token speed for a
+/// resident footprint near the compressed size — for the >RAM regime where the bf16
+/// table would not fit. Only affects non-raw bf16 embeddings (e.g. rANS/bit-plane).
+fn stream_embedding_enabled() -> bool {
+    std::env::var("RLLM_STREAM_EMBEDDING")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
+}
+
 /// Resolve the tied embedding once: prefer the bf16-direct mmap path (no 2.68 GB
 /// f32 materialization); otherwise decode the table to a resident f32 vector.
 fn resolve_gemma_embedding(
@@ -361,6 +376,14 @@ fn resolve_gemma_embedding(
         return Ok((embed_id, vocab_size, None, None));
     }
     if is_bf16 {
+        if stream_embedding_enabled() {
+            // R162 capacity-bound: do NOT hold the 604 MB bf16 table resident. Both the
+            // input lookup and the LM head stream the embedding from the container per
+            // use (decode per chunk, never materialize) — so peak resident stays near
+            // the compressed size. The trade is speed (re-decode per token) for RAM, the
+            // >RAM regime's whole point.
+            return Ok((embed_id, vocab_size, None, None));
+        }
         // R158b: non-raw bf16 (e.g. rANS-compressed) — decode ONCE to resident bf16
         // bytes (604 MB) instead of the f32 table (1.2 GB).
         let bf16 = model.decode_tensor_raw_bytes(&prepared.embedding_weight)?;
@@ -486,15 +509,18 @@ impl GemmaChatSession {
 
 /// Input embedding lookup scaled by `embed_scale` — from a resident f32 table
 /// (fallback) or bf16-direct from the mmap (default; no 2.68 GB f32 alloc).
+#[allow(clippy::too_many_arguments)]
 fn gemma_embed_input(
     model: &mut LazyRllmModel,
     embedding_f32: Option<&[f32]>,
     embedding_bf16: Option<&[u8]>,
     embed_id: u64,
+    embedding_weight: &str,
     token_ids: &[usize],
     vocab_size: usize,
     hidden: usize,
     embed_scale: f32,
+    budget: &mut MemoryBudget,
 ) -> Result<Vec<f32>> {
     // R158b: resident bf16 table (non-raw bf16, e.g. rANS) — half the f32 footprint.
     if let Some(bf16) = embedding_bf16 {
@@ -507,24 +533,29 @@ fn gemma_embed_input(
         }
         return Ok(h);
     }
-    model
-        .with_raw_tensor(embed_id, |bf16| {
-            gemma_embed_lookup_bf16(bf16, token_ids, hidden, vocab_size, embed_scale)
-        })?
-        .ok_or_else(|| {
-            RuntimeError::InvalidTensorData("bf16 embedding became non-contiguous".to_string())
-        })
+    // Raw bf16 → zero-copy gather straight from the mmap.
+    if let Some(h) = model.with_raw_tensor(embed_id, |bf16| {
+        gemma_embed_lookup_bf16(bf16, token_ids, hidden, vocab_size, embed_scale)
+    })? {
+        return Ok(h);
+    }
+    // R162: non-raw bf16 with no resident table (RLLM_STREAM_EMBEDDING) — stream only
+    // the chunk(s) holding the requested rows.
+    gemma_embed_input_streaming(model, embedding_weight, token_ids, hidden, embed_scale, budget)
 }
 
 /// Tied LM head — f32 table (fallback) or bf16-direct from the mmap (default).
+#[allow(clippy::too_many_arguments)]
 fn gemma_lm_head(
     model: &mut LazyRllmModel,
     embedding_f32: Option<&[f32]>,
     embedding_bf16: Option<&[u8]>,
     embed_id: u64,
+    embedding_weight: &str,
     last_hidden: &[f32],
     vocab_size: usize,
     hidden: usize,
+    budget: &mut MemoryBudget,
 ) -> Result<Vec<f32>> {
     // R149a: opt-in streaming lm-head from a bit-plane sidecar (capacity-bound mode).
     #[cfg(target_arch = "aarch64")]
@@ -541,18 +572,20 @@ fn gemma_lm_head(
     if let Some(emb) = embedding_f32 {
         return Ok(lm_head_logits_parallel(last_hidden, emb, vocab_size, hidden));
     }
-    model
-        .with_raw_tensor(embed_id, |bf16| {
-            Ok::<_, RuntimeError>(lm_head_logits_parallel_bf16(
-                last_hidden,
-                bf16,
-                vocab_size,
-                hidden,
-            ))
-        })?
-        .ok_or_else(|| {
-            RuntimeError::InvalidTensorData("bf16 embedding became non-contiguous".to_string())
-        })
+    // Raw bf16 → zero-copy parallel GEMV straight from the mmap.
+    if let Some(logits) = model.with_raw_tensor(embed_id, |bf16| {
+        Ok::<_, RuntimeError>(lm_head_logits_parallel_bf16(
+            last_hidden,
+            bf16,
+            vocab_size,
+            hidden,
+        ))
+    })? {
+        return Ok(logits);
+    }
+    // R162: non-raw bf16 with no resident table (RLLM_STREAM_EMBEDDING) — stream the
+    // embedding as an output projection (decode per chunk, never materialize 604 MB).
+    gemma_lm_head_streaming(model, embedding_weight, last_hidden, vocab_size, hidden, budget)
 }
 
 /// Gather `token_ids` rows from the bf16 embedding table (mmap bytes), dequant
