@@ -718,6 +718,8 @@ include!("block.rs");
 include!("validation.rs");
 include!("argmax.rs");
 include!("kernels.rs");
+include!("kernels_q8.rs");
+include!("kernels_raw16.rs");
 include!("bitplane_gemv.rs");
 include!("bitplane_stream.rs");
 include!("rans_stream.rs");
