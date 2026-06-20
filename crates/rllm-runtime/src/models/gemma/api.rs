@@ -502,6 +502,14 @@ fn gemma_lm_head(
     vocab_size: usize,
     hidden: usize,
 ) -> Result<Vec<f32>> {
+    // R149a: opt-in streaming lm-head from a bit-plane sidecar (capacity-bound mode).
+    #[cfg(target_arch = "aarch64")]
+    if let Ok(sidecar) = std::env::var("RLLM_STREAM_LMHEAD") {
+        if !sidecar.is_empty() {
+            let _ = (embedding_f32, embed_id); // resident inputs unused on this path
+            return crate::streaming::stream_lmhead_from_sidecar(&sidecar, last_hidden);
+        }
+    }
     if let Some(emb) = embedding_f32 {
         return Ok(lm_head_logits_parallel(last_hidden, emb, vocab_size, hidden));
     }
