@@ -6,8 +6,8 @@ use rllm_import::{
     ShardedSafetensorsReader,
 };
 use rtc_codec::{
-    EncodeMeta, HuffmanCodec, RansCodec, RawCodec, RleCodec, TensorCodec, CODEC_HUFF_V1,
-    CODEC_RANS_V1, CODEC_RAW_V1, CODEC_RLE_V1,
+    BitplaneCodec, EncodeMeta, HuffmanCodec, RansCodec, RawCodec, RleCodec, TensorCodec,
+    CODEC_BITPLANE_V1, CODEC_HUFF_V1, CODEC_RANS_V1, CODEC_RAW_V1, CODEC_RLE_V1,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,7 @@ enum PackCodecPolicy {
     Rle,
     Huff,
     Rans,
+    Bitplane,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,8 +46,9 @@ impl PackCodecPolicy {
             "rle" | CODEC_RLE_V1 => Ok(Self::Rle),
             "huff" | "huffman" | CODEC_HUFF_V1 => Ok(Self::Huff),
             "rans" | CODEC_RANS_V1 => Ok(Self::Rans),
+            "bitplane" | CODEC_BITPLANE_V1 => Ok(Self::Bitplane),
             other => anyhow::bail!(
-                "unsupported --codec {other:?}; expected one of: auto, raw, rle, huff, rans"
+                "unsupported --codec {other:?}; expected one of: auto, raw, rle, huff, rans, bitplane"
             ),
         }
     }
@@ -58,6 +60,7 @@ impl PackCodecPolicy {
             Self::Rle => CODEC_RLE_V1,
             Self::Huff => CODEC_HUFF_V1,
             Self::Rans => CODEC_RANS_V1,
+            Self::Bitplane => CODEC_BITPLANE_V1,
         }
     }
 
@@ -75,6 +78,8 @@ impl PackCodecPolicy {
             // emits FLAG_RAW internally, but also keep RawCodec in the try-list so the
             // smallest-lossless picker can choose raw when rANS doesn't help.
             Self::Rans => vec![Box::new(RansCodec), Box::new(RawCodec)],
+            // bit-plane for bf16 (fast NEON decode), raw fallback for non-bf16 chunks.
+            Self::Bitplane => vec![Box::new(BitplaneCodec), Box::new(RawCodec)],
         }
     }
 }
