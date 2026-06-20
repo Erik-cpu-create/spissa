@@ -482,28 +482,40 @@ pub fn streaming_tile_linear_from_model(
                     weight_name,
                 )
             })?;
-        } else if chunk.codec_id == "rtc-raw-v1"
-            && tensor.dtype == rllm_container::DType::Bf16
-            && config.linear.batch == 1
-        {
-            model.with_raw_chunk(chunk.chunk_id, budget, |compressed_bytes, _budget| {
-                if compressed_bytes.len() != expected_chunk_bytes {
+        } else if tensor.dtype == rllm_container::DType::Bf16 && config.linear.batch == 1 {
+            // bf16 + batch=1: run the fused bf16 kernel for BOTH raw and compressed
+            // codecs. Raw chunks are read zero-copy from the mmap; compressed chunks
+            // (rANS / bit-plane) are decoded to bf16 via `with_decoded_chunk` — which
+            // caches the decoded bytes once when RLLM_DECODE_RESIDENT is set — and then
+            // feed the SAME fused kernel, instead of materializing an f32 scratch and
+            // running the generic f32 matmul (the old compressed-bf16 path). Lossless:
+            // a compressed bf16 chunk decodes to the identical bf16 weights as the raw
+            // chunk, so the output is bit-identical to the raw-bf16 path (same kernel,
+            // same exact weights). This closes the rANS/bit-plane in-RAM speed gap to
+            // the raw-bf16 ceiling — decoded bf16 IS bf16, so it equals (never beats) it.
+            let kernel = |bf16_bytes: &[u8], _budget: &mut MemoryBudget| -> Result<()> {
+                if bf16_bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
-                        "chunk {} raw byte len {} does not match metadata {}",
+                        "chunk {} bf16 byte len {} does not match metadata {}",
                         chunk.chunk_id,
-                        compressed_bytes.len(),
+                        bf16_bytes.len(),
                         expected_chunk_bytes
                     )));
                 }
                 accumulate_fused_raw_bf16_chunk_batch1(
                     input,
                     &mut output,
-                    compressed_bytes,
+                    bf16_bytes,
                     element_start,
                     config.linear,
                     weight_name,
                 )
-            })?;
+            };
+            if chunk.codec_id == "rtc-raw-v1" {
+                model.with_raw_chunk(chunk.chunk_id, budget, kernel)?;
+            } else {
+                model.with_decoded_chunk(chunk.chunk_id, budget, kernel)?;
+            }
         } else if tensor.dtype == rllm_container::DType::Q8_0 {
             // R126: raw (identity-codec) chunks already hold the final q8 bytes, so
             // read them zero-copy from the mmap instead of paying a per-call
