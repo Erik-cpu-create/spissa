@@ -1024,6 +1024,10 @@ impl LazyRllmModel {
         // R160: cache the decoded bytes so subsequent tokens skip the decode entirely.
         if self.decode_resident {
             self.decoded_cache.insert(chunk_id, decoded.clone());
+            // R160b: drop the now-redundant compressed pages so RAM ≈ decoded size, not
+            // decoded + compressed.
+            self.reader
+                .release_range(chunk.file_offset as usize, chunk.compressed_size as usize);
         }
         let compute_start = Instant::now();
         let result = f(&decoded, budget);

@@ -121,6 +121,28 @@ impl RllmReader {
         self.tensors.iter().find(|t| t.name == name)
     }
 
+    /// R160b: advise the kernel it can drop the mmap pages covering `[offset, offset+len)`
+    /// (MADV_DONTNEED). Used after decode-once caching so the compressed bytes don't stay
+    /// resident on top of the decoded cache. Only whole pages fully inside the range are
+    /// dropped (16 KB-aligned, conservative for Apple Silicon); best-effort, errors ignored.
+    pub fn release_range(&self, offset: usize, len: usize) {
+        const PAGE: usize = 16384;
+        let start = (offset + PAGE - 1) & !(PAGE - 1);
+        let end = (offset + len) & !(PAGE - 1);
+        if end > start {
+            // memmap2 gates MADV_DONTNEED to Linux; call libc directly so it works on
+            // Darwin too (read-only mmap, so dropping pages just re-faults on re-access).
+            #[cfg(unix)]
+            unsafe {
+                libc::madvise(
+                    self.mmap.as_ptr().add(start) as *mut libc::c_void,
+                    end - start,
+                    libc::MADV_DONTNEED,
+                );
+            }
+        }
+    }
+
     /// Read a chunk's compressed data as a zero-copy slice from the mmap.
     ///
     /// This is the primary high-performance path. No allocation, no memcpy.
