@@ -119,6 +119,100 @@ fn analyze(name: &str, bytes: &[u8], row_len: usize) {
     );
 }
 
+// Joint entropy H(X,Y) over a 256x256 histogram (bits).
+fn joint_entropy(joint: &[u64; 65536]) -> f64 {
+    let total: u64 = joint.iter().sum();
+    if total == 0 {
+        return 0.0;
+    }
+    joint
+        .iter()
+        .filter(|&&c| c > 0)
+        .map(|&c| {
+            let p = c as f64 / total as f64;
+            -p * p.log2()
+        })
+        .sum()
+}
+
+// R155 question: is the ~10.5-bit floor lowerable by CONTEXT (cross-weight
+// correlation)? Measure order-1 conditional entropy H(X | X_prev) and the mutual
+// information between exponent and residual. If conditioning doesn't reduce entropy,
+// 10.5 bits is the true lossless floor and the 1.51x streaming ceiling is hard.
+fn conditional_analysis(name: &str, bytes: &[u8], row_len: usize) {
+    let n = bytes.len() / 2;
+    let mut exp_hist = vec![0u64; 256];
+    let mut res_hist = vec![0u64; 256];
+    let mut exp_joint = vec![0u64; 65536]; // (exp_prev, exp)
+    let mut res_joint = vec![0u64; 65536]; // (res_prev, res)
+    let mut er_joint = vec![0u64; 65536]; // (exp, res) same weight
+    let rows = n / row_len.max(1);
+    for r in 0..rows {
+        let (mut pe, mut pr): (Option<usize>, Option<usize>) = (None, None);
+        for c in 0..row_len {
+            let i = r * row_len + c;
+            let bits = u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]);
+            let e = ((bits >> 7) & 0xFF) as usize;
+            let sign = ((bits >> 15) & 1) as usize;
+            let res = (sign << 7) | (bits & 0x7F) as usize;
+            exp_hist[e] += 1;
+            res_hist[res] += 1;
+            er_joint[e * 256 + res] += 1;
+            if let Some(p) = pe {
+                exp_joint[p * 256 + e] += 1;
+            }
+            if let Some(p) = pr {
+                res_joint[p * 256 + res] += 1;
+            }
+            pe = Some(e);
+            pr = Some(res);
+        }
+    }
+    let h_exp = shannon_bits(&exp_hist.iter().map(|&c| c).collect::<Vec<_>>());
+    let h_res = shannon_bits(&res_hist.iter().map(|&c| c).collect::<Vec<_>>());
+    let exp_joint: [u64; 65536] = exp_joint.try_into().unwrap();
+    let res_joint: [u64; 65536] = res_joint.try_into().unwrap();
+    let er_joint: [u64; 65536] = er_joint.try_into().unwrap();
+    // H(X|Xprev) = H(Xprev,X) - H(Xprev) ~= joint - marginal (marginal ~= H(X) here).
+    let h_exp_cond = joint_entropy(&exp_joint) - h_exp;
+    let h_res_cond = joint_entropy(&res_joint) - h_res;
+    // Mutual info I(exp;res) = H(exp)+H(res) - H(exp,res).
+    let mi_er = h_exp + h_res - joint_entropy(&er_joint);
+
+    eprintln!("\n=== {name}  context/conditional entropy ===");
+    eprintln!("  H(exp)            = {h_exp:.3}   H(exp | exp_prev) = {h_exp_cond:.3}  (gain {:.3})", h_exp - h_exp_cond);
+    eprintln!("  H(residual)       = {h_res:.3}   H(res | res_prev) = {h_res_cond:.3}  (gain {:.3})", h_res - h_res_cond);
+    eprintln!("  I(exp ; residual) = {mi_er:.4} bits  (mutual info; >0 means joint-coding could save)");
+    eprintln!(
+        "  => order-1 floor ≈ {:.3} bits/weight (order-0 was {:.3}); ceiling {} move",
+        h_exp_cond + h_res_cond,
+        h_exp + h_res,
+        if (h_exp - h_exp_cond) + (h_res - h_res_cond) + mi_er > 0.1 { "COULD" } else { "does NOT" }
+    );
+}
+
+#[test]
+#[ignore]
+fn weight_context_entropy_real_weights() {
+    let mut m = LazyRllmModel::open(MODEL).unwrap();
+    let names: Vec<String> = m.tensor_names().iter().map(|s| s.to_string()).collect();
+    let targets: Vec<String> = ["embed_tokens.weight", "layers.0.mlp.gate_proj.weight"]
+        .iter()
+        .filter_map(|t| names.iter().find(|n| n.contains(t)).cloned())
+        .collect();
+    eprintln!("\n########## R155 context-entropy (can the 10.5-bit floor be lowered?) ##########");
+    for name in &targets {
+        let meta = m.tensor(name).unwrap().clone();
+        let row_len = *meta.shape.last().unwrap() as usize;
+        m.with_raw_tensor(meta.tensor_id, |b| {
+            conditional_analysis(name, b, row_len);
+            Ok(())
+        })
+        .unwrap();
+    }
+    eprintln!("\n########## end ##########\n");
+}
+
 #[test]
 #[ignore]
 fn weight_entropy_floor_real_weights() {
