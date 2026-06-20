@@ -5,16 +5,19 @@
 // decode of block N. Reuses rtc-codec decode (R143/R146) + bf16_row_dot_f32.
 
 /// Double-buffer pipelined streaming bit-plane GEMV. Reads `num_blocks` blocks of
-/// `block_rows` rows each (`[B×index bytes ++ B×residual bytes]`, w=5) sequentially
-/// from `path`; a reader thread streams the next block while this thread decodes +
-/// dots the current one. Writes `num_blocks*block_rows` logits. Bit-identical to a
-/// single-thread decode+dot. Not yet runtime-wired — the R148 capacity-bound kernel.
+/// `block_rows` rows each (`[B×index bytes ++ B×residual bytes]`, index width `w`)
+/// sequentially from `path`; a reader thread streams the next block while this
+/// thread decodes + dots the current one. Writes `num_blocks*block_rows` logits.
+/// Bit-identical to a single-thread decode+dot. `w` selects the decode kernel
+/// (REEPLANE w=5 / REEPLANE-W6 w=6 / scalar otherwise) via the codec dispatcher.
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
 fn streaming_bitplane_gemv(
     path: &str,
     palette: &[u8],
     hidden: usize,
+    w: usize,
     block_rows: usize,
     num_blocks: usize,
     last_hidden: &[f32],
@@ -31,7 +34,7 @@ fn streaming_bitplane_gemv(
     }
     const F_NOCACHE: i32 = 48;
 
-    let row_idx = hidden * 5 / 8;
+    let row_idx = hidden * w / 8;
     let row_res = hidden;
     let block_bytes = block_rows * (row_idx + row_res);
 
@@ -73,7 +76,7 @@ fn streaming_bitplane_gemv(
             for r in 0..block_rows {
                 let idx = &buf[r * row_idx..];
                 let res = &buf[block_rows * row_idx + r * row_res..];
-                unsafe { rtc_codec::decode16_w5_into(palette, idx, res, hidden, &mut scratch) };
+                rtc_codec::decode_bitplane_row_into(palette, idx, res, hidden, w as u8, &mut scratch);
                 out[blk * block_rows + r] = bf16_row_dot_f32(last_hidden, &scratch, hidden);
             }
             let _ = empty_tx.send(buf);
@@ -84,8 +87,12 @@ fn streaming_bitplane_gemv(
 /// Read a model's tied bf16 embedding/LM-head tensor, bit-plane encode it, and
 /// write a block-framed sidecar file the streaming lm-head path consumes.
 /// SAFETY/constraints: the tensor must be raw-bf16 readable (pack with `--codec raw`),
-/// w must be 5, and `vocab % block_rows == 0`.
+/// the palette must be ≤ 64 distinct exponents (index width `w ∈ 1..=6`, decodable
+/// by the streaming dispatcher), `hidden·w % 8 == 0`, and `vocab % block_rows == 0`.
+/// The sidecar header (v2) records `w`, so w=5 (Llama) and w=6 (Gemma) both stream.
+/// Sidecar producer: consumed by the streaming tests and a future `rllm` subcommand.
 #[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
 pub fn write_lmhead_sidecar(
     model_path: &str,
     tensor_name: &str,
@@ -106,10 +113,22 @@ pub fn write_lmhead_sidecar(
     let enc = BitplaneCodec
         .encode(&bf16, &EncodeMeta { name: tensor_name.into(), shape: vec![n as u64], dtype: "bf16".into() })
         .map_err(|e| crate::RuntimeError::InvalidTensorData(format!("bitplane encode: {e}")))?;
-    if enc.data[15] != 5 {
+    // enc.data[5] = flags; FLAG_RAW (0x01) => palette > 64 distinct exponents, stored
+    // raw (no index plane) and not bit-plane streamable.
+    if enc.data[5] & 0x01 != 0 {
+        return Err(crate::RuntimeError::InvalidTensorData(
+            "lm-head has > 64 distinct bf16 exponents (raw fallback); not bit-plane streamable".into(),
+        ));
+    }
+    let w = enc.data[15] as usize;
+    if !(1..=6).contains(&w) {
         return Err(crate::RuntimeError::InvalidTensorData(format!(
-            "lm-head bit-plane width {} != 5; decode16 kernel needs w=5",
-            enc.data[15]
+            "lm-head bit-plane width {w} unsupported by the streaming decoder (need 1..=6)",
+        )));
+    }
+    if hidden * w % 8 != 0 {
+        return Err(crate::RuntimeError::InvalidTensorData(format!(
+            "hidden*w must be byte-aligned for row framing (hidden={hidden}, w={w})",
         )));
     }
     if vocab % block_rows != 0 {
@@ -118,17 +137,19 @@ pub fn write_lmhead_sidecar(
         ));
     }
     let p = enc.data[14] as usize;
-    let row_idx = hidden * 5 / 8;
+    let row_idx = hidden * w / 8;
     let idx_plane = &enc.data[16 + p..16 + p + vocab * row_idx];
     let residuals = &enc.data[16 + p + vocab * row_idx..16 + p + vocab * row_idx + n];
 
-    let mut sidecar = Vec::with_capacity(18 + p + vocab * (row_idx + hidden));
+    // Header v2: RLMH, ver=2, hidden, vocab, block_rows, palette_len, w, palette.
+    let mut sidecar = Vec::with_capacity(19 + p + vocab * (row_idx + hidden));
     sidecar.extend_from_slice(b"RLMH");
-    sidecar.push(1);
+    sidecar.push(2);
     sidecar.extend_from_slice(&(hidden as u32).to_le_bytes());
     sidecar.extend_from_slice(&(vocab as u32).to_le_bytes());
     sidecar.extend_from_slice(&(block_rows as u32).to_le_bytes());
     sidecar.push(p as u8);
+    sidecar.push(w as u8);
     sidecar.extend_from_slice(&enc.data[16..16 + p]); // palette
     for blk in 0..vocab / block_rows {
         for r in 0..block_rows {
@@ -154,22 +175,28 @@ pub(crate) fn stream_lmhead_from_sidecar(path: &str, last_hidden: &[f32]) -> cra
     let mut head = [0u8; 256];
     let got = f.read(&mut head)
         .map_err(|e| crate::RuntimeError::InvalidTensorData(format!("read sidecar header: {e}")))?;
-    if got < 18 || &head[0..4] != b"RLMH" || head[4] != 1 {
+    if got < 18 || &head[0..4] != b"RLMH" {
         return Err(crate::RuntimeError::InvalidTensorData("bad sidecar header".into()));
     }
     let hidden = u32::from_le_bytes(head[5..9].try_into().unwrap()) as usize;
     let vocab = u32::from_le_bytes(head[9..13].try_into().unwrap()) as usize;
     let block_rows = u32::from_le_bytes(head[13..17].try_into().unwrap()) as usize;
     let p = head[17] as usize;
-    if got < 18 + p {
+    // v1: w=5 implied, palette at byte 18. v2: w at byte 18, palette at byte 19.
+    let (w, pal_off) = match head[4] {
+        1 => (5usize, 18usize),
+        2 => (head[18] as usize, 19usize),
+        v => return Err(crate::RuntimeError::InvalidTensorData(format!("unknown sidecar version {v}"))),
+    };
+    if got < pal_off + p {
         return Err(crate::RuntimeError::InvalidTensorData("sidecar palette truncated".into()));
     }
-    let palette = head[18..18 + p].to_vec();
-    let header_len = (18 + p) as u64;
+    let palette = head[pal_off..pal_off + p].to_vec();
+    let header_len = (pal_off + p) as u64;
     let num_blocks = vocab / block_rows;
     let mut logits = vec![0f32; vocab];
     streaming_bitplane_gemv(
-        path, &palette, hidden, block_rows, num_blocks, last_hidden, &mut logits, false, header_len,
+        path, &palette, hidden, w, block_rows, num_blocks, last_hidden, &mut logits, false, header_len,
     );
     Ok(logits)
 }
@@ -179,23 +206,29 @@ mod bitplane_stream_tests {
     use super::*;
     use rtc_codec::{BitplaneCodec, EncodeMeta, TensorCodec};
 
-    fn make_embedding(vocab: usize, hidden: usize) -> Vec<u8> {
+    // bf16 embedding cycling `distinct` exponents (=> w = ceil(log2(distinct))),
+    // pseudo-random sign+mantissa. distinct=32 => w=5 (Llama), 34 => w=6 (Gemma).
+    fn make_embedding_distinct(vocab: usize, hidden: usize, distinct: usize) -> Vec<u8> {
         let mut state = 0x0BAD_F00D_1234_5678u64;
         let mut out = Vec::with_capacity(vocab * hidden * 2);
         for k in 0..vocab * hidden {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            let exp = (96 + (k % 32)) as u16 & 0xFF;
+            let exp = (96 + (k % distinct)) as u16 & 0xFF;
             let bits = (((state >> 31) & 1) as u16) << 15 | (exp << 7) | (state & 0x7F) as u16;
             out.extend_from_slice(&bits.to_le_bytes());
         }
         out
     }
 
+    fn make_embedding(vocab: usize, hidden: usize) -> Vec<u8> {
+        make_embedding_distinct(vocab, hidden, 32)
+    }
+
     // Frame the flat planes into [B×index ++ B×residual] contiguous blocks.
-    fn frame_blocks(idx_plane: &[u8], residuals: &[u8], hidden: usize, vocab: usize, b: usize) -> Vec<u8> {
-        let row_idx = hidden * 5 / 8;
+    fn frame_blocks(idx_plane: &[u8], residuals: &[u8], hidden: usize, vocab: usize, b: usize, w: usize) -> Vec<u8> {
+        let row_idx = hidden * w / 8;
         let mut framed = Vec::new();
         for blk in 0..(vocab / b) {
             for r in 0..b {
@@ -237,11 +270,11 @@ mod bitplane_stream_tests {
         }
 
         // block-framed file + streaming kernel
-        let framed = frame_blocks(idx_plane, residuals, hidden, vocab, b);
+        let framed = frame_blocks(idx_plane, residuals, hidden, vocab, b, 5);
         let path = "/tmp/r148_unit.bin";
         std::fs::write(path, &framed).unwrap();
         let mut out = vec![0f32; vocab];
-        streaming_bitplane_gemv(path, &palette, hidden, b, vocab / b, &act, &mut out, false, 0);
+        streaming_bitplane_gemv(path, &palette, hidden, 5, b, vocab / b, &act, &mut out, false, 0);
         let _ = std::fs::remove_file(path);
 
         assert_eq!(out, reference, "streaming GEMV must equal single-thread decode+dot bit-for-bit");
@@ -272,7 +305,7 @@ mod bitplane_stream_tests {
         sc.extend_from_slice(&(b as u32).to_le_bytes());
         sc.push(p as u8);
         sc.extend_from_slice(&palette);
-        sc.extend_from_slice(&frame_blocks(&idx_plane, &residuals, hidden, vocab, b));
+        sc.extend_from_slice(&frame_blocks(&idx_plane, &residuals, hidden, vocab, b, 5));
         let path = "/tmp/r149a_unit.sidecar";
         std::fs::write(path, &sc).unwrap();
 
@@ -285,6 +318,51 @@ mod bitplane_stream_tests {
         let streamed = stream_lmhead_from_sidecar(path, &act).unwrap();
         let _ = std::fs::remove_file(path);
         assert_eq!(streamed, reference, "sidecar stream must equal decode+dot reference bit-for-bit");
+    }
+
+    // R149b: w=6 (34 exponents, Gemma's case) round-trips through a v2 sidecar and
+    // streams bit-identical to a single-thread scalar decode+dot reference. hidden=1152
+    // is Gemma's; 1152*6/8 = 864 is byte-aligned. Unit-level gate, no real model needed.
+    #[test]
+    fn w6_sidecar_streams_equal_to_reference() {
+        let (vocab, hidden, b) = (256usize, 1152usize, 64usize);
+        let bf16 = make_embedding_distinct(vocab, hidden, 34); // 34 exponents => w=6
+        let enc = BitplaneCodec
+            .encode(&bf16, &EncodeMeta { name: "e".into(), shape: vec![(vocab * hidden) as u64], dtype: "bf16".into() })
+            .unwrap();
+        assert_eq!(enc.data[15], 6, "expected w=6 for 34 exponents");
+        let p = enc.data[14] as usize;
+        let palette = enc.data[16..16 + p].to_vec();
+        let row_idx = hidden * 6 / 8;
+        let idx_plane = enc.data[16 + p..16 + p + vocab * row_idx].to_vec();
+        let residuals = enc.data[16 + p + vocab * row_idx..16 + p + vocab * row_idx + vocab * hidden].to_vec();
+
+        // hand-write a v2 sidecar (the format write_lmhead_sidecar produces)
+        let mut sc = Vec::new();
+        sc.extend_from_slice(b"RLMH");
+        sc.push(2);
+        sc.extend_from_slice(&(hidden as u32).to_le_bytes());
+        sc.extend_from_slice(&(vocab as u32).to_le_bytes());
+        sc.extend_from_slice(&(b as u32).to_le_bytes());
+        sc.push(p as u8);
+        sc.push(6u8); // w
+        sc.extend_from_slice(&palette);
+        sc.extend_from_slice(&frame_blocks(&idx_plane, &residuals, hidden, vocab, b, 6));
+        let path = "/tmp/r149b_w6_unit.sidecar";
+        std::fs::write(path, &sc).unwrap();
+
+        let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.017).cos() * 0.3).collect();
+        let mut reference = vec![0f32; vocab];
+        let mut dec = vec![0u8; hidden * 2];
+        for (r, slot) in reference.iter_mut().enumerate() {
+            rtc_codec::decode_bitplane_row_into(
+                &palette, &idx_plane[r * row_idx..], &residuals[r * hidden..], hidden, 6, &mut dec,
+            );
+            *slot = bf16_row_dot_f32(&act, &dec, hidden);
+        }
+        let streamed = stream_lmhead_from_sidecar(path, &act).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(streamed, reference, "w=6 sidecar stream must equal decode+dot reference bit-for-bit");
     }
 
     #[test]
@@ -316,7 +394,7 @@ mod bitplane_stream_tests {
         let idx_plane = &enc.data[off..off + idx_bytes];
         off += idx_bytes;
         let residuals = &enc.data[off..off + n];
-        let framed = frame_blocks(idx_plane, residuals, hidden, vocab, b);
+        let framed = frame_blocks(idx_plane, residuals, hidden, vocab, b, 5);
 
         // Replicate both files > RAM (~3 GB free) so reads are genuinely cold.
         let k = 12usize;
@@ -352,7 +430,7 @@ mod bitplane_stream_tests {
             let total_blocks = (vocab / b) * k;
             let mut out = vec![0f32; total_blocks * b];
             let t = std::time::Instant::now();
-            streaming_bitplane_gemv(comp_path, &palette, hidden, b, total_blocks, &act, &mut out, true, 0);
+            streaming_bitplane_gemv(comp_path, &palette, hidden, 5, b, total_blocks, &act, &mut out, true, 0);
             std::hint::black_box(&out);
             t.elapsed().as_secs_f64() * 1000.0
         };
@@ -405,5 +483,28 @@ mod bitplane_stream_tests {
         let _ = std::fs::remove_file(sidecar);
         assert_eq!(streamed, resident, "streaming lm-head must equal resident bf16 lm-head bit-for-bit on real Llama weights");
         eprintln!("R149a OK: Llama streaming lm-head == resident, {} logits bit-identical", vocab);
+    }
+
+    // R149b: the gate R149a-Gemma could not reach. Real Gemma 3 1B embedding is w=6
+    // (34 exponents); the REEPLANE-W6 streaming lm-head must equal the resident bf16
+    // lm-head GEMV bit-for-bit on all 262144 logits, for an identical activation.
+    #[test]
+    #[ignore]
+    fn r149b_gemma_streaming_lmhead_lossless() {
+        let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+        let tname = "model.embed_tokens.weight";
+        let sidecar = "/tmp/gemma1b-lmhead.sidecar";
+        write_lmhead_sidecar(model, tname, 256, sidecar).unwrap();
+        let mut m = crate::LazyRllmModel::open(model).unwrap();
+        let meta = m.tensor(tname).unwrap().clone();
+        let vocab = meta.shape[0] as usize;
+        let hidden = meta.shape[1] as usize;
+        let bf16 = m.with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec())).unwrap().unwrap();
+        let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.011).sin() * 0.4).collect();
+        let resident = lm_head_logits_parallel_bf16(&act, &bf16, vocab, hidden);
+        let streamed = stream_lmhead_from_sidecar(sidecar, &act).unwrap();
+        let _ = std::fs::remove_file(sidecar);
+        assert_eq!(streamed, resident, "w=6 streaming lm-head must equal resident bf16 lm-head bit-for-bit on real Gemma weights");
+        eprintln!("R149b OK: Gemma (w=6) streaming lm-head == resident, {vocab} logits bit-identical");
     }
 }
