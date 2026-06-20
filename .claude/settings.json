@@ -1,12 +1,4 @@
 {
-  "extraKnownMarketplaces": {
-    "superpowers-marketplace": {
-      "source": { "source": "github", "repo": "obra/superpowers-marketplace" }
-    }
-  },
-  "enabledPlugins": {
-    "superpowers@superpowers-marketplace": true
-  },
   "hooks": {
     "PostToolUse": [
       {
@@ -33,5 +25,16 @@
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "superpowers@superpowers-marketplace": false
+  },
+  "extraKnownMarketplaces": {
+    "superpowers-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "obra/superpowers-marketplace"
+      }
+    }
   }
 }
