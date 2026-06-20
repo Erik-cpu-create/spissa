@@ -724,6 +724,8 @@ include!("kernels_q8.rs");
 include!("kernels_q8_matmul.rs");
 include!("kernels_q8_support.rs");
 include!("kernels_raw16.rs");
+include!("kernels_raw16_sparse.rs");
+include!("kernels_raw16_multiply.rs");
 include!("bitplane_gemv.rs");
 include!("bitplane_stream.rs");
 include!("rans_stream.rs");
