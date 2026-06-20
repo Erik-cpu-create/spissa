@@ -32,22 +32,23 @@ pub fn write_lmhead_sidecar_rans(
     let meta = m.tensor(tensor_name)?.clone();
     let vocab = meta.shape[0] as usize;
     let hidden = meta.shape[1] as usize;
-    if vocab % block_rows != 0 {
-        return Err(crate::RuntimeError::InvalidTensorData("vocab % block_rows != 0".into()));
-    }
     let bf16 = m
         .with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec()))?
         .ok_or_else(|| crate::RuntimeError::InvalidTensorData("lm-head must be raw bf16".into()))?;
     let n = vocab * hidden;
-    let mut exp = vec![0u8; n];
-    let mut res = vec![0u8; n];
+    // Pad rows up to a multiple of block_rows with zeros so any row count works
+    // (e.g. down_proj [1152×…], not %256). The padding decodes to bf16 zero and the
+    // reader truncates to the real `vocab`, so it stays lossless.
+    let vocab_padded = vocab.div_ceil(block_rows) * block_rows;
+    let mut exp = vec![0u8; vocab_padded * hidden];
+    let mut res = vec![0u8; vocab_padded * hidden];
     for i in 0..n {
         let (e, r) = split_bf16(u16::from_le_bytes([bf16[2 * i], bf16[2 * i + 1]]));
         exp[i] = e;
         res[i] = r;
     }
     drop(bf16);
-    let freq = normalize_freqs(&count_symbols(&exp));
+    let freq = normalize_freqs(&count_symbols(&exp)); // includes padding zeros => freq[0] >= 1
     let sidecar = build_rans_sidecar(&exp, &res, &freq, vocab, hidden, block_rows);
     std::fs::write(out_path, &sidecar)
         .map_err(|e| crate::RuntimeError::InvalidTensorData(format!("write rans sidecar: {e}")))?;
@@ -67,7 +68,8 @@ fn build_rans_sidecar(
     block_rows: usize,
 ) -> Vec<u8> {
     use rtc_codec::rans_encode_interleaved4;
-    let num_blocks = vocab / block_rows;
+    // `vocab` is the real row count; exp/res are padded to num_blocks*block_rows rows.
+    let num_blocks = vocab.div_ceil(block_rows);
     let bw = block_rows * hidden;
     let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(num_blocks);
     for blk in 0..num_blocks {
@@ -285,10 +287,14 @@ pub(crate) fn stream_lmhead_from_rans_sidecar(path: &str, last_hidden: &[f32]) -
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or_else(|| 2 * std::thread::available_parallelism().map(usize::from).unwrap_or(1));
-    let mut logits = vec![0f32; vocab];
+    // Blocks cover num_blocks*block_rows >= vocab rows (last block zero-padded); stream
+    // into the padded buffer then truncate to the real vocab.
+    let vocab_padded = num_blocks * block_rows;
+    let mut logits = vec![0f32; vocab_padded];
     streaming_rans_gemv_parallel(
         path, &freq, hidden, block_rows, num_blocks, &offsets, &block_lens, last_hidden, &mut logits, nocache, n_threads,
     );
+    logits.truncate(vocab);
     Ok(logits)
 }
 
