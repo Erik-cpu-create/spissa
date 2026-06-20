@@ -234,6 +234,31 @@ pub fn rans_decode_interleaved4_into(
     }
 }
 
+/// Parallel 4-lane interleaved decode: each lane (an independent rANS stream) is
+/// decoded on its OWN thread, then the four subsequences are interleaved. ~4× the
+/// single-thread `rans_decode_interleaved4` on large chunks — the container decode
+/// path is otherwise single-threaded and dominates rANS inference (R158c).
+pub fn rans_decode_interleaved4_parallel(streams: [&[u8]; 4], n: usize, freq: &[u32; 256]) -> Vec<u8> {
+    let counts = [0usize, 1, 2, 3].map(|j| if j < n { (n - j).div_ceil(4) } else { 0 });
+    let subs: Vec<Vec<u8>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..4)
+            .map(|j| {
+                let stream = streams[j];
+                let cnt = counts[j];
+                s.spawn(move || rans_decode(stream, cnt, freq))
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut out = vec![0u8; n];
+    for (j, sub) in subs.iter().enumerate() {
+        for (k, &sym) in sub.iter().enumerate() {
+            out[j + 4 * k] = sym;
+        }
+    }
+    out
+}
+
 /// Count symbol occurrences (for building a frequency table).
 pub fn count_symbols(symbols: &[u8]) -> [u32; 256] {
     let mut counts = [0u32; 256];
@@ -333,7 +358,13 @@ impl TensorCodec for RansCodec {
         let lane3 = encoded.get(off..off + l3).ok_or_else(err)?;
         off += l3;
         let residual = encoded.get(off..off + n).ok_or_else(err)?;
-        let exp = rans_decode_interleaved4([lane0, lane1, lane2, lane3], n, &freq);
+        // Parallel decode for large chunks (4 lanes → 4 threads); single-thread below
+        // the threshold where the thread-spawn overhead would dominate.
+        let exp = if n >= 65_536 {
+            rans_decode_interleaved4_parallel([lane0, lane1, lane2, lane3], n, &freq)
+        } else {
+            rans_decode_interleaved4([lane0, lane1, lane2, lane3], n, &freq)
+        };
         let mut out = vec![0u8; n * 2];
         for i in 0..n {
             let bits = join_bf16(exp[i], residual[i]);
@@ -426,6 +457,28 @@ mod tests {
         let bits_per_sym = (stream.len() as f64 * 8.0) / syms.len() as f64;
         assert!(bits_per_sym < 6.0, "rANS {bits_per_sym:.2} bits/sym should beat 6-bit fixed width");
         assert_eq!(rans_decode(&stream, syms.len(), &freq), syms);
+    }
+
+    #[test]
+    fn rans_interleaved4_parallel_matches_serial() {
+        for &len in &[1usize, 4, 7, 1000, 70_000, 100_001] {
+            let mut state = 0x1357_9BDFu32;
+            let syms: Vec<u8> = (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    (96 + (state % 34)) as u8
+                })
+                .collect();
+            let freq = normalize_freqs(&count_symbols(&syms));
+            let streams = rans_encode_interleaved4(&syms, &freq);
+            let sl = [&streams[0][..], &streams[1][..], &streams[2][..], &streams[3][..]];
+            let serial = rans_decode_interleaved4(sl, len, &freq);
+            let parallel = rans_decode_interleaved4_parallel(sl, len, &freq);
+            assert_eq!(parallel, serial, "parallel decode must equal serial (len={len})");
+            assert_eq!(parallel, syms, "parallel decode must be lossless (len={len})");
+        }
     }
 
     // RansCodec (container TensorCodec) round-trips bf16 bit-exact and compresses.
