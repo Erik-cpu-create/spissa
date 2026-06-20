@@ -9,6 +9,7 @@ mod codec;
 mod dfloat;
 mod error;
 mod huff;
+mod rans;
 mod raw;
 mod rle;
 
@@ -17,6 +18,7 @@ pub use codec::*;
 pub use dfloat::*;
 pub use error::*;
 pub use huff::*;
+pub use rans::*;
 pub use raw::*;
 pub use rle::*;
 
