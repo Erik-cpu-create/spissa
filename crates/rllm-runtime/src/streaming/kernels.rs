@@ -1249,10 +1249,9 @@ pub(crate) fn accumulate_q8_0_full_tensor_int8_batch1(
     // Quantize the activation row to int8 ONCE for the whole matmul.
     let (act_i8, act_scales) = quantize_input_q8_blocks(input, 1, in_features);
 
-    let threads = effective_runtime_threads(
-        std::env::var(RLLM_THREADS_ENV).ok().as_deref(),
-        available_runtime_threads(),
-    );
+    // batch=1 decode GEMV: default to performance cores on big.LITTLE (the per-layer
+    // barrier makes E-cores a drag — see `decode_runtime_threads`). RLLM_THREADS overrides.
+    let threads = decode_runtime_threads();
     if threads <= 1 || out_features < 2 * MIN_ROWS_PER_PARALLEL_Q8_PREFILL {
         sdot_int8_batch1_rows_range(output, q8_bytes, &act_i8, &act_scales, 0, blocks_per_row);
         return Ok(());
