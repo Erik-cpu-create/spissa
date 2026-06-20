@@ -56,6 +56,53 @@ fn effective_runtime_threads(override_value: Option<&str>, available: usize) -> 
     }
 }
 
+/// Performance ("P") core count on Apple Silicon big.LITTLE, queried once and
+/// cached. Returns `None` off macOS or when detection fails, so callers fall back
+/// to the full logical-core count.
+fn performance_core_count() -> Option<usize> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Option<usize>> = OnceLock::new();
+    *CACHED.get_or_init(detect_performance_cores)
+}
+
+#[cfg(target_os = "macos")]
+fn detect_performance_cores() -> Option<usize> {
+    // hw.perflevel0 is the performance-core cluster on Apple Silicon.
+    let out = std::process::Command::new("sysctl")
+        .args(["-n", "hw.perflevel0.physicalcpu"])
+        .output()
+        .ok()?;
+    String::from_utf8(out.stdout)
+        .ok()?
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|&n| n > 0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn detect_performance_cores() -> Option<usize> {
+    None
+}
+
+/// Thread count for the batch=1 DECODE GEMV path on big.LITTLE ARM. The per-layer
+/// sync barrier makes the slow efficiency cores a drag: measured q8 4B decode is
+/// ~2.2× faster AND far more stable on the 2 performance cores than across all 6
+/// (the scheduler bounces threads onto E-cores and stalls the barrier — 93 ms vs a
+/// noisy 110–311 ms/step). So default to the P-core count; `RLLM_THREADS` still
+/// overrides (capped to logical cores). Prefill (GEMM, batch≥2) deliberately keeps
+/// ALL cores — there the extra compute genuinely helps (measured 285 ms vs 331 ms).
+fn decode_runtime_threads() -> usize {
+    let available = available_runtime_threads().max(1);
+    match std::env::var(RLLM_THREADS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        Some(value) if value > 0 => value.min(available),
+        _ => performance_core_count().unwrap_or(available).min(available),
+    }
+}
+
 fn effective_row_block_threads(rows: usize, available_threads: usize) -> usize {
     if rows < MIN_ROWS_PER_PARALLEL_ARGMAX {
         1
