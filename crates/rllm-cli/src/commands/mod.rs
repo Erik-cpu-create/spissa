@@ -1,5 +1,6 @@
 pub mod bench;
 pub mod benchmark;
+pub mod chat;
 pub mod chat_session;
 pub mod chat_session_token;
 pub mod doctor;
