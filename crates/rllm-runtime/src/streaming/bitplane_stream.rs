@@ -373,4 +373,17 @@ mod bitplane_stream_tests {
             if comp_ms < raw_ms { "GO -- pipelined streaming bit-plane beats raw bf16 from SSD" } else { "NO-GO" }
         );
     }
+
+    #[test]
+    #[ignore]
+    fn write_gemma_lmhead_sidecar() {
+        write_lmhead_sidecar(
+            "../../models/gemma-3-1b-it-rawcodec.rllm",
+            "model.embed_tokens.weight",
+            256,
+            "/tmp/gemma1b-lmhead.sidecar",
+        )
+        .unwrap();
+        eprintln!("wrote /tmp/gemma1b-lmhead.sidecar");
+    }
 }
