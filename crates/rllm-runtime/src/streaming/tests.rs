@@ -4149,4 +4149,22 @@ mod tests {
             "lm_head SIMD must preserve argmax"
         );
     }
+
+    #[test]
+    fn performance_cores_from_freqs_picks_non_slowest_tier() {
+        // Homogeneous CPU (no big.LITTLE) -> use every core.
+        assert_eq!(performance_cores_from_freqs(&[2400, 2400, 2400, 2400]), Some(4));
+        // Apple M-series-like: 2 fast + 4 slow -> 2 performance cores.
+        assert_eq!(
+            performance_cores_from_freqs(&[3200, 3200, 2000, 2000, 2000, 2000]),
+            Some(2)
+        );
+        // Snapdragon-like: 1 prime + 3 big + 4 little -> 4 above the slowest tier.
+        assert_eq!(
+            performance_cores_from_freqs(&[3000, 2800, 2800, 2800, 1800, 1800, 1800, 1800]),
+            Some(4)
+        );
+        // Empty -> None (caller falls back to the full logical-core count).
+        assert_eq!(performance_cores_from_freqs(&[]), None);
+    }
 }

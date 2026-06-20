@@ -56,9 +56,9 @@ fn effective_runtime_threads(override_value: Option<&str>, available: usize) -> 
     }
 }
 
-/// Performance ("P") core count on Apple Silicon big.LITTLE, queried once and
-/// cached. Returns `None` off macOS or when detection fails, so callers fall back
-/// to the full logical-core count.
+/// Performance-core count on big.LITTLE ARM — Apple Silicon P-cores (macOS) or the
+/// non-efficiency tier (Android/Linux) — queried once and cached. Returns `None` when
+/// detection isn't possible, so callers fall back to the full logical-core count.
 fn performance_core_count() -> Option<usize> {
     use std::sync::OnceLock;
     static CACHED: OnceLock<Option<usize>> = OnceLock::new();
@@ -80,9 +80,45 @@ fn detect_performance_cores() -> Option<usize> {
         .filter(|&n| n > 0)
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Android/Linux big.LITTLE: read each CPU's max frequency from sysfs and count the
+/// cores ABOVE the slowest tier. Phones (Snapdragon/MediaTek) and ARM SBCs expose
+/// `cpuinfo_max_freq`; their slow LITTLE/efficiency cores drag the per-layer decode
+/// barrier exactly like Apple's E-cores (R165) — so we treat the non-slowest tier as
+/// the performance cores.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn detect_performance_cores() -> Option<usize> {
+    let mut freqs: Vec<u64> = Vec::new();
+    for cpu in 0..1024usize {
+        let path = format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/cpuinfo_max_freq");
+        match std::fs::read_to_string(&path) {
+            Ok(s) => {
+                if let Ok(f) = s.trim().parse::<u64>() {
+                    freqs.push(f);
+                }
+            }
+            Err(_) => break, // no more CPUs enumerated
+        }
+    }
+    performance_cores_from_freqs(&freqs)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
 fn detect_performance_cores() -> Option<usize> {
     None
+}
+
+/// Given each CPU's max frequency, return the performance-core count = the cores
+/// above the slowest tier (the efficiency cores). A homogeneous CPU (all equal) →
+/// every core; empty input → `None`. Pure logic, unit-tested cross-platform.
+#[cfg(any(target_os = "linux", target_os = "android", test))]
+fn performance_cores_from_freqs(freqs: &[u64]) -> Option<usize> {
+    let min = *freqs.iter().min()?;
+    let max = *freqs.iter().max()?;
+    if min == max {
+        return Some(freqs.len()); // no big.LITTLE split — use all cores
+    }
+    let perf = freqs.iter().filter(|&&f| f > min).count();
+    (perf > 0).then_some(perf)
 }
 
 /// Thread count for the batch=1 DECODE GEMV path on big.LITTLE ARM. The per-layer
