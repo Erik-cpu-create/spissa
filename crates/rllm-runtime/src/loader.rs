@@ -1,6 +1,6 @@
 use crate::{Result, RuntimeError, Tensor};
 use rllm_container::{ChunkMeta, ChunkRangeMeta, GlobalMetadata, RllmReader, TensorMeta};
-use rtc_codec::{DecodeMeta, HuffmanCodec, RansCodec, RawCodec, RleCodec, TensorCodec};
+use rtc_codec::{BitplaneCodec, DecodeMeta, HuffmanCodec, RansCodec, RawCodec, RleCodec, TensorCodec};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
@@ -124,6 +124,7 @@ pub(crate) fn codec_for_id(codec_id: &str) -> Result<Box<dyn TensorCodec>> {
         "rtc-rle-v1" => Ok(Box::new(RleCodec)),
         "rtc-huff-v1" => Ok(Box::new(HuffmanCodec)),
         "rtc-rans-v1" => Ok(Box::new(RansCodec)),
+        "rtc-bitplane-v1" => Ok(Box::new(BitplaneCodec)),
         _ => Err(RuntimeError::UnknownCodec(codec_id.to_string())),
     }
 }
