@@ -386,4 +386,24 @@ mod bitplane_stream_tests {
         .unwrap();
         eprintln!("wrote /tmp/gemma1b-lmhead.sidecar");
     }
+
+    #[test]
+    #[ignore]
+    fn r149a_llama_streaming_lmhead_lossless() {
+        let model = "../../models/Llama-3.2-1B-Instruct-raw.rllm";
+        let tname = "model.embed_tokens.weight";
+        let sidecar = "/tmp/llama1b-lmhead.sidecar";
+        write_lmhead_sidecar(model, tname, 256, sidecar).unwrap();
+        let mut m = crate::LazyRllmModel::open(model).unwrap();
+        let meta = m.tensor(tname).unwrap().clone();
+        let vocab = meta.shape[0] as usize;
+        let hidden = meta.shape[1] as usize;
+        let bf16 = m.with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec())).unwrap().unwrap();
+        let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.011).sin() * 0.4).collect();
+        let resident = lm_head_logits_parallel_bf16(&act, &bf16, vocab, hidden);
+        let streamed = stream_lmhead_from_sidecar(sidecar, &act).unwrap();
+        let _ = std::fs::remove_file(sidecar);
+        assert_eq!(streamed, resident, "streaming lm-head must equal resident bf16 lm-head bit-for-bit on real Llama weights");
+        eprintln!("R149a OK: Llama streaming lm-head == resident, {} logits bit-identical", vocab);
+    }
 }
