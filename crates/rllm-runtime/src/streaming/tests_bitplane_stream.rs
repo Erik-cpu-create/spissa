@@ -164,6 +164,47 @@
         assert_eq!(streamed, reference, "w=6 sidecar stream must equal decode+dot reference bit-for-bit");
     }
 
+    // R150a: REESTREAM-PAR. Parallel decode (n_threads ∈ {1,2,4}) must equal the
+    // single-thread decode+dot reference bit-for-bit, for both w=5 and w=6 — proving
+    // the default streaming path stays lossless regardless of thread count.
+    #[test]
+    fn streaming_parallel_matches_single_thread() {
+        for &(distinct, w) in &[(32usize, 5usize), (34usize, 6usize)] {
+            let (vocab, hidden, b) = (256usize, 1152usize, 64usize);
+            let bf16 = make_embedding_distinct(vocab, hidden, distinct);
+            let enc = BitplaneCodec
+                .encode(&bf16, &EncodeMeta { name: "e".into(), shape: vec![(vocab * hidden) as u64], dtype: "bf16".into() })
+                .unwrap();
+            assert_eq!(enc.data[15] as usize, w);
+            let p = enc.data[14] as usize;
+            let palette = enc.data[16..16 + p].to_vec();
+            let row_idx = hidden * w / 8;
+            let idx_plane = enc.data[16 + p..16 + p + vocab * row_idx].to_vec();
+            let residuals = enc.data[16 + p + vocab * row_idx..16 + p + vocab * row_idx + vocab * hidden].to_vec();
+            let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.013).sin() * 0.3).collect();
+
+            // single-thread reference: decode each row + dot
+            let mut reference = vec![0f32; vocab];
+            let mut dec = vec![0u8; hidden * 2];
+            for (r, slot) in reference.iter_mut().enumerate() {
+                rtc_codec::decode_bitplane_row_into(
+                    &palette, &idx_plane[r * row_idx..], &residuals[r * hidden..], hidden, w as u8, &mut dec,
+                );
+                *slot = bf16_row_dot_f32(&act, &dec, hidden);
+            }
+
+            let framed = frame_blocks(&idx_plane, &residuals, hidden, vocab, b, w);
+            let path = format!("/tmp/r150a_par_w{w}.bin");
+            std::fs::write(&path, &framed).unwrap();
+            for &nt in &[1usize, 2, 4] {
+                let mut out = vec![0f32; vocab];
+                streaming_bitplane_gemv_parallel(&path, &palette, hidden, w, b, vocab / b, &act, &mut out, false, 0, nt);
+                assert_eq!(out, reference, "w={w} n_threads={nt}: parallel must equal single-thread bit-for-bit");
+            }
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     #[test]
     #[ignore]
     fn streaming_gemv_capacity_bound_bench() {
@@ -460,5 +501,156 @@
             raw_gb / (raw_ms / 1e3),
             raw_gb / (pipe_raw_ms / 1e3),
             comp_gb / (comp_ms / 1e3),
+        );
+    }
+
+    // Cold (F_NOCACHE) read of `path` partitioned across `n_threads` workers (each
+    // seeks to its block range, reads sequentially, zero compute). The FAIR baseline
+    // for the parallel streamer — gives raw the SAME concurrent-read parallelism so
+    // the comparison isolates compression from concurrent-read bandwidth.
+    fn cold_parallel_read_ms(path: &str, total_bytes: usize, chunk_bytes: usize, n_threads: usize, iters: usize) -> f64 {
+        use std::io::{Read, Seek, SeekFrom};
+        use std::os::unix::io::AsRawFd;
+        extern "C" { fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32; }
+        const F_NOCACHE: i32 = 48;
+        let nblk = total_bytes / chunk_bytes;
+        let n_threads = n_threads.clamp(1, nblk.max(1));
+        let per = nblk.div_ceil(n_threads);
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            std::thread::scope(|s| {
+                let mut start = 0usize;
+                while start < nblk {
+                    let cnt = per.min(nblk - start);
+                    s.spawn(move || {
+                        let mut f = std::fs::File::open(path).unwrap();
+                        unsafe { fcntl(f.as_raw_fd(), F_NOCACHE, 1) };
+                        if f.seek(SeekFrom::Start((start * chunk_bytes) as u64)).is_err() { return; }
+                        let mut buf = vec![0u8; chunk_bytes];
+                        for _ in 0..cnt {
+                            if f.read_exact(&mut buf).is_err() { break; }
+                            std::hint::black_box(&buf);
+                        }
+                    });
+                    start += cnt;
+                }
+            });
+        }
+        t.elapsed().as_secs_f64() * 1000.0 / iters as f64
+    }
+
+    // Append `k` copies of `src` to `path` (streamed write). Used to build genuinely
+    // >RAM files so F_NOCACHE reads are truly cold (a 600 MB file fits 8 GB RAM and
+    // gives unreliable, cache-polluted timings — see R149c variance).
+    fn replicate_to_file(src: &[u8], k: usize, path: &str) {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        for _ in 0..k {
+            f.write_all(src).unwrap();
+        }
+        f.sync_all().unwrap();
+    }
+
+    // R150a: does PARALLEL decode (REESTREAM-PAR) make streaming the COMPRESSED lm-head
+    // beat reading raw bf16, in the GENUINE capacity-bound regime (files > RAM, cold)?
+    // R149c was decode-bound (single consumer, ~8 GB/s) and lost; with N-thread decode
+    // (aggregate > read bandwidth) the path becomes read-bound and should win by the
+    // ~12% byte ratio. Both sides cold over >8 GB files (8 GB box) + F_NOCACHE.
+    // (A 600 MB fits-in-RAM file gives F_NOCACHE-variance noise — R149c's flaw.)
+    #[test]
+    #[ignore]
+    fn r150a_parallel_lmhead_capacity_bound() {
+        use std::io::{Read, Seek, SeekFrom};
+        let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+        let tname = "model.embed_tokens.weight";
+        let sidecar = "/tmp/gemma1b-lmhead.sidecar";
+        let raw_big = "/tmp/r150a_raw_big.bin";
+        let comp_big = "/tmp/r150a_comp_big.bin";
+        write_lmhead_sidecar(model, tname, 256, sidecar).unwrap();
+        let mut m = crate::LazyRllmModel::open(model).unwrap();
+        let meta = m.tensor(tname).unwrap().clone();
+        let vocab = meta.shape[0] as usize;
+        let hidden = meta.shape[1] as usize;
+        let bf16 = m.with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec())).unwrap().unwrap();
+        let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.011).sin() * 0.4).collect();
+        let resident = lm_head_logits_parallel_bf16(&act, &bf16, vocab, hidden);
+
+        // one framed-comp copy = sidecar minus its header.
+        let mut head = [0u8; 256];
+        let mut sf = std::fs::File::open(sidecar).unwrap();
+        let _ = sf.read(&mut head).unwrap();
+        let p = head[17] as usize;
+        let w = head[18] as usize;
+        let palette = head[19..19 + p].to_vec();
+        let header_len = (19 + p) as u64;
+        let block_rows = 256usize;
+        let num_blocks = vocab / block_rows;
+        let comp_copy_len = std::fs::metadata(sidecar).unwrap().len() as usize - header_len as usize;
+        let mut comp_copy = vec![0u8; comp_copy_len];
+        sf.seek(SeekFrom::Start(header_len)).unwrap();
+        sf.read_exact(&mut comp_copy).unwrap();
+        let _ = std::fs::remove_file(sidecar);
+
+        // Lossless gate (warm): parallel stream of one copy == resident.
+        std::fs::write(comp_big, &comp_copy).unwrap();
+        let mut out0 = vec![0f32; vocab];
+        let cores = std::thread::available_parallelism().map(usize::from).unwrap_or(4);
+        streaming_bitplane_gemv_parallel(comp_big, &palette, hidden, w, block_rows, num_blocks, &act, &mut out0, false, 0, cores);
+        assert_eq!(out0, resident, "R150a lossless gate: parallel stream must equal resident");
+
+        // Replicate both > 8 GB so reads are genuinely cold.
+        let k = 16usize; // raw ~9.7 GB, comp ~8.4 GB on an 8 GB box
+        replicate_to_file(&bf16, k, raw_big);
+        replicate_to_file(&comp_copy, k, comp_big);
+        drop(bf16);
+        drop(comp_copy);
+        let raw_total = std::fs::metadata(raw_big).unwrap().len() as usize;
+        let comp_total = std::fs::metadata(comp_big).unwrap().len() as usize;
+
+        // Baselines, all cold >RAM: raw 1-reader (context), raw N-reader (FAIR — same
+        // concurrency as comp), comp parallel. comp-vs-rawN isolates compression.
+        let raw_block = block_rows * hidden * 2;
+        let raw1_ms = cold_pipelined_read_ms(raw_big, raw_total, raw_block, 1);
+        let rawN_ms = cold_parallel_read_ms(raw_big, raw_total, raw_block, cores, 1);
+        let mut scratch_out = vec![0f32; vocab * k];
+        let comp1_ms = {
+            let t = std::time::Instant::now();
+            streaming_bitplane_gemv_parallel(comp_big, &palette, hidden, w, block_rows, num_blocks * k, &act, &mut scratch_out, true, 0, 1);
+            std::hint::black_box(&scratch_out);
+            t.elapsed().as_secs_f64() * 1000.0
+        };
+        let compN_ms = {
+            let t = std::time::Instant::now();
+            streaming_bitplane_gemv_parallel(comp_big, &palette, hidden, w, block_rows, num_blocks * k, &act, &mut scratch_out, true, 0, cores);
+            std::hint::black_box(&scratch_out);
+            t.elapsed().as_secs_f64() * 1000.0
+        };
+        let _ = std::fs::remove_file(raw_big);
+        let _ = std::fs::remove_file(comp_big);
+
+        let raw_gb = raw_total as f64 / 1e9;
+        let comp_gb = comp_total as f64 / 1e9;
+        // Honest decomposition: comp-vs-rawN (both N readers) = compression's own win.
+        let compression_speedup = rawN_ms / compN_ms;
+        let concurrent_read_speedup = raw1_ms / rawN_ms;
+        let verdict = if compN_ms < rawN_ms { "GO -- compression wins vs the FAIR parallel-raw baseline (read-bound, byte ratio)" }
+            else if compN_ms < rawN_ms * 1.05 { "MARGINAL (within 5% of parallel raw)" }
+            else { "NO-GO (parallel raw still faster)" };
+        eprintln!(
+            "\n=== R150a PARALLEL capacity-bound real lm-head (Gemma 3 1B, w={w}, >RAM cold, {cores} cores) ===\n\
+             lossless gate: OK ({vocab} logits identical)\n\
+             raw bf16  1-reader   {raw_gb:.2} GB -> {raw1_ms:.0} ms  ({:.2} GB/s)\n\
+             raw bf16  {cores}-reader  {raw_gb:.2} GB -> {rawN_ms:.0} ms  ({:.2} GB/s, FAIR baseline)\n\
+             bit-plane nt=1       {comp_gb:.2} GB -> {comp1_ms:.0} ms  ({:.2} GB/s)\n\
+             bit-plane nt={cores}       {comp_gb:.2} GB -> {compN_ms:.0} ms  ({:.2} GB/s)\n\
+             bytes: {:.0}% fewer\n\
+             compression effect (comp vs parallel-raw): {compression_speedup:.2}x   <- the honest win\n\
+             concurrent-read effect (1->{cores} readers): {concurrent_read_speedup:.2}x\n\
+             VERDICT: {verdict}\n",
+            raw_gb / (raw1_ms / 1e3),
+            raw_gb / (rawN_ms / 1e3),
+            comp_gb / (comp1_ms / 1e3),
+            comp_gb / (compN_ms / 1e3),
+            (1.0 - comp_total as f64 / raw_total as f64) * 100.0,
         );
     }
