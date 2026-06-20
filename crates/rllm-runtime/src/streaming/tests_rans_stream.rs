@@ -74,6 +74,96 @@ fn r153_gemma_rans_lmhead_lossless() {
     eprintln!("R153 OK: Gemma rANS streaming lm-head == resident, {vocab} logits bit-identical");
 }
 
+// R158 PoC: compressed-resident RAM. Hold the lm-head weights in heap two ways and let
+// /usr/bin/time -l report the process peak RSS — bf16 (604 MB) vs rANS-compressed
+// (~400 MB) decoded block-by-block (never materializing the full bf16). Modes via
+// RLLM_BENCH_MODE: "write" (build the sidecar once), "bf16", "rans".
+//   write: cargo test ... r158_lmhead_resident_ram -- --ignored   (RLLM_BENCH_MODE=write)
+//   then:  /usr/bin/time -l cargo test ... -- --ignored            (MODE=bf16 / MODE=rans)
+#[test]
+#[ignore]
+fn r158_lmhead_resident_ram() {
+    let model = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/gemma-3-1b-it-rawcodec.rllm");
+    let tname = "model.embed_tokens.weight";
+    let sidecar = "/tmp/r158_lmhead.sidecar";
+    let bf16_file = "/tmp/r158_bf16.bin";
+    let hidden = 1152usize; // Gemma 3 1B lm-head hidden
+    let mode = std::env::var("RLLM_BENCH_MODE").unwrap_or_else(|_| "write".into());
+    let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.011).sin() * 0.4).collect();
+
+    // write: one-time setup (model open here is NOT measured) — dump the bf16 lm-head and
+    // the rANS sidecar to /tmp. The measured modes never open the model (which would SHA-
+    // verify the whole 1.9 GB and mask the per-tensor footprint).
+    if mode == "write" {
+        let mut m = crate::LazyRllmModel::open(model).unwrap();
+        let id = m.tensor(tname).unwrap().tensor_id;
+        let bf16 = m.with_raw_tensor(id, |b| Ok(b.to_vec())).unwrap().unwrap();
+        std::fs::write(bf16_file, &bf16).unwrap();
+        write_lmhead_sidecar_rans(model, tname, 256, sidecar).unwrap();
+        eprintln!("R158: wrote bf16 ({} MB) + sidecar; run MODE=bf16 / MODE=rans under /usr/bin/time -l", bf16.len() / 1_000_000);
+        return;
+    }
+
+    if mode == "bf16" {
+        // Resident bf16 footprint: hold the full bf16 lm-head in heap + GEMV.
+        let w = std::fs::read(bf16_file).expect("run MODE=write first");
+        let vocab = w.len() / 2 / hidden;
+        let logits = lm_head_logits_parallel_bf16(&act, &w, vocab, hidden);
+        std::hint::black_box((&w, &logits));
+        eprintln!("R158 bf16: held {} MB bf16 + GEMV; checksum {:.3}", w.len() / 1_000_000, logits[0]);
+        return;
+    }
+
+    // rans: hold the COMPRESSED sidecar in heap + block-decode GEMV (no full bf16). No
+    // model open, so RSS reflects only the compressed weights + tiny decode buffers.
+    let compressed = std::fs::read(sidecar).expect("run MODE=write first");
+    let logits = gemv_from_resident_rans(&compressed, &act);
+    std::hint::black_box((&compressed, &logits));
+    eprintln!("R158 rans: held {} MB compressed + block-decode GEMV; checksum {:.3}", compressed.len() / 1_000_000, logits[0]);
+}
+
+// Compressed-resident GEMV: parse an in-RAM RLMR sidecar and decode+dot block-by-block
+// into a tiny reused buffer (never materializing the full bf16). The peak heap beyond
+// `compressed` is one block of exponents + one bf16 scratch row + the output.
+fn gemv_from_resident_rans(c: &[u8], act: &[f32]) -> Vec<f32> {
+    assert!(&c[0..4] == b"RLMR" && c[4] == 1);
+    let rd = |o: usize| u32::from_le_bytes(c[o..o + 4].try_into().unwrap()) as usize;
+    let hidden = rd(5);
+    let vocab = rd(9);
+    let block_rows = rd(13);
+    let mut freq = [0u32; 256];
+    for (s, f) in freq.iter_mut().enumerate() {
+        *f = u16::from_le_bytes([c[17 + s * 2], c[17 + s * 2 + 1]]) as u32;
+    }
+    let num_blocks = rd(17 + 512);
+    let mut off = 17 + 512 + 4;
+    let lens: Vec<usize> = (0..num_blocks).map(|b| rd(off + b * 4)).collect();
+    off += num_blocks * 4;
+    let tables = rtc_codec::rans_build_tables(&freq);
+    let bw = block_rows * hidden;
+    let mut exps = vec![0u8; bw];
+    let mut scratch = vec![0u8; hidden * 2];
+    let vocab_padded = num_blocks * block_rows;
+    let mut out = vec![0f32; vocab_padded];
+    for blk in 0..num_blocks {
+        let body = &c[off..off + lens[blk]];
+        off += lens[blk];
+        let ll = |k: usize| u32::from_le_bytes(body[k * 4..k * 4 + 4].try_into().unwrap()) as usize;
+        let (l0, l1, l2, l3) = (ll(0), ll(1), ll(2), ll(3));
+        let mut o = 16;
+        let lane0 = &body[o..o + l0]; o += l0;
+        let lane1 = &body[o..o + l1]; o += l1;
+        let lane2 = &body[o..o + l2]; o += l2;
+        let lane3 = &body[o..o + l3]; o += l3;
+        let residual = &body[o..o + bw];
+        rtc_codec::rans_decode_interleaved4_into([lane0, lane1, lane2, lane3], bw, &tables, &mut exps);
+        let out_block = &mut out[blk * block_rows..(blk + 1) * block_rows];
+        rans_decode_dot_block(&exps, residual, hidden, block_rows, act, &mut scratch, out_block);
+    }
+    out.truncate(vocab);
+    out
+}
+
 // R156a: the rANS streaming GEMV must generalize beyond the lm-head to a transformer
 // BODY projection (different shape) and stay lossless — the foundation for whole-model
 // rANS. gate_proj [6912×1152] (6912 % 256 == 0). Streamed W·x == resident bf16 W·x.
