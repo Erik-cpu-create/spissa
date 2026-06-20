@@ -20,9 +20,10 @@ fn streaming_bitplane_gemv(
     last_hidden: &[f32],
     out: &mut [f32],
     nocache: bool,
+    data_offset: u64,
 ) {
     use std::fs::File;
-    use std::io::Read;
+    use std::io::{Read, Seek, SeekFrom};
     use std::os::unix::io::AsRawFd;
     use std::sync::mpsc::sync_channel;
     extern "C" {
@@ -45,6 +46,11 @@ fn streaming_bitplane_gemv(
             let mut f = File::open(path).unwrap();
             if nocache {
                 unsafe { fcntl(f.as_raw_fd(), F_NOCACHE, 1) };
+            }
+            if data_offset > 0 {
+                if f.seek(SeekFrom::Start(data_offset)).is_err() {
+                    return;
+                }
             }
             for blk in 0..num_blocks {
                 let mut buf = match empty_rx.recv() {
@@ -142,7 +148,7 @@ mod bitplane_stream_tests {
         let path = "/tmp/r148_unit.bin";
         std::fs::write(path, &framed).unwrap();
         let mut out = vec![0f32; vocab];
-        streaming_bitplane_gemv(path, &palette, hidden, b, vocab / b, &act, &mut out, false);
+        streaming_bitplane_gemv(path, &palette, hidden, b, vocab / b, &act, &mut out, false, 0);
         let _ = std::fs::remove_file(path);
 
         assert_eq!(out, reference, "streaming GEMV must equal single-thread decode+dot bit-for-bit");
@@ -213,7 +219,7 @@ mod bitplane_stream_tests {
             let total_blocks = (vocab / b) * k;
             let mut out = vec![0f32; total_blocks * b];
             let t = std::time::Instant::now();
-            streaming_bitplane_gemv(comp_path, &palette, hidden, b, total_blocks, &act, &mut out, true);
+            streaming_bitplane_gemv(comp_path, &palette, hidden, b, total_blocks, &act, &mut out, true, 0);
             std::hint::black_box(&out);
             t.elapsed().as_secs_f64() * 1000.0
         };
