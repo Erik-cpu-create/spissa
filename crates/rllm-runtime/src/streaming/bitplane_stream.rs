@@ -73,13 +73,98 @@ fn streaming_bitplane_gemv(
         // consumer: decode+dot each row of each received block.
         let mut scratch = vec![0u8; hidden * 2];
         while let Ok((blk, buf)) = full_rx.recv() {
-            for r in 0..block_rows {
-                let idx = &buf[r * row_idx..];
-                let res = &buf[block_rows * row_idx + r * row_res..];
-                rtc_codec::decode_bitplane_row_into(palette, idx, res, hidden, w as u8, &mut scratch);
-                out[blk * block_rows + r] = bf16_row_dot_f32(last_hidden, &scratch, hidden);
-            }
+            let out_block = &mut out[blk * block_rows..(blk + 1) * block_rows];
+            decode_dot_block(&buf, palette, hidden, w, block_rows, last_hidden, &mut scratch, out_block);
             let _ = empty_tx.send(buf);
+        }
+    });
+}
+
+/// Decode + bf16-dot one block buffer (`[block_rows×index ++ block_rows×residual]`,
+/// index width `w`) into `out_block` (`block_rows` logits). `scratch` is a reused
+/// `hidden*2`-byte decode buffer. Shared by the single-consumer (REESTREAM) and the
+/// parallel (REESTREAM-PAR) kernels so the row decode+dot lives in one place.
+#[cfg(target_arch = "aarch64")]
+fn decode_dot_block(
+    buf: &[u8],
+    palette: &[u8],
+    hidden: usize,
+    w: usize,
+    block_rows: usize,
+    last_hidden: &[f32],
+    scratch: &mut [u8],
+    out_block: &mut [f32],
+) {
+    let row_idx = hidden * w / 8;
+    for r in 0..block_rows {
+        let idx = &buf[r * row_idx..];
+        let res = &buf[block_rows * row_idx + r * hidden..];
+        rtc_codec::decode_bitplane_row_into(palette, idx, res, hidden, w as u8, scratch);
+        out_block[r] = bf16_row_dot_f32(last_hidden, scratch, hidden);
+    }
+}
+
+/// REESTREAM-PAR (R150a): parallel streaming bit-plane GEMV. Partitions the blocks
+/// across `n_threads` workers — each opens its own file handle, seeks to its block
+/// range, and reads + decodes + dots its blocks into a disjoint output slice. One
+/// worker's decode overlaps another's read, and concurrent F_NOCACHE reads can exceed
+/// single-thread read bandwidth. Bit-identical to the single-thread decode+dot (each
+/// row is independent; only thread assignment changes, not values).
+#[cfg(target_arch = "aarch64")]
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+fn streaming_bitplane_gemv_parallel(
+    path: &str,
+    palette: &[u8],
+    hidden: usize,
+    w: usize,
+    block_rows: usize,
+    num_blocks: usize,
+    last_hidden: &[f32],
+    out: &mut [f32],
+    nocache: bool,
+    data_offset: u64,
+    n_threads: usize,
+) {
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
+    use std::os::unix::io::AsRawFd;
+    extern "C" {
+        fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
+    }
+    const F_NOCACHE: i32 = 48;
+
+    let row_idx = hidden * w / 8;
+    let block_bytes = block_rows * (row_idx + hidden);
+    let n_threads = n_threads.clamp(1, num_blocks.max(1));
+    let blocks_per = num_blocks.div_ceil(n_threads);
+
+    std::thread::scope(|s| {
+        let mut rest = &mut out[..];
+        let mut blk_start = 0usize;
+        while blk_start < num_blocks {
+            let nblk = blocks_per.min(num_blocks - blk_start);
+            let (mine, tail) = rest.split_at_mut(nblk * block_rows);
+            rest = tail;
+            s.spawn(move || {
+                let mut f = File::open(path).unwrap();
+                if nocache {
+                    unsafe { fcntl(f.as_raw_fd(), F_NOCACHE, 1) };
+                }
+                if f.seek(SeekFrom::Start(data_offset + (blk_start * block_bytes) as u64)).is_err() {
+                    return;
+                }
+                let mut buf = vec![0u8; block_bytes];
+                let mut scratch = vec![0u8; hidden * 2];
+                for b in 0..nblk {
+                    if f.read_exact(&mut buf).is_err() {
+                        break;
+                    }
+                    let out_block = &mut mine[b * block_rows..(b + 1) * block_rows];
+                    decode_dot_block(&buf, palette, hidden, w, block_rows, last_hidden, &mut scratch, out_block);
+                }
+            });
+            blk_start += nblk;
         }
     });
 }
@@ -197,9 +282,16 @@ pub(crate) fn stream_lmhead_from_sidecar(path: &str, last_hidden: &[f32]) -> cra
     // Capacity-bound regime (model > RAM): RLLM_STREAM_NOCACHE=1 reads the sidecar
     // with F_NOCACHE so cold lm-head reads don't thrash the page cache. Default off.
     let nocache = matches!(std::env::var("RLLM_STREAM_NOCACHE").as_deref(), Ok("1") | Ok("true"));
+    // R150a: parallel decode (REESTREAM-PAR) so aggregate decode keeps up with the
+    // read. RLLM_STREAM_THREADS overrides; default = available cores.
+    let n_threads = std::env::var("RLLM_STREAM_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map(usize::from).unwrap_or(1));
     let mut logits = vec![0f32; vocab];
-    streaming_bitplane_gemv(
-        path, &palette, hidden, w, block_rows, num_blocks, last_hidden, &mut logits, nocache, header_len,
+    streaming_bitplane_gemv_parallel(
+        path, &palette, hidden, w, block_rows, num_blocks, last_hidden, &mut logits, nocache, header_len, n_threads,
     );
     Ok(logits)
 }
