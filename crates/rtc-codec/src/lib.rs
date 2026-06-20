@@ -36,3 +36,6 @@ pub const CODEC_DFLOAT_V1: &str = "rtc-dfloat-v1";
 
 /// Codec ID for the SIMD-decodable bit-plane bf16 codec
 pub const CODEC_BITPLANE_V1: &str = "rtc-bitplane-v1";
+
+/// Codec ID for the rANS lossless bf16 codec (at the entropy floor, ~10.5 bits/weight)
+pub const CODEC_RANS_V1: &str = "rtc-rans-v1";
