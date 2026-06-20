@@ -44,6 +44,12 @@ pub struct LazyRllmModel {
     verified_compressed_chunk_ranges: HashSet<(u64, u64, u64)>,
     verified_original_chunks: HashSet<u64>,
     verified_tensors: HashSet<u64>,
+    /// R160: decode-once-at-load cache (chunk_id → decoded bytes). When enabled, non-raw
+    /// weights (e.g. rANS/bit-plane) are decoded ONCE and reused across tokens —
+    /// bf16-resident speed instead of per-token re-decode. Opt-in (RLLM_DECODE_RESIDENT=1);
+    /// costs the full decoded (bf16) RAM, so only for models that fit decompressed.
+    decoded_cache: HashMap<u64, Vec<u8>>,
+    decode_resident: bool,
 }
 
 impl LazyRllmModel {
@@ -113,6 +119,11 @@ impl LazyRllmModel {
             verified_compressed_chunk_ranges: HashSet::new(),
             verified_original_chunks: HashSet::new(),
             verified_tensors: HashSet::new(),
+            decoded_cache: HashMap::new(),
+            decode_resident: matches!(
+                std::env::var("RLLM_DECODE_RESIDENT").as_deref(),
+                Ok("1") | Ok("true")
+            ),
         })
     }
 
@@ -836,6 +847,12 @@ impl LazyRllmModel {
         budget: &mut MemoryBudget,
         f: impl FnOnce(&[u8], &mut MemoryBudget) -> Result<R>,
     ) -> Result<R> {
+        // R160 decode-once-at-load: reuse already-decoded bytes (skip read/verify/decode).
+        if self.decode_resident {
+            if let Some(bytes) = self.decoded_cache.get(&chunk_id) {
+                return f(bytes, budget);
+            }
+        }
         let chunk = self
             .chunks_by_id
             .get(&chunk_id)
@@ -1004,6 +1021,10 @@ impl LazyRllmModel {
             );
         }
 
+        // R160: cache the decoded bytes so subsequent tokens skip the decode entirely.
+        if self.decode_resident {
+            self.decoded_cache.insert(chunk_id, decoded.clone());
+        }
         let compute_start = Instant::now();
         let result = f(&decoded, budget);
         if self.rama_trace.is_some() {
