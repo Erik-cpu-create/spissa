@@ -28,6 +28,20 @@ pub struct BitplaneCodec;
 
 impl BitplaneCodec {
     pub const ID: &'static str = "rtc-bitplane-v1";
+
+    /// Verbatim raw-fallback chunk (odd length or palette > 64). The header's u64 field
+    /// holds the BYTE length so decode returns exactly `input` (works for odd input too).
+    fn raw_chunk(input: &[u8]) -> EncodedChunk {
+        let mut data = Vec::with_capacity(HEADER_LEN + input.len());
+        data.extend_from_slice(b"RTCB");
+        data.push(1);
+        data.push(FLAG_RAW);
+        data.extend_from_slice(&(input.len() as u64).to_le_bytes());
+        data.push(0); // palette_len
+        data.push(0); // index_width
+        data.extend_from_slice(input);
+        EncodedChunk { codec_id: Self::ID.to_string(), data, original_size: input.len() as u64 }
+    }
 }
 
 const HEADER_LEN: usize = 4 + 1 + 1 + 8 + 1 + 1; // magic+version+flags+n+palette_len+width = 16
@@ -39,14 +53,11 @@ impl TensorCodec for BitplaneCodec {
     }
 
     fn encode(&self, input: &[u8], meta: &EncodeMeta) -> Result<EncodedChunk> {
-        if meta.dtype != "bf16" {
-            return Err(CodecError::InvalidData(format!(
-                "rtc-bitplane-v1 only supports bf16, got {}",
-                meta.dtype
-            )));
-        }
+        let _ = meta; // dtype-agnostic: the (exp,residual) bf16 split is a bijection on any
+                      // even-length bytes (pack passes dtype "u8"); it only compresses for
+                      // real bf16. Odd length -> raw fallback.
         if input.len() % 2 != 0 {
-            return Err(CodecError::InvalidData("bf16 byte length must be even".into()));
+            return Ok(Self::raw_chunk(input));
         }
         let n = input.len() / 2;
 
@@ -63,24 +74,14 @@ impl TensorCodec for BitplaneCodec {
         let palette: Vec<u8> =
             (0..256usize).filter(|&i| present[i]).map(|i| i as u8).collect();
 
+        if palette.len() > 64 {
+            // Not usefully palette-compressible → raw fallback.
+            return Ok(Self::raw_chunk(input));
+        }
+
         let mut data = Vec::with_capacity(HEADER_LEN + palette.len() + n * 2);
         data.extend_from_slice(b"RTCB");
         data.push(1); // version
-
-        if palette.len() > 64 {
-            // Raw fallback: not usefully palette-compressible.
-            data.push(FLAG_RAW);
-            data.extend_from_slice(&(n as u64).to_le_bytes());
-            data.push(0); // palette_len
-            data.push(0); // index_width
-            data.extend_from_slice(input);
-            return Ok(EncodedChunk {
-                codec_id: Self::ID.to_string(),
-                data,
-                original_size: input.len() as u64,
-            });
-        }
-
         let w = index_width(palette.len());
         data.push(0); // flags
         data.extend_from_slice(&(n as u64).to_le_bytes());
@@ -120,11 +121,12 @@ impl TensorCodec for BitplaneCodec {
         let mut off = HEADER_LEN;
 
         if flags & FLAG_RAW != 0 {
+            // n holds the BYTE length for raw chunks (see `raw_chunk`).
             let body = encoded.get(off..).ok_or_else(err)?;
-            if body.len() < n * 2 {
+            if body.len() < n {
                 return Err(err());
             }
-            return Ok(body[..n * 2].to_vec());
+            return Ok(body[..n].to_vec());
         }
 
         let palette = encoded.get(off..off + p).ok_or_else(err)?;
@@ -151,21 +153,32 @@ impl TensorCodec for BitplaneCodec {
             return Ok(out);
         }
 
-        let mut reader = BufferedBitReader::new(idx_plane);
-        for i in 0..n {
-            reader.refill();
-            let idx = reader.peek(w) as usize;
-            reader.consume(w);
-            if idx >= p {
-                return Err(CodecError::InvalidData(
-                    "rtc-bitplane-v1: palette index out of range".into(),
-                ));
-            }
-            let bits = join_bf16(palette[idx], residuals[i]);
-            out[2 * i] = bits as u8;
-            out[2 * i + 1] = (bits >> 8) as u8;
+        // R159: NEON fixed-width decode (~20× the scalar BufferedBitReader) — this is
+        // why bit-plane is the FAST lossless codec for inference vs rANS's sequential
+        // entropy decode. decode_bitplane_row_into dispatches w=5/6 to SIMD, else scalar.
+        #[cfg(target_arch = "aarch64")]
+        {
+            decode_bitplane_row_into(palette, idx_plane, residuals, n, w, &mut out);
+            return Ok(out);
         }
-        Ok(out)
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let mut reader = BufferedBitReader::new(idx_plane);
+            for i in 0..n {
+                reader.refill();
+                let idx = reader.peek(w) as usize;
+                reader.consume(w);
+                if idx >= p {
+                    return Err(CodecError::InvalidData(
+                        "rtc-bitplane-v1: palette index out of range".into(),
+                    ));
+                }
+                let bits = join_bf16(palette[idx], residuals[i]);
+                out[2 * i] = bits as u8;
+                out[2 * i + 1] = (bits >> 8) as u8;
+            }
+            Ok(out)
+        }
     }
 }
 
