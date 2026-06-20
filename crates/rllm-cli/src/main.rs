@@ -4,6 +4,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod chat_template;
 mod commands;
 
 #[derive(Parser)]
@@ -248,6 +249,37 @@ enum Commands {
         command: commands::bench::BenchCommand,
     },
 
+    /// Interactive multi-turn chat over a packed model (any codec: rANS/q8/bf16)
+    Chat {
+        /// Path to .rllm file
+        file: String,
+
+        /// Context length (KV cache cap)
+        #[arg(long, default_value_t = 2048)]
+        ctx: usize,
+
+        /// Maximum assistant tokens per turn
+        #[arg(long, default_value_t = 512)]
+        max_new_tokens: usize,
+
+        /// Low-RAM mode: stream the embedding (resident ≈ compressed size; slower).
+        /// For the >RAM regime — runs a lossless model where the bf16 table won't fit.
+        #[arg(long)]
+        low_ram: bool,
+
+        /// q8 turbo: mlock residency + int8-activation kernels (q8 models)
+        #[arg(long)]
+        fast: bool,
+
+        /// Chat template for Llama models: raw, llama3, or chatml
+        #[arg(long, default_value = "llama3")]
+        chat_template: String,
+
+        /// Optional system prompt (Llama templates)
+        #[arg(long)]
+        system: Option<String>,
+    },
+
     /// Run a scripted persistent chat-session benchmark
     ChatSession {
         /// Path to .rllm file
@@ -412,6 +444,23 @@ fn main() -> Result<()> {
             runner,
         }),
         Commands::Bench { command } => commands::bench::run(command),
+        Commands::Chat {
+            file,
+            ctx,
+            max_new_tokens,
+            low_ram,
+            fast,
+            chat_template,
+            system,
+        } => commands::chat::run(
+            &file,
+            ctx,
+            max_new_tokens,
+            low_ram,
+            fast,
+            &chat_template,
+            system.as_deref(),
+        ),
         Commands::ChatSession {
             file,
             turns,
