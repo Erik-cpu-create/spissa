@@ -18,6 +18,7 @@ use std::time::Instant;
 use rllm_runtime::{
     models::gemma::{
         prepare_gemma_transformer_from_metadata, GemmaChatSession, GemmaGenerationConfig,
+        PreparedGemmaTransformer,
     },
     models::llama::{
         prepare_llama_rama_layer_decode_transformer_from_metadata, LlamaRamaGenerationConfig,
@@ -180,37 +181,64 @@ fn gemma_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> R
 
         let is_first = session.total_tokens() == 0;
         let turn = gemma_user_turn(&tokenizer, msg, is_first, bos)?;
-        print!("bot> ");
-        io::stdout().flush().ok();
-        let started = Instant::now();
-        let mut reply: Vec<usize> = Vec::new();
-        let mut shown = String::new();
-        let mut on_token = |token: usize| -> bool {
-            reply.push(token);
-            print_reply_suffix(&tokenizer, &reply, &mut shown);
-            true
-        };
-        let result = session.feed_and_decode(
+        gemma_run_turn(
+            &mut session,
             model,
             &prepared,
             &mut budget,
+            &tokenizer,
             &turn,
             max_new_tokens,
             &stop,
-            &mut on_token,
-        );
-        println!();
-        match result {
-            Ok(gen) => eprintln!(
+            ctx,
+        )?;
+    }
+    println!("bye!");
+    Ok(())
+}
+
+/// Decode + stream one Gemma reply turn, printing the running suffix and a
+/// per-turn summary. Flags an empty reply (the model emitted a stop token first —
+/// common for tiny lossy-quantized models in long, low-content conversations).
+#[allow(clippy::too_many_arguments)]
+fn gemma_run_turn(
+    session: &mut GemmaChatSession,
+    model: &mut LazyRllmModel,
+    prepared: &PreparedGemmaTransformer,
+    budget: &mut MemoryBudget,
+    tokenizer: &RllmTokenizer,
+    turn: &[usize],
+    max_new_tokens: usize,
+    stop: &[usize],
+    ctx: usize,
+) -> Result<()> {
+    print!("bot> ");
+    io::stdout().flush().ok();
+    let started = Instant::now();
+    let mut reply: Vec<usize> = Vec::new();
+    let mut shown = String::new();
+    let mut on_token = |token: usize| -> bool {
+        reply.push(token);
+        print_reply_suffix(tokenizer, &reply, &mut shown);
+        true
+    };
+    let result =
+        session.feed_and_decode(model, prepared, budget, turn, max_new_tokens, stop, &mut on_token);
+    println!();
+    match result {
+        Ok(gen) => {
+            if gen.is_empty() {
+                println!("[the model ended the turn with no output — try a fuller prompt or /reset]");
+            }
+            eprintln!(
                 "  [{} tok, {:.1} tok/s, ctx {}/{ctx}]",
                 gen.len(),
                 gen.len() as f64 / started.elapsed().as_secs_f64().max(1e-6),
                 session.total_tokens(),
-            ),
-            Err(e) => eprintln!("  [{e}] — /reset to recover"),
+            );
         }
+        Err(e) => eprintln!("  [{e}] — /reset to recover"),
     }
-    println!("bye!");
     Ok(())
 }
 
@@ -293,6 +321,9 @@ fn llama_chat(
             Ok(r) => {
                 has_context = true;
                 previous_assistant_ended = assistant_ended;
+                if r.metrics.generated_tokens == 0 {
+                    println!("[the model ended the turn with no output — try a fuller prompt]");
+                }
                 eprintln!(
                     "  [{} tok, {:.1} tok/s, ctx {}]",
                     r.metrics.generated_tokens,
