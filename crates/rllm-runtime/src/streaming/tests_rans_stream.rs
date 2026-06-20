@@ -97,6 +97,42 @@ fn r156a_gemma_body_projection_lossless() {
     eprintln!("R156a OK: gate_proj [{out_features}×{in_features}] rANS stream == resident, {out_features} outputs bit-identical");
 }
 
+// R157b: every projection of a real transformer LAYER must stream-rANS losslessly,
+// including o_proj/down_proj whose row count (1152) isn't a multiple of block_rows=256
+// (exercises the zero-row padding). Each streamed W·x == resident bf16 W·x bit-for-bit.
+#[test]
+#[ignore]
+fn r157b_gemma_layer0_all_projections_lossless() {
+    let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+    let projections = [
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.self_attn.k_proj.weight",
+        "model.layers.0.self_attn.v_proj.weight",
+        "model.layers.0.self_attn.o_proj.weight",
+        "model.layers.0.mlp.gate_proj.weight",
+        "model.layers.0.mlp.up_proj.weight",
+        "model.layers.0.mlp.down_proj.weight",
+    ];
+    let mut m = crate::LazyRllmModel::open(model).unwrap();
+    for tname in projections {
+        let meta = m.tensor(tname).unwrap().clone();
+        let out_f = meta.shape[0] as usize;
+        let in_f = meta.shape[1] as usize;
+        let sidecar = "/tmp/r157b_proj.sidecar";
+        write_lmhead_sidecar_rans(model, tname, 256, sidecar).unwrap();
+        let w = m.with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec())).unwrap().unwrap();
+        let act: Vec<f32> = (0..in_f).map(|i| ((i as f32) * 0.013).cos() * 0.5).collect();
+        let resident = lm_head_logits_parallel_bf16(&act, &w, out_f, in_f);
+        let streamed = stream_lmhead_from_rans_sidecar(sidecar, &act).unwrap();
+        let _ = std::fs::remove_file(sidecar);
+        assert_eq!(streamed.len(), out_f, "{tname}: output length must equal out_features (padding truncated)");
+        assert_eq!(streamed, resident, "{tname}: rANS stream W·x must equal resident bf16 bit-for-bit");
+        let pad = if out_f % 256 == 0 { "no pad" } else { "PADDED" };
+        eprintln!("  R157b OK: {tname} [{out_f}×{in_f}] ({pad}) — {out_f} outputs bit-identical");
+    }
+    eprintln!("R157b OK: all 7 Gemma layer-0 projections stream-rANS == resident, lossless");
+}
+
 // Append `k` copies of `src` to `path` (streamed write); for building >RAM files.
 fn replicate(src: &[u8], k: usize, path: &str) {
     use std::io::Write;
