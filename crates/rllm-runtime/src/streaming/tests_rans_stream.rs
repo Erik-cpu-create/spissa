@@ -74,6 +74,29 @@ fn r153_gemma_rans_lmhead_lossless() {
     eprintln!("R153 OK: Gemma rANS streaming lm-head == resident, {vocab} logits bit-identical");
 }
 
+// R156a: the rANS streaming GEMV must generalize beyond the lm-head to a transformer
+// BODY projection (different shape) and stay lossless — the foundation for whole-model
+// rANS. gate_proj [6912×1152] (6912 % 256 == 0). Streamed W·x == resident bf16 W·x.
+#[test]
+#[ignore]
+fn r156a_gemma_body_projection_lossless() {
+    let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+    let tname = "model.layers.0.mlp.gate_proj.weight";
+    let sidecar = "/tmp/r156a_gate_proj.sidecar";
+    write_lmhead_sidecar_rans(model, tname, 256, sidecar).unwrap();
+    let mut m = crate::LazyRllmModel::open(model).unwrap();
+    let meta = m.tensor(tname).unwrap().clone();
+    let out_features = meta.shape[0] as usize;
+    let in_features = meta.shape[1] as usize;
+    let w = m.with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec())).unwrap().unwrap();
+    let act: Vec<f32> = (0..in_features).map(|i| ((i as f32) * 0.013).cos() * 0.5).collect();
+    let resident = lm_head_logits_parallel_bf16(&act, &w, out_features, in_features);
+    let streamed = stream_lmhead_from_rans_sidecar(sidecar, &act).unwrap();
+    let _ = std::fs::remove_file(sidecar);
+    assert_eq!(streamed, resident, "R156a: rANS-streamed body projection W·x must equal resident bf16 W·x");
+    eprintln!("R156a OK: gate_proj [{out_features}×{in_features}] rANS stream == resident, {out_features} outputs bit-identical");
+}
+
 // Append `k` copies of `src` to `path` (streamed write); for building >RAM files.
 fn replicate(src: &[u8], k: usize, path: &str) {
     use std::io::Write;
