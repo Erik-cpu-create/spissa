@@ -81,6 +81,99 @@ fn streaming_bitplane_gemv(
     });
 }
 
+/// Read a model's tied bf16 embedding/LM-head tensor, bit-plane encode it, and
+/// write a block-framed sidecar file the streaming lm-head path consumes.
+/// SAFETY/constraints: the tensor must be raw-bf16 readable (pack with `--codec raw`),
+/// w must be 5, and `vocab % block_rows == 0`.
+#[cfg(target_arch = "aarch64")]
+pub fn write_lmhead_sidecar(
+    model_path: &str,
+    tensor_name: &str,
+    block_rows: usize,
+    out_path: &str,
+) -> crate::Result<()> {
+    use rtc_codec::{BitplaneCodec, EncodeMeta, TensorCodec};
+    let mut m = crate::LazyRllmModel::open(model_path)?;
+    let meta = m.tensor(tensor_name)?.clone();
+    let vocab = meta.shape[0] as usize;
+    let hidden = meta.shape[1] as usize;
+    let bf16 = m
+        .with_raw_tensor(meta.tensor_id, |b| Ok(b.to_vec()))?
+        .ok_or_else(|| crate::RuntimeError::InvalidTensorData(
+            "lm-head must be raw bf16 (repack with --codec raw)".into(),
+        ))?;
+    let n = vocab * hidden;
+    let enc = BitplaneCodec
+        .encode(&bf16, &EncodeMeta { name: tensor_name.into(), shape: vec![n as u64], dtype: "bf16".into() })
+        .map_err(|e| crate::RuntimeError::InvalidTensorData(format!("bitplane encode: {e}")))?;
+    if enc.data[15] != 5 {
+        return Err(crate::RuntimeError::InvalidTensorData(format!(
+            "lm-head bit-plane width {} != 5; decode16 kernel needs w=5",
+            enc.data[15]
+        )));
+    }
+    if vocab % block_rows != 0 {
+        return Err(crate::RuntimeError::InvalidTensorData(
+            "vocab must be a multiple of block_rows".into(),
+        ));
+    }
+    let p = enc.data[14] as usize;
+    let row_idx = hidden * 5 / 8;
+    let idx_plane = &enc.data[16 + p..16 + p + vocab * row_idx];
+    let residuals = &enc.data[16 + p + vocab * row_idx..16 + p + vocab * row_idx + n];
+
+    let mut sidecar = Vec::with_capacity(18 + p + vocab * (row_idx + hidden));
+    sidecar.extend_from_slice(b"RLMH");
+    sidecar.push(1);
+    sidecar.extend_from_slice(&(hidden as u32).to_le_bytes());
+    sidecar.extend_from_slice(&(vocab as u32).to_le_bytes());
+    sidecar.extend_from_slice(&(block_rows as u32).to_le_bytes());
+    sidecar.push(p as u8);
+    sidecar.extend_from_slice(&enc.data[16..16 + p]); // palette
+    for blk in 0..vocab / block_rows {
+        for r in 0..block_rows {
+            let row = blk * block_rows + r;
+            sidecar.extend_from_slice(&idx_plane[row * row_idx..(row + 1) * row_idx]);
+        }
+        for r in 0..block_rows {
+            let row = blk * block_rows + r;
+            sidecar.extend_from_slice(&residuals[row * hidden..(row + 1) * hidden]);
+        }
+    }
+    std::fs::write(out_path, &sidecar)
+        .map_err(|e| crate::RuntimeError::InvalidTensorData(format!("write sidecar: {e}")))?;
+    Ok(())
+}
+
+/// Compute lm-head logits by streaming the bit-plane sidecar (R148 kernel).
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn stream_lmhead_from_sidecar(path: &str, last_hidden: &[f32]) -> crate::Result<Vec<f32>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)
+        .map_err(|e| crate::RuntimeError::InvalidTensorData(format!("open sidecar: {e}")))?;
+    let mut head = [0u8; 256];
+    let got = f.read(&mut head)
+        .map_err(|e| crate::RuntimeError::InvalidTensorData(format!("read sidecar header: {e}")))?;
+    if got < 18 || &head[0..4] != b"RLMH" || head[4] != 1 {
+        return Err(crate::RuntimeError::InvalidTensorData("bad sidecar header".into()));
+    }
+    let hidden = u32::from_le_bytes(head[5..9].try_into().unwrap()) as usize;
+    let vocab = u32::from_le_bytes(head[9..13].try_into().unwrap()) as usize;
+    let block_rows = u32::from_le_bytes(head[13..17].try_into().unwrap()) as usize;
+    let p = head[17] as usize;
+    if got < 18 + p {
+        return Err(crate::RuntimeError::InvalidTensorData("sidecar palette truncated".into()));
+    }
+    let palette = head[18..18 + p].to_vec();
+    let header_len = (18 + p) as u64;
+    let num_blocks = vocab / block_rows;
+    let mut logits = vec![0f32; vocab];
+    streaming_bitplane_gemv(
+        path, &palette, hidden, block_rows, num_blocks, last_hidden, &mut logits, false, header_len,
+    );
+    Ok(logits)
+}
+
 #[cfg(all(test, target_arch = "aarch64"))]
 mod bitplane_stream_tests {
     use super::*;
@@ -152,6 +245,46 @@ mod bitplane_stream_tests {
         let _ = std::fs::remove_file(path);
 
         assert_eq!(out, reference, "streaming GEMV must equal single-thread decode+dot bit-for-bit");
+    }
+
+    #[test]
+    fn lmhead_sidecar_streams_equal_to_reference() {
+        // Build a tiny synthetic "model" embedding directly as a sidecar and confirm
+        // stream_lmhead_from_sidecar == single-thread decode+dot reference.
+        let (vocab, hidden, b) = (128usize, 1152usize, 64usize);
+        let bf16 = make_embedding(vocab, hidden);
+        let enc = BitplaneCodec
+            .encode(&bf16, &EncodeMeta { name: "e".into(), shape: vec![(vocab * hidden) as u64], dtype: "bf16".into() })
+            .unwrap();
+        assert_eq!(enc.data[15], 5);
+        let p = enc.data[14] as usize;
+        let palette = enc.data[16..16 + p].to_vec();
+        let row_idx = hidden * 5 / 8;
+        let idx_plane = enc.data[16 + p..16 + p + vocab * row_idx].to_vec();
+        let residuals = enc.data[16 + p + vocab * row_idx..16 + p + vocab * row_idx + vocab * hidden].to_vec();
+
+        // write a sidecar by hand (same format write_lmhead_sidecar produces)
+        let mut sc = Vec::new();
+        sc.extend_from_slice(b"RLMH");
+        sc.push(1);
+        sc.extend_from_slice(&(hidden as u32).to_le_bytes());
+        sc.extend_from_slice(&(vocab as u32).to_le_bytes());
+        sc.extend_from_slice(&(b as u32).to_le_bytes());
+        sc.push(p as u8);
+        sc.extend_from_slice(&palette);
+        sc.extend_from_slice(&frame_blocks(&idx_plane, &residuals, hidden, vocab, b));
+        let path = "/tmp/r149a_unit.sidecar";
+        std::fs::write(path, &sc).unwrap();
+
+        let act: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.019).sin() * 0.3).collect();
+        let mut reference = vec![0f32; vocab];
+        for (r, slot) in reference.iter_mut().enumerate() {
+            let dec = rtc_codec::decode_neon_w5(&palette, &idx_plane[r * row_idx..], &residuals[r * hidden..], hidden);
+            *slot = bf16_row_dot_f32(&act, &dec, hidden);
+        }
+        let streamed = stream_lmhead_from_sidecar(path, &act).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(streamed, reference, "sidecar stream must equal decode+dot reference bit-for-bit");
     }
 
     #[test]
