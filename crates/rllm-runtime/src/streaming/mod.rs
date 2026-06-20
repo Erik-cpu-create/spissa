@@ -673,4 +673,5 @@ include!("argmax.rs");
 include!("kernels.rs");
 include!("bitplane_gemv.rs");
 include!("bitplane_stream.rs");
+include!("rans_stream.rs");
 include!("tests.rs");
