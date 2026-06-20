@@ -712,6 +712,7 @@ pub struct StreamingBlockParameters<'a> {
 }
 
 include!("linear.rs");
+include!("linear_multiply.rs");
 include!("linear_sparse.rs");
 include!("linear_sparse_input.rs");
 include!("linear_sparse_support.rs");
