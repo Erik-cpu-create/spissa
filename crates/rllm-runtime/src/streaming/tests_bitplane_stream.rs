@@ -611,7 +611,7 @@
         // concurrency as comp), comp parallel. comp-vs-rawN isolates compression.
         let raw_block = block_rows * hidden * 2;
         let raw1_ms = cold_pipelined_read_ms(raw_big, raw_total, raw_block, 1);
-        let rawN_ms = cold_parallel_read_ms(raw_big, raw_total, raw_block, cores, 1);
+        let raw_n_ms = cold_parallel_read_ms(raw_big, raw_total, raw_block, cores, 1);
         let mut scratch_out = vec![0f32; vocab * k];
         let comp1_ms = {
             let t = std::time::Instant::now();
@@ -619,7 +619,7 @@
             std::hint::black_box(&scratch_out);
             t.elapsed().as_secs_f64() * 1000.0
         };
-        let compN_ms = {
+        let comp_n_ms = {
             let t = std::time::Instant::now();
             streaming_bitplane_gemv_parallel(comp_big, &palette, hidden, w, block_rows, num_blocks * k, &act, &mut scratch_out, true, 0, cores);
             std::hint::black_box(&scratch_out);
@@ -631,26 +631,26 @@
         let raw_gb = raw_total as f64 / 1e9;
         let comp_gb = comp_total as f64 / 1e9;
         // Honest decomposition: comp-vs-rawN (both N readers) = compression's own win.
-        let compression_speedup = rawN_ms / compN_ms;
-        let concurrent_read_speedup = raw1_ms / rawN_ms;
-        let verdict = if compN_ms < rawN_ms { "GO -- compression wins vs the FAIR parallel-raw baseline (read-bound, byte ratio)" }
-            else if compN_ms < rawN_ms * 1.05 { "MARGINAL (within 5% of parallel raw)" }
+        let compression_speedup = raw_n_ms / comp_n_ms;
+        let concurrent_read_speedup = raw1_ms / raw_n_ms;
+        let verdict = if comp_n_ms < raw_n_ms { "GO -- compression wins vs the FAIR parallel-raw baseline (read-bound, byte ratio)" }
+            else if comp_n_ms < raw_n_ms * 1.05 { "MARGINAL (within 5% of parallel raw)" }
             else { "NO-GO (parallel raw still faster)" };
         eprintln!(
             "\n=== R150a PARALLEL capacity-bound real lm-head (Gemma 3 1B, w={w}, >RAM cold, {cores} cores) ===\n\
              lossless gate: OK ({vocab} logits identical)\n\
              raw bf16  1-reader   {raw_gb:.2} GB -> {raw1_ms:.0} ms  ({:.2} GB/s)\n\
-             raw bf16  {cores}-reader  {raw_gb:.2} GB -> {rawN_ms:.0} ms  ({:.2} GB/s, FAIR baseline)\n\
+             raw bf16  {cores}-reader  {raw_gb:.2} GB -> {raw_n_ms:.0} ms  ({:.2} GB/s, FAIR baseline)\n\
              bit-plane nt=1       {comp_gb:.2} GB -> {comp1_ms:.0} ms  ({:.2} GB/s)\n\
-             bit-plane nt={cores}       {comp_gb:.2} GB -> {compN_ms:.0} ms  ({:.2} GB/s)\n\
+             bit-plane nt={cores}       {comp_gb:.2} GB -> {comp_n_ms:.0} ms  ({:.2} GB/s)\n\
              bytes: {:.0}% fewer\n\
              compression effect (comp vs parallel-raw): {compression_speedup:.2}x   <- the honest win\n\
              concurrent-read effect (1->{cores} readers): {concurrent_read_speedup:.2}x\n\
              VERDICT: {verdict}\n",
             raw_gb / (raw1_ms / 1e3),
-            raw_gb / (rawN_ms / 1e3),
+            raw_gb / (raw_n_ms / 1e3),
             comp_gb / (comp1_ms / 1e3),
-            comp_gb / (compN_ms / 1e3),
+            comp_gb / (comp_n_ms / 1e3),
             (1.0 - comp_total as f64 / raw_total as f64) * 100.0,
         );
     }

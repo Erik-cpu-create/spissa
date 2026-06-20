@@ -79,9 +79,10 @@ fn scout_tensor(name: &str, bytes: &[u8]) {
         std::hint::black_box(rtc_codec::rans_decode(&stream, n, &freq));
     });
     let streams4 = rtc_codec::rans_encode_interleaved4(&exps, &freq);
-    assert_eq!(rtc_codec::rans_decode_interleaved4(&streams4, n, &freq), exps, "{name}: interleaved decode bit-exact");
+    let sl4 = [&streams4[0][..], &streams4[1][..], &streams4[2][..], &streams4[3][..]];
+    assert_eq!(rtc_codec::rans_decode_interleaved4(sl4, n, &freq), exps, "{name}: interleaved decode bit-exact");
     let inter_s = time_dec(&|| {
-        std::hint::black_box(rtc_codec::rans_decode_interleaved4(&streams4, n, &freq));
+        std::hint::black_box(rtc_codec::rans_decode_interleaved4(sl4, n, &freq));
     });
     let scalar_gw = (n as f64 / 1e9) / scalar_s;
     let gw_per_core = (n as f64 / 1e9) / inter_s; // interleaved is the real candidate
