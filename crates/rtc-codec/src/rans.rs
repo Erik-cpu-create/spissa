@@ -138,21 +138,52 @@ pub fn rans_encode_interleaved4(symbols: &[u8], freq: &[u32; 256]) -> [Vec<u8>; 
     })
 }
 
-/// Decode `n` symbols from a 4-lane interleaved stream (inverse of
-/// [`rans_encode_interleaved4`]). The four lanes advance independently in the inner
-/// body so the CPU overlaps them.
-pub fn rans_decode_interleaved4(streams: &[Vec<u8>; 4], n: usize, freq: &[u32; 256]) -> Vec<u8> {
+/// Precomputed decode tables (cumulative frequencies + slot→symbol map) for one
+/// frequency table. Build once and reuse across many blocks/streams — building the
+/// 4096-entry slot table per call dominates streaming decode otherwise.
+pub struct RansDecodeTables {
+    freq: [u32; 256],
+    cum: [u32; 257],
+    slot2sym: Vec<u8>,
+}
+
+/// Build the reusable decode tables for `freq`.
+pub fn rans_build_tables(freq: &[u32; 256]) -> RansDecodeTables {
     let cum = cum_table(freq);
     let slot2sym = slot_table(&cum);
+    RansDecodeTables { freq: *freq, cum, slot2sym }
+}
+
+/// Decode `n` symbols from a 4-lane interleaved stream (inverse of
+/// [`rans_encode_interleaved4`]). Allocates + builds tables; for hot loops use
+/// [`rans_decode_interleaved4_into`] with precomputed tables and a reused buffer.
+pub fn rans_decode_interleaved4(streams: [&[u8]; 4], n: usize, freq: &[u32; 256]) -> Vec<u8> {
+    let t = rans_build_tables(freq);
+    let mut out = vec![0u8; n];
+    rans_decode_interleaved4_into(streams, n, &t, &mut out);
+    out
+}
+
+/// Decode `n` symbols into `out` (`out.len() >= n`) using precomputed `tables` and no
+/// allocation. The four lanes advance independently in the body so the CPU overlaps
+/// them (the ILP lever).
+pub fn rans_decode_interleaved4_into(
+    streams: [&[u8]; 4],
+    n: usize,
+    tables: &RansDecodeTables,
+    out: &mut [u8],
+) {
+    let freq = &tables.freq;
+    let cum = &tables.cum;
+    let slot2sym = &tables.slot2sym;
     let mask = M - 1;
     let init = |s: &[u8]| -> u32 {
         (s[0] as u32) | (s[1] as u32) << 8 | (s[2] as u32) << 16 | (s[3] as u32) << 24
     };
     let (mut x0, mut x1, mut x2, mut x3) =
-        (init(&streams[0]), init(&streams[1]), init(&streams[2]), init(&streams[3]));
+        (init(streams[0]), init(streams[1]), init(streams[2]), init(streams[3]));
     let (mut p0, mut p1, mut p2, mut p3) = (4usize, 4usize, 4usize, 4usize);
-    let (s0, s1, s2, s3) = (&streams[0], &streams[1], &streams[2], &streams[3]);
-    let mut out = vec![0u8; n];
+    let (s0, s1, s2, s3) = (streams[0], streams[1], streams[2], streams[3]);
 
     let mut base = 0usize;
     while base < n {
@@ -197,7 +228,6 @@ pub fn rans_decode_interleaved4(streams: &[Vec<u8>; 4], n: usize, freq: &[u32; 2
         }
         base += 4;
     }
-    out
 }
 
 /// Count symbol occurrences (for building a frequency table).
@@ -260,7 +290,8 @@ mod tests {
             let counts = count_symbols(&syms);
             let freq = normalize_freqs(&counts);
             let streams = rans_encode_interleaved4(&syms, &freq);
-            let decoded = rans_decode_interleaved4(&streams, syms.len(), &freq);
+            let sl = [&streams[0][..], &streams[1][..], &streams[2][..], &streams[3][..]];
+            let decoded = rans_decode_interleaved4(sl, syms.len(), &freq);
             assert_eq!(decoded, syms, "interleaved-4 roundtrip must be bit-exact (len={len})");
         }
     }
