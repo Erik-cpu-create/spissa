@@ -6,8 +6,47 @@ cross-compilation needed. This is the easiest path: build on the phone, run on t
 
 > Status: the code is ARM-portable and the macOS-specific bits (P-core detection via
 > `sysctl`) are `cfg`-gated with Android/Linux fallbacks (R172 adds big.LITTLE detection
-> from sysfs). It has NOT yet been tested on physical Android hardware — treat this as a
-> bring-up guide and report what breaks.
+> from sysfs). The aarch64-android cross-build is **verified to compile** (R174, ~3.9 MB
+> stripped ELF, Bionic libc); it has NOT yet been run on physical hardware — report what breaks.
+
+## Two ways to run
+
+**Option A — pre-built binary (recommended; no on-device build).** Cross-compile once on a
+dev machine, push the binary + a model to the phone. The phone needs **no Rust/cargo** — it
+just runs the binary.
+
+One-time setup on the dev machine:
+```sh
+brew install --cask android-ndk          # or the NDK from Android Studio
+rustup target add aarch64-linux-android
+```
+
+Build a **generic-aarch64** binary (runs on ALL ARM64 phones — RLLM runtime-detects
+NEON/dotprod/i8mm, so no per-SoC rebuild):
+```sh
+export ANDROID_NDK_HOME=/opt/homebrew/share/android-ndk
+TC=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$(ls $ANDROID_NDK_HOME/toolchains/llvm/prebuilt)/bin
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TC/aarch64-linux-android24-clang
+export CC_aarch64_linux_android=$TC/aarch64-linux-android24-clang
+export AR_aarch64_linux_android=$TC/llvm-ar
+cargo build --release --target aarch64-linux-android -p rllm-cli --bin rllm
+$TC/llvm-strip target/aarch64-linux-android/release/rllm     # 5.3 -> 3.9 MB (optional)
+```
+> Note: we set the linker via env vars instead of `cargo-ndk` — cargo-ndk 4.1.2 panics on
+> NDK r29. The `.cargo/config.toml` keeps `target-cpu=native` scoped to the host target so it
+> does NOT leak into this cross-build (which must stay generic aarch64).
+
+Push + run (via `adb shell`, or copy into Termux and run there):
+```sh
+adb push target/aarch64-linux-android/release/rllm /data/local/tmp/
+adb push models/gemma-3-1b-it-q8-raw.rllm /data/local/tmp/
+adb shell
+cd /data/local/tmp && chmod +x rllm
+RLLM_INTEGRITY=unchecked ./rllm chat gemma-3-1b-it-q8-raw.rllm --fast
+```
+
+**Option B — build on the phone (Termux).** No dev machine needed, but heavier (Rust
+toolchain + a multi-minute on-device build). Steps 1–6 below.
 
 ## 1. Install Termux
 
