@@ -66,6 +66,11 @@ pub fn run(
     if verified > 0 {
         eprintln!("[chat] integrity prewarm: verified {verified} chunks");
     }
+    // R174: decode-once in parallel at load (not serially on the first token).
+    let predecoded = model.prewarm_decode_resident()?;
+    if predecoded > 0 {
+        eprintln!("[chat] decode prewarm: {predecoded} chunks decoded in parallel");
+    }
 
     let architecture = model.metadata().architecture.clone();
     println!(
