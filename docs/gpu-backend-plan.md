@@ -1,5 +1,20 @@
 # RLLM GPU backend — plan (decided 2026-06-21)
 
+> **PHASE 1 GO/NO-GO RESULT (2026-06-21): NO-GO on the budget phone.** A coalesced GEMV
+> (the decode primitive) on the Mali-G52 hit **1.4 GB/s effective → ~1.0 tok/s — identical
+> to the CPU** (which also measured ~1.4 GB/s / ~1 tok/s). Two different straightforward
+> kernels (tiled GEMM 4.4 GFLOP/s, reduction GEMV 1.4 GB/s) both land at CPU level → the
+> **MT6768's LPDDR4 delivers only ~1.4 GB/s effective to ANY processor for this pattern**;
+> decode is memory-bound, so CPU and GPU hit the same memory wall. **~1 tok/s for 1B is the
+> ceiling on this phone regardless of backend.** A GPU backend would NOT beat the CPU here —
+> the gate saved months. Caveat: kernels aren't expert-tuned (an optimized kernel might reach
+> ~3-5 GB/s), but memory-bound + the phone's low effective bandwidth caps the upside.
+> **Decision: do NOT build the GPU backend for budget phones; stay CPU-lossless. GPU stays a
+> future option for FLAGSHIP phones / laptops (LPDDR5/dGPU = ~4-5× bandwidth) — the wgpu+Vulkan
+> foundation + cross-build recipe are proven and saved.** The 20-tok/s app = flagship hardware.
+
+
+
 Decision: add an auto-detecting GPU backend so RLLM is **plug-and-play** on phones — one
 generic binary that picks the GPU when present and falls back to CPU otherwise. User copies
 the binary + a repacked `.rllm` and runs; no per-device rebuild. (The CPU binary already
