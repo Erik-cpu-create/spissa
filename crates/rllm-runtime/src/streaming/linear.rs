@@ -291,12 +291,14 @@ pub fn streaming_tile_linear_from_model(
         }
     }
 
-    // R133 decode fast-path: raw-codec Q8_0 + batch=1 (gated on RLLM_Q8_ACTIVATION).
-    // View the whole tensor as one contiguous mmap slice and run int8 sdot
-    // row-parallel — bypassing the per-chunk dispatch + scalar i8×f32 path.
-    // Falls through to the per-chunk path if the tensor isn't contiguous-raw.
+    // R133 decode fast-path: raw-codec Q8_0 + batch=1 (default on; opt out with
+    // RLLM_Q8_ACTIVATION=0). View the whole tensor as one contiguous mmap slice and
+    // run int8 sdot row-parallel — bypassing the per-chunk dispatch + scalar i8×f32.
+    // Requires in_features%32==0 (the sdot block width); falls through to the
+    // per-chunk path otherwise, or if the tensor isn't contiguous-raw.
     if tensor.dtype == rllm_container::DType::Q8_0
         && config.linear.batch == 1
+        && config.linear.in_features % 32 == 0
         && q8_activation_path_enabled()
     {
         let lin = config.linear;
@@ -315,6 +317,7 @@ pub fn streaming_tile_linear_from_model(
     // made naive prefill parallelization slower than single-threaded.
     if tensor.dtype == rllm_container::DType::Q8_0
         && config.linear.batch >= 2
+        && config.linear.in_features % 32 == 0
         && q8_activation_path_enabled()
     {
         let lin = config.linear;

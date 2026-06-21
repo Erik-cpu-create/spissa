@@ -745,7 +745,11 @@ fn accumulate_q8_0_chunk(
         .checked_mul(config.in_features)
         .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
     validate_q8_0_chunk(q8_bytes, element_start, weight_elements, weight_name)?;
-    if q8_activation_path_enabled() {
+    // The int8/panel kernels assume each 32-wide q8 block stays within one output row
+    // (in_features % 32 == 0). For non-multiples a block straddles rows, which the
+    // int8-activation path does not handle — route those to the scalar path below.
+    // Real transformer projections are always %32==0; this only guards odd test/edge dims.
+    if q8_activation_path_enabled() && config.in_features % 32 == 0 {
         // Diagnostic: RLLM_Q8_PANEL=0 disables R119 panel path; useful to confirm
         // the existing R111 parity baseline still holds and isolate panel bugs.
         let panel_enabled = std::env::var("RLLM_Q8_PANEL")
