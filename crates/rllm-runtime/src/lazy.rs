@@ -841,6 +841,73 @@ impl LazyRllmModel {
 
     /// Decode a single compressed chunk, run a closure with the decoded bytes,
     /// and release both compressed and decoded buffers before returning.
+    /// R174: decode ALL resident chunks in parallel at load. `decode-once` otherwise
+    /// decodes the whole model serially on the first token (~32s on phone for rANS 1B:
+    /// q8 prefill 3s vs rANS 35s — the 32s gap is the serial decode). Chunks are
+    /// independent and `read_chunk_slice` is `&self` (read-only mmap) + `codec_for_id`
+    /// is stateless, so a `thread::scope` fans the decode across cores; results are
+    /// inserted into `decoded_cache` after the join. No-op unless `decode_resident`.
+    /// Compressed chunks are already integrity-checked by `prewarm_chunk_integrity` and
+    /// the decode is deterministic, so per-chunk re-verify is skipped here.
+    pub fn prewarm_decode_resident(&mut self) -> Result<usize> {
+        if !self.decode_resident {
+            return Ok(0);
+        }
+        let jobs: Vec<(u64, String, u64)> = self
+            .chunks_by_id
+            .iter()
+            .filter(|(id, _)| !self.decoded_cache.contains_key(id))
+            .map(|(&id, c)| (id, c.codec_id.clone(), c.uncompressed_size))
+            .collect();
+        if jobs.is_empty() {
+            return Ok(0);
+        }
+        let nthreads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(jobs.len())
+            .max(1);
+        let part = jobs.len().div_ceil(nthreads);
+        // Decode in parallel; `reader` is an immutable borrow that ends with this block,
+        // before the `&mut self` cache insert below.
+        let decoded: Vec<(u64, Vec<u8>)> = {
+            let reader = &self.reader;
+            std::thread::scope(|scope| -> Result<Vec<(u64, Vec<u8>)>> {
+                let handles: Vec<_> = jobs
+                    .chunks(part)
+                    .map(|slice| {
+                        scope.spawn(move || -> Result<Vec<(u64, Vec<u8>)>> {
+                            let mut out = Vec::with_capacity(slice.len());
+                            for (id, codec_id, usz) in slice {
+                                let compressed = reader.read_chunk_slice(*id)?;
+                                let codec = codec_for_id(codec_id)?;
+                                let bytes = codec.decode(
+                                    compressed,
+                                    &rtc_codec::DecodeMeta {
+                                        codec_id: codec_id.clone(),
+                                        uncompressed_size: *usz,
+                                    },
+                                )?;
+                                out.push((*id, bytes));
+                            }
+                            Ok(out)
+                        })
+                    })
+                    .collect();
+                let mut all = Vec::with_capacity(jobs.len());
+                for h in handles {
+                    all.extend(h.join().expect("prewarm decode worker panicked")?);
+                }
+                Ok(all)
+            })?
+        };
+        let n = decoded.len();
+        for (id, bytes) in decoded {
+            self.decoded_cache.insert(id, bytes);
+        }
+        Ok(n)
+    }
+
     pub fn with_decoded_chunk<R>(
         &mut self,
         chunk_id: u64,
