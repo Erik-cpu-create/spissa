@@ -398,12 +398,44 @@ fn accumulate_fused_raw_bf16_chunk_batch1(
     )
 }
 
-/// R175: pooled batched (batch>=2) bf16 GEMV for the bf16-resident PREFILL. Reads each
-/// bf16 weight row ONCE and dots it against all `batch` activation rows, scattering into
-/// `output[t*out + r]` (token-major, matching the generic path). Full rows are fanned
-/// across the REEPOOL (each task owns disjoint output rows `r`); the partial first/last
-/// rows at chunk boundaries run serially. Avoids the generic path's bf16->f32 materialize
-/// + un-pooled scalar matmul. Output equals the serial f32 path up to f32 accumulation order.
+/// NEON f32·f32 dot (2 FMA chains), scalar tail. Used by the batched bf16 prefill after
+/// the weight row is converted to f32 once (R176).
+#[inline]
+fn f32_dot(w: &[f32], x: &[f32], n: usize) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let (mut a0, mut a1) = (vdupq_n_f32(0.0), vdupq_n_f32(0.0));
+        let (wp, xp) = (w.as_ptr(), x.as_ptr());
+        let mut i = 0;
+        while i + 8 <= n {
+            a0 = vfmaq_f32(a0, vld1q_f32(wp.add(i)), vld1q_f32(xp.add(i)));
+            a1 = vfmaq_f32(a1, vld1q_f32(wp.add(i + 4)), vld1q_f32(xp.add(i + 4)));
+            i += 8;
+        }
+        let mut s = vaddvq_f32(vaddq_f32(a0, a1));
+        while i < n {
+            s += w[i] * x[i];
+            i += 1;
+        }
+        s
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let mut s = 0.0f32;
+        for i in 0..n {
+            s += w[i] * x[i];
+        }
+        s
+    }
+}
+
+/// R175/R176: pooled batched (batch>=2) bf16 GEMV for the bf16-resident PREFILL. For each
+/// output row, convert the bf16 weight row to f32 ONCE (R176 — not once per token, which
+/// made long-context prefill O(batch) in conversions: 321-token prefill was 85s), then
+/// `batch` f32 dots into `output[t*out + r]` (token-major). Full rows fan across the
+/// REEPOOL (disjoint output rows); partial chunk-boundary rows run serially. Avoids the
+/// generic path's bf16->f32 materialize + un-pooled matmul; equals it up to f32 order.
 fn accumulate_fused_raw_bf16_chunk_batch_n(
     input: &[f32],
     output: &mut [f32],
@@ -455,10 +487,15 @@ fn accumulate_fused_raw_bf16_chunk_batch_n(
         let es = element_start;
         let out_base = DisjointMut(output.as_mut_ptr());
         let work = |lo: usize, hi: usize| {
+            let mut wf32 = vec![0f32; n]; // per-task scratch, reused across rows
             for r in lo..hi {
                 let wrow = &raw_bytes[(r * n - es) * 2..(r * n - es + n) * 2];
+                // R176: convert the bf16 row to f32 ONCE, then reuse for all `batch` dots.
+                for (i, wv) in wf32.iter_mut().enumerate() {
+                    *wv = f32::from_bits((u16::from_le_bytes([wrow[2 * i], wrow[2 * i + 1]]) as u32) << 16);
+                }
                 for t in 0..batch {
-                    let d = bf16_row_dot_f32(&input[t * n..t * n + n], wrow, n);
+                    let d = f32_dot(&wf32, &input[t * n..t * n + n], n);
                     // SAFETY: each task owns a disjoint set of rows `r`, so (t,r) is unique.
                     unsafe { *out_base.at(t * out + r) += d };
                 }
