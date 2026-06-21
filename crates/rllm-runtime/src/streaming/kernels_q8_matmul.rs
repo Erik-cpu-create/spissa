@@ -424,40 +424,30 @@ pub(crate) fn accumulate_q8_0_full_tensor_int8_batch1(
     // Quantize the activation row to int8 ONCE for the whole matmul.
     let (act_i8, act_scales) = quantize_input_q8_blocks(input, 1, in_features);
 
-    // batch=1 decode GEMV: default to performance cores on big.LITTLE (the per-layer
-    // barrier makes E-cores a drag — see `decode_runtime_threads`). RLLM_THREADS overrides.
-    let threads = decode_runtime_threads();
-    if threads <= 1 || out_features < 2 * MIN_ROWS_PER_PARALLEL_Q8_PREFILL {
+    // batch=1 decode GEMV: REEPOOL persistent workers + work-stealing over row
+    // chunks (R172). The old per-call `thread::scope` spawned OS threads ~once per
+    // projection (~182/token) — that spawn dominated on mobile schedulers (measured:
+    // single-thread BEAT 2-thread). Amortizing spawn via the persistent pool lets the
+    // cores actually help (microbench 1.8 -> 4.7 GB/s). RLLM_THREADS=1 -> serial inline.
+    let pool = decode_pool();
+    if pool.size() <= 1 || out_features < 2 * MIN_ROWS_PER_PARALLEL_Q8_PREFILL {
         sdot_int8_batch1_rows_range(output, q8_bytes, &act_i8, &act_scales, 0, blocks_per_row);
         return Ok(());
     }
-
-    let workers = threads
-        .min(out_features / MIN_ROWS_PER_PARALLEL_Q8_PREFILL)
+    // Oversubscribe ~4x the pool so fast P-cores steal more tasks than slow E-cores.
+    let chunk_rows = (out_features / (pool.size() * 4))
+        .max(MIN_ROWS_PER_PARALLEL_Q8_PREFILL)
         .max(1);
-    let rows_per_worker = out_features.div_ceil(workers);
-    std::thread::scope(|scope| {
-        let act_i8 = &act_i8;
-        let act_scales = &act_scales;
-        let mut rest = &mut output[..];
-        let mut base_row = 0usize;
-        while base_row < out_features {
-            let rows = rows_per_worker.min(out_features - base_row);
-            let (chunk, tail) = rest.split_at_mut(rows);
-            rest = tail;
-            let worker_base = base_row;
-            scope.spawn(move || {
-                sdot_int8_batch1_rows_range(
-                    chunk,
-                    q8_bytes,
-                    act_i8,
-                    act_scales,
-                    worker_base,
-                    blocks_per_row,
-                );
-            });
-            base_row += rows;
-        }
+    let n_tasks = out_features.div_ceil(chunk_rows);
+    let out_base = DisjointMut(output.as_mut_ptr());
+    let act_i8 = &act_i8;
+    let act_scales = &act_scales;
+    pool.parallel_for(n_tasks, |t| {
+        let base = t * chunk_rows;
+        let rows = chunk_rows.min(out_features - base);
+        // SAFETY: tasks own disjoint row ranges [base, base+rows) of `output`.
+        let chunk = unsafe { std::slice::from_raw_parts_mut(out_base.at(base), rows) };
+        sdot_int8_batch1_rows_range(chunk, q8_bytes, act_i8, act_scales, base, blocks_per_row);
     });
     Ok(())
 }

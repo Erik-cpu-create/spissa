@@ -758,6 +758,7 @@ include!("attention.rs");
 include!("block.rs");
 include!("validation.rs");
 include!("argmax.rs");
+include!("decode_pool.rs");
 include!("kernels.rs");
 include!("kernels_q8.rs");
 include!("kernels_q8_matmul.rs");
