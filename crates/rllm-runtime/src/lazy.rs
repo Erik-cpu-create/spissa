@@ -862,12 +862,15 @@ impl LazyRllmModel {
         if jobs.is_empty() {
             return Ok(0);
         }
-        let nthreads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
+        let nthreads = std::env::var("RLLM_THREADS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
             .min(jobs.len())
             .max(1);
         let part = jobs.len().div_ceil(nthreads);
+        let prewarm_start = Instant::now();
         // Decode in parallel; `reader` is an immutable borrow that ends with this block,
         // before the `&mut self` cache insert below.
         let decoded: Vec<(u64, Vec<u8>)> = {
@@ -902,9 +905,16 @@ impl LazyRllmModel {
             })?
         };
         let n = decoded.len();
+        let total: usize = decoded.iter().map(|(_, b)| b.len()).sum();
         for (id, bytes) in decoded {
             self.decoded_cache.insert(id, bytes);
         }
+        eprintln!(
+            "[prewarm-decode] {n} chunks -> {:.0} MB in {:.1}s ({nthreads} threads, {:.0} MB/s)",
+            total as f64 / 1e6,
+            prewarm_start.elapsed().as_secs_f64(),
+            total as f64 / 1e6 / prewarm_start.elapsed().as_secs_f64()
+        );
         Ok(n)
     }
 
