@@ -2,20 +2,21 @@
 // int8 dot, activation & weight panel packing. matmul -> kernels_q8_matmul.rs,
 // helpers+f32-fallback -> kernels_q8_support.rs (R168 split). include!d into mod.rs.
 
-/// Opt-in (default off) int8-activation path for Q8 matmul parity validation.
-/// When enabled, activations are quantized to int8 per 32-element segment and the
-/// dot runs as int8×int8 (ARM `sdot`) instead of dequantizing the weight to f32.
-/// This is the REEBORN-Q8 direction gated behind `RLLM_Q8_ACTIVATION` so the exact
-/// f32 path stays default until token/logit parity is confirmed on a real model.
+/// REEBORN-Q8 NEON fast path: int8×int8 `sdot` (Q8) / vectorized `vfmaq` (bf16)
+/// dot instead of the scalar f32-dequant fallback. R171: **default ON** — ~9× faster
+/// and token-parity-validated (q8 near-exact quant-only diff; bf16 argmax-preserving).
+/// Opt OUT with `RLLM_Q8_ACTIVATION=0`/`false`/`no`/`off` to force the scalar path.
 fn q8_activation_path_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var(Q8_ACTIVATION_ENV)
-                .ok()
-                .map(|v| v.trim().to_ascii_lowercase()),
-            Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "on")
-        )
+        match std::env::var(Q8_ACTIVATION_ENV)
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase())
+        {
+            // Explicit opt-out only; unset / empty / any other value → fast path on.
+            Some(v) => !matches!(v.as_str(), "0" | "false" | "no" | "off"),
+            None => true,
+        }
     })
 }
 
