@@ -371,17 +371,13 @@ pub fn streaming_tile_linear_from_model(
                     weight_name,
                 )
             })?;
-        } else if tensor.dtype == rllm_container::DType::Bf16 && config.linear.batch == 1 {
-            // bf16 + batch=1: run the fused bf16 kernel for BOTH raw and compressed
-            // codecs. Raw chunks are read zero-copy from the mmap; compressed chunks
-            // (rANS / bit-plane) are decoded to bf16 via `with_decoded_chunk` — which
-            // caches the decoded bytes once when RLLM_DECODE_RESIDENT is set — and then
-            // feed the SAME fused kernel, instead of materializing an f32 scratch and
-            // running the generic f32 matmul (the old compressed-bf16 path). Lossless:
-            // a compressed bf16 chunk decodes to the identical bf16 weights as the raw
-            // chunk, so the output is bit-identical to the raw-bf16 path (same kernel,
-            // same exact weights). This closes the rANS/bit-plane in-RAM speed gap to
-            // the raw-bf16 ceiling — decoded bf16 IS bf16, so it equals (never beats) it.
+        } else if tensor.dtype == rllm_container::DType::Bf16 {
+            // bf16: fused bf16 kernel for BOTH raw and compressed codecs. Raw chunks are
+            // read zero-copy from the mmap; compressed chunks (rANS / bit-plane) decode to
+            // bf16 via `with_decoded_chunk` (cached when RLLM_DECODE_RESIDENT) and feed the
+            // SAME fused kernel — never the generic f32-materialize matmul. batch=1 decode
+            // uses the row-blocked kernel (R161); batch>=2 prefill uses the pooled batched
+            // kernel (R175). Lossless: decoded bf16 IS bf16, so output equals the raw path.
             let kernel = |bf16_bytes: &[u8], _budget: &mut MemoryBudget| -> Result<()> {
                 if bf16_bytes.len() != expected_chunk_bytes {
                     return Err(RuntimeError::InvalidTensorData(format!(
@@ -391,14 +387,24 @@ pub fn streaming_tile_linear_from_model(
                         expected_chunk_bytes
                     )));
                 }
-                accumulate_fused_raw_bf16_chunk_batch1(
-                    input,
-                    &mut output,
-                    bf16_bytes,
-                    element_start,
-                    config.linear,
-                    weight_name,
-                )
+                if config.linear.batch == 1 {
+                    accumulate_fused_raw_bf16_chunk_batch1(
+                        input,
+                        &mut output,
+                        bf16_bytes,
+                        element_start,
+                        config.linear,
+                        weight_name,
+                    )
+                } else {
+                    accumulate_fused_raw_bf16_chunk_batch_n(
+                        input,
+                        &mut output,
+                        bf16_bytes,
+                        element_start,
+                        config.linear,
+                    )
+                }
             };
             if chunk.codec_id == "rtc-raw-v1" {
                 model.with_raw_chunk(chunk.chunk_id, budget, kernel)?;
