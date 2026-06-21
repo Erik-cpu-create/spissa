@@ -466,6 +466,45 @@ fn accumulate_fused_raw_16bit_chunk_batch1_row_blocked(
     // the NEON path differs only in f32 accumulation order (a few ULPs).
     let fast_bf16 = q8_activation_path_enabled() && matches!(dtype, rllm_container::DType::Bf16);
     let bf16_act = fast_bf16.then(|| Bf16DotActivation::new(input));
+
+    // R173: pool the full-row NEON bf16 dots across the persistent decode pool.
+    // After the prologue `global_idx` is row-aligned, so [first_full, last_full) are
+    // whole output rows fully contained in this chunk — each row is touched only by
+    // the chunk that fully contains it, so the per-row writes are disjoint. Pooling
+    // these recovers the multi-core throughput the bf16-resident (rANS/raw-bf16)
+    // decode path was missing (it ran single-threaded). When it runs it consumes all
+    // full rows; the main 4-row-block loop below then no-ops and the tail handles the
+    // partial last row. Bit-identical to the serial path (per-row dot, no reorder).
+    #[cfg(target_arch = "aarch64")]
+    if let Some(act) = &bf16_act {
+        let n = config.in_features;
+        debug_assert_eq!(global_idx % n, 0, "prologue must leave global_idx row-aligned");
+        let first_full = global_idx / n;
+        let last_full = element_end / n;
+        let full_rows = last_full.saturating_sub(first_full);
+        let pool = decode_pool();
+        if pool.size() > 1 && full_rows >= 2 * MIN_ROWS_PER_PARALLEL_ARGMAX {
+            let chunk_rows = (full_rows / (pool.size() * 4)).max(MIN_ROWS_PER_PARALLEL_ARGMAX);
+            let n_tasks = full_rows.div_ceil(chunk_rows);
+            let out_base = DisjointMut(output.as_mut_ptr());
+            let es = element_start;
+            pool.parallel_for(n_tasks, |t| {
+                let lo = first_full + t * chunk_rows;
+                let hi = (lo + chunk_rows).min(last_full);
+                for r in lo..hi {
+                    let local = r * n - es;
+                    let d = act.row_dot(&raw_bytes[local * 2..(local + n) * 2], n);
+                    // SAFETY: row r is fully in this chunk and unique to this task's
+                    // range, so this is the only write to output[r] (disjoint).
+                    unsafe { *out_base.at(r) += d };
+                }
+            });
+            let consumed = full_rows * n;
+            local_idx += consumed;
+            global_idx += consumed;
+        }
+    }
+
     while local_idx + row_block_elements <= weight_elements {
         let out_feature = global_idx / config.in_features;
         if out_feature + 3 >= config.out_features {
