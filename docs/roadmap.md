@@ -183,7 +183,7 @@
 - [x] Fused tile-linear matches full-decode linear output and succeeds under a transient budget where full f32 chunk scratch fails
 - [x] Tiled MLP/attention routing succeeds under transient budgets where full f32 chunk scratch fails, while block/tiny/GPT-NeoX logits/token tests still pass
 - [x] Repacked local Pythia-70M with explicit `config.json` + `tokenizer.json`, generated one token from `Hello`, and measured process RSS via `/usr/bin/time -l`
-- [x] Fixed-token RLLM logits match HuggingFace/PyTorch reference top-1/top-10 on tested Pythia-70M prompts; see [`docs/phase77-hf-logits-comparison.md`](phase77-hf-logits-comparison.md)
+- [x] Fixed-token RLLM logits match HuggingFace/PyTorch reference top-1/top-10 on tested Pythia-70M prompts; see [`docs/archive/phase77-hf-logits-comparison.md`](archive/phase77-hf-logits-comparison.md)
 
 **Next implementation slice:**
 - Continue Phase 7 from the Phase 7.12B projection-reuse foundation: generic eight-row tiled-linear accumulation improves the measured Pythia-160M projection bottleneck without model-specific code. Next either pursue another measured dense-projection slice or start Phase 8 LLaMA-family adapter work if architecture breadth becomes the priority.
@@ -201,7 +201,7 @@
 - Runtime range: 4.47–83.41s total, ~4.47–5.29s/token in release
 - Memory range: 88.62–94.62 MiB max RSS, 87.23–93.23 MiB peak memory footprint, 48.00 MiB peak tracked transient budget
 - Planner comparison: 16MiB tile-stream planned peak is 44.77 MiB; measured release RSS peak is ~2.11× planner because RSS includes process/runtime overhead outside `MemoryBudget`
-- Full table: [`docs/phase76-release-rss-benchmark.md`](phase76-release-rss-benchmark.md)
+- Full table: [`docs/archive/phase76-release-rss-benchmark.md`](archive/phase76-release-rss-benchmark.md)
 
 ---
 
