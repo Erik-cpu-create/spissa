@@ -398,6 +398,97 @@ fn accumulate_fused_raw_bf16_chunk_batch1(
     )
 }
 
+/// R175: pooled batched (batch>=2) bf16 GEMV for the bf16-resident PREFILL. Reads each
+/// bf16 weight row ONCE and dots it against all `batch` activation rows, scattering into
+/// `output[t*out + r]` (token-major, matching the generic path). Full rows are fanned
+/// across the REEPOOL (each task owns disjoint output rows `r`); the partial first/last
+/// rows at chunk boundaries run serially. Avoids the generic path's bf16->f32 materialize
+/// + un-pooled scalar matmul. Output equals the serial f32 path up to f32 accumulation order.
+fn accumulate_fused_raw_bf16_chunk_batch_n(
+    input: &[f32],
+    output: &mut [f32],
+    raw_bytes: &[u8],
+    element_start: usize,
+    config: StreamingLinearConfig,
+) -> Result<()> {
+    let n = config.in_features;
+    let out = config.out_features;
+    let batch = config.batch;
+    let weight_elements = out
+        .checked_mul(n)
+        .ok_or_else(|| RuntimeError::Shape("weight element count overflow".to_string()))?;
+    let chunk_elems = raw_bytes.len() / 2;
+    let element_end = element_start
+        .checked_add(chunk_elems)
+        .ok_or_else(|| RuntimeError::Shape("weight chunk element range overflow".to_string()))?;
+    if element_end > weight_elements {
+        return Err(RuntimeError::InvalidTensorData(
+            "bf16 batch-n chunk exceeds weight element count".to_string(),
+        ));
+    }
+
+    // Partial row at `global` (spans only `row_len` of the row): accumulate each token.
+    let partial = |output: &mut [f32], local: usize, global: usize, row_len: usize| {
+        let r = global / n;
+        let in_f = global % n;
+        for t in 0..batch {
+            let inp = &input[t * n + in_f..t * n + in_f + row_len];
+            let d = bf16_row_dot_f32(inp, &raw_bytes[local * 2..(local + row_len) * 2], row_len);
+            output[t * out + r] += d;
+        }
+    };
+
+    let mut local = 0usize;
+    let mut global = element_start;
+    // prologue: tail of a row begun in a previous chunk.
+    while local < chunk_elems && global % n != 0 {
+        let row_len = (n - global % n).min(chunk_elems - local);
+        partial(output, local, global, row_len);
+        local += row_len;
+        global += row_len;
+    }
+    // main: whole rows [first, last), fanned across the pool (disjoint output rows).
+    let first = global / n;
+    let last = element_end / n;
+    let full = last.saturating_sub(first);
+    if full > 0 {
+        let es = element_start;
+        let out_base = DisjointMut(output.as_mut_ptr());
+        let work = |lo: usize, hi: usize| {
+            for r in lo..hi {
+                let wrow = &raw_bytes[(r * n - es) * 2..(r * n - es + n) * 2];
+                for t in 0..batch {
+                    let d = bf16_row_dot_f32(&input[t * n..t * n + n], wrow, n);
+                    // SAFETY: each task owns a disjoint set of rows `r`, so (t,r) is unique.
+                    unsafe { *out_base.at(t * out + r) += d };
+                }
+            }
+        };
+        let pool = decode_pool();
+        if pool.size() > 1 && full >= 2 * MIN_ROWS_PER_PARALLEL_ARGMAX {
+            let chunk_rows = (full / (pool.size() * 4)).max(MIN_ROWS_PER_PARALLEL_ARGMAX);
+            let n_tasks = full.div_ceil(chunk_rows);
+            pool.parallel_for(n_tasks, |k| {
+                let lo = first + k * chunk_rows;
+                let hi = (lo + chunk_rows).min(last);
+                work(lo, hi);
+            });
+        } else {
+            work(first, last);
+        }
+        local += full * n;
+        global += full * n;
+    }
+    // epilogue: head of a row continued in the next chunk.
+    while local < chunk_elems {
+        let row_len = (n - global % n).min(chunk_elems - local);
+        partial(output, local, global, row_len);
+        local += row_len;
+        global += row_len;
+    }
+    Ok(())
+}
+
 fn accumulate_fused_raw_16bit_chunk_batch1_row_blocked(
     input: &[f32],
     output: &mut [f32],
