@@ -261,273 +261,50 @@ Not yet implemented:
 
 ```bash
 # Build
-cargo build
+cargo build --release
 
 # Run tests
 cargo test
 
-# Check CLI/system info
-cargo run -- doctor
+# Interactive chat — codec-agnostic (rANS/q8/bf16), auto-detects Gemma/Llama
+RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-rans.rllm           # lossless
+RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-q8-raw.rllm --fast  # q8, fastest
+#   add --low-ram to stream the embedding (>RAM regime)
+# convenience wrappers (Gemma 4B / Llama 1B|3B):  ./try-gemma.sh chat   |   ./try-llama.sh chat
 
-# Interactive LLaMA-family token-native session
-cargo run --release -p rllm-cli --bin llama-test -- \
-  --model models/SmolLM2-135M-raw.rllm \
-  --ctx 2048 \
-  --max-new-tokens 64
+# Pack a HF checkpoint into .rllm (choose a codec by the trade-off you want)
+./target/release/rllm pack <model.safetensors | *.index.json | model-dir> \
+  --out models/<name>.rllm \
+  --config <config.json> --tokenizer <tokenizer.json> \
+  --codec rans            # rans / bitplane = lossless bf16 ; raw = zero-copy (use with --quantize)
+#   --quantize q8_transformer_keep_io   # lossy q8 (pair with `--codec raw` for the fast path)
 
-# Llama exact/raw baseline. This is intentionally slow on CPU-only and is used
-# as the quality/reference path, not the 30-40 tok/s experimental speed path.
-cargo run --release -p rllm-cli --bin llama-test -- \
-  --model models/Llama-3.2-1B-Instruct-raw.rllm \
-  --ctx 2048 \
-  --max-new-tokens 64
+# Inspect metadata + compression stats
+./target/release/rllm inspect models/<name>.rllm
 
-# R58 Llama3 Instruct chat-template baseline. Use this when checking whether
-# the model/runtime can behave like chat before enabling experimental speed.
-cargo run --release -p rllm-cli --bin llama-test -- \
-  --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
-  --ctx 2048 \
-  --max-new-tokens 64 \
-  --chat-template llama3 \
-  --system-prompt "You are a concise assistant."
+# Verify lossless round-trip vs the original safetensors
+./target/release/rllm verify <model.safetensors> models/<name>.rllm
 
-# Experimental speed artifact for Llama 3.2 1B. Use this artifact and the env
-# flags below when testing the sparse research path; running the raw artifact
-# without these flags will stay on the slow exact path.
-cargo build --release -p rllm-cli --bin rllm --bin llama-test
-target/release/rllm pack \
-  models/downloads/llama-3.2-1b-instruct-unsloth/model.safetensors \
-  --out models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
-  --codec raw \
-  --chunk-size 1mb \
-  --config models/downloads/llama-3.2-1b-instruct-unsloth/config.json \
-  --tokenizer models/downloads/llama-3.2-1b-instruct-unsloth/tokenizer.json \
-  --llama-mlp-input-tiles \
-  --llama-attention-input-tiles \
-  --llama-lm-head-input-tiles \
-  --input-tile-features 16
-printf 'good morning\nexit\n' | \
-  RLLM_AIP_INPUT_TILES=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed \
-  RLLM_AIP_TOPK=4 RLLM_AIP_REPEAT_RUN_LIMIT=2 \
-  target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
-    --ctx 2048 \
-    --max-new-tokens 64
+# Measure quantization loss (q8/q4 vs lossless) on the real weights
+./target/release/quant-error models/<name>.rllm
 
-# Current R57 experimental speed-floor preset. This builds on the R43 sparse
-# path with a tiny edge-attention locality cache. It is still a research path:
-# output quality remains a limitation and should not be treated as chat-ready.
-printf 'good morning\nexit\n' | \
-  RLLM_AIP_INPUT_TILES=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed \
-  RLLM_AIP_TOPK=4 RLLM_AIP_REPEAT_RUN_LIMIT=2 \
-  RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI=75 \
-  RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE=1 \
-  RLLM_AIP_LM_HEAD_NOVELTY_WINDOW=4 \
-  RLLM_AIP_LM_HEAD_NOVELTY_GAP_MILLI=100 \
-  RLLM_AIP_LM_HEAD_NOVELTY_RETENTION_MILLI=100 \
-  RLLM_AIP_ATTENTION_LOCALITY_WINDOW=8 \
-  RLLM_AIP_ATTENTION_LOCALITY_EXTRA=1 \
-  target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
-    --ctx 2048 \
-    --max-new-tokens 64
+# Low-RAM streaming / memory planning (metadata only; no full decode)
+./target/release/rllm run models/<name>.rllm --memory-budget 100mb --ctx 1024 --mode tile-stream
 
-# Optional projection-specific AIP knobs for R31/R32 experiments:
-# RLLM_AIP_ATTENTION_TOPK, RLLM_AIP_MLP_TOPK, RLLM_AIP_DOWN_TOPK,
-# RLLM_AIP_LM_HEAD_TOPK.
-# Optional R32 layer-edge probes:
-# RLLM_AIP_EDGE_LAYERS, RLLM_AIP_EDGE_TOPK.
-# Optional R33 repeat-margin controller:
-# RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI=500
-# Optional R35 adaptive repeat-margin controller:
-# RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI=50
-# RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE=1
-# Optional R36 phrase novelty controller:
-# RLLM_AIP_LM_HEAD_REPEAT_MARGIN_MILLI=75
-# RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE=1
-# RLLM_AIP_LM_HEAD_NOVELTY_WINDOW=4
-# Optional R37 confidence-gated novelty:
-# RLLM_AIP_LM_HEAD_NOVELTY_GAP_MILLI=100
-# Optional R48 exact prompt prefill probe:
-# RLLM_AIP_EXACT_PREFILL=1
-# Optional R50 periodic exact LM-head diagnostic probe. This is expensive and
-# rejected as a speed preset; use only when measuring sparse-vs-exact token
-# selection drift.
-# RLLM_AIP_LM_HEAD_EXACT_EVERY=8
-# Optional R53/R54 confidence-gated candidate rescore probes. R54 preserves
-# repeat/novelty controllers, but this path is still rejected as chat-ready.
-# RLLM_AIP_LM_HEAD_RESCORE=2
-# RLLM_AIP_LM_HEAD_RESCORE_GAP_MILLI=250
-# Optional R55 exact edge-layer hidden-state calibration probe. It improves
-# diversity/repetition but is rejected as a speed preset.
-# RLLM_AIP_EXACT_EDGE_LAYERS=1
-# Optional R56 projection-filtered exact edge probe:
-# RLLM_AIP_EXACT_EDGE_PROJECTION=attention
-# Accepted values: all, attention, attn, mlp-gate-up, gate-up, gateup,
-# mlp-down, down.
-# Optional R57 edge attention locality cache. Retained preset:
-# RLLM_AIP_ATTENTION_LOCALITY_WINDOW=8
-# RLLM_AIP_ATTENTION_LOCALITY_EXTRA=1
-# Rejected wide probe:
-# RLLM_AIP_ATTENTION_LOCALITY_WINDOW=16
-# RLLM_AIP_ATTENTION_LOCALITY_EXTRA=4
-
-# Force the runtime worker count for CPU-only benchmarks.
-RLLM_THREADS=1 cargo run --release -p rllm-cli --bin llama-test -- \
-  --model models/SmolLM2-135M-raw.rllm \
-  --ctx 2048 \
-  --max-new-tokens 16
-
-# Pack a safetensors model into .rllm
-cargo run -- pack ./models/pythia-70m/model.safetensors \
-  --out ./models/pythia-70m.rllm \
-  --chunk-size 32mb
-
-# Inspect metadata and compression stats
-cargo run -- inspect ./models/pythia-70m.rllm
-
-# Verify lossless round-trip against the original safetensors file
-cargo run -- verify ./models/pythia-70m/model.safetensors ./models/pythia-70m.rllm
-
-# Full-decode runtime smoke test (loads tensors into f32 runtime memory)
-cargo run -- run ./models/pythia-70m.rllm
-
-# Low-RAM tile-stream planning (metadata only; no full tensor decode)
-cargo run -- run ./models/pythia-70m.rllm \
-  --memory-budget 100mb \
-  --ctx 1024 \
-  --mode tile-stream
-
-# Token generation + external RSS measurement on macOS release binary
-cargo build --release
-/usr/bin/time -l target/release/rllm run ./models/pythia-70m.rllm \
-  --prompt 'Hello' \
-  --max-new-tokens 1 \
-  --ctx 128 \
-  --memory-budget 100mb
-
-# Repeatable release RSS benchmark matrix (native `rllm bench`, no Python)
-cargo build --release
-target/release/rllm bench release-rss \
-  --artifact models/pythia-70m-phase76-16mb.rllm \
-  --tokens 1,4,8,16 \
-  --ctx 128,512,1024 \
-  --memory-budget 100mb
-
-# Phase 7.7 fixed-token HF/PyTorch logits comparison
-uv run --with torch --with transformers --with safetensors \
-  scripts/phase77_compare_logits.py \
-  --token-ids 12092,13 \
-  --ctx 128 \
-  --memory-budget 100mb
-
-# Phase 7.9A RAMA trace profiler for generation bottlenecks
-target/release/rllm run ./models/pythia-70m-phase78d-tileblocks.rllm \
-  --token-ids 12092 \
-  --max-new-tokens 1 \
-  --ctx 128 \
-  --memory-budget 100mb \
-  --rama-trace target/phase79a/rama_trace.json
-
-# Phase 7.9C low-ram-fast raw/tile-block benchmark profile
-target/release/rllm pack ./models/pythia-70m/model.safetensors \
-  --out ./models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
-  --codec raw \
-  --tile-block-elements 65536 \
-  --config ./models/pythia-70m/config.json \
-  --tokenizer ./models/pythia-70m/tokenizer.json
-target/release/rllm bench low-ram-fast \
-  --artifact ./models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
-  --skip-pack \
-  --skip-verify \
-  --rama-integrity verify-once \
-  --tokens 1,4,8,16 \
-  --ctx 128,512,1024 \
-  --memory-budget 100mb
-
-# Real long-prompt benchmark (actual input token counts; writes timing JSON under <out-dir>/timing)
-target/release/rllm bench long-prompt \
-  --artifact ./models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
-  --input-tokens 1,128,512,1024 \
-  --max-new-tokens 1,4,16 \
-  --ctx 2048 \
-  --rama-integrity verify-once \
-  --memory-budget 100mb
-
-# RAMA chunked prefill timing/optimization sweep
-target/release/rllm bench prefill-timing \
-  --artifact ./models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
-  --input-tokens 512,1024 \
-  --max-new-tokens 16 \
-  --prefill-chunks full,64 \
-  --ctx 2048 \
-  --rama-integrity verify-once \
-  --memory-budget 100mb
-
-# Deep prefill timing matrix (used for the Phase 7.10B–E optimization passes).
-# Pass --out-dir to keep per-experiment CSV/Markdown/timing separate.
-target/release/rllm bench long-prompt \
-  --artifact ./models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
-  --input-tokens 512,1024 \
-  --max-new-tokens 16 \
-  --ctx 2048 \
-  --rama-integrity verify-once \
-  --out-dir target/long-prompt-optimized \
-  --memory-budget 100mb
-
-# Phase 7.11A Pythia-160M GPT-NeoX/Pythia-family scale validation
-hf download EleutherAI/pythia-160m \
-  model.safetensors config.json tokenizer.json tokenizer_config.json special_tokens_map.json \
-  --local-dir models/pythia-160m
-target/release/rllm pack models/pythia-160m/model.safetensors \
-  --out models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
-  --codec raw \
-  --tile-block-elements 65536 \
-  --config models/pythia-160m/config.json \
-  --tokenizer models/pythia-160m/tokenizer.json
-target/release/rllm verify \
-  models/pythia-160m/model.safetensors \
-  models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm
-target/release/rllm bench long-prompt \
-  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
-  --input-tokens 1,128,512,1024 \
-  --max-new-tokens 1,4,16 \
-  --ctx 2048 \
-  --rama-integrity verify-once \
-  --memory-budget 100mb
-
-# Phase 7.11B Pythia-160M prefill window / memory-budget sweep
-target/release/rllm bench prefill-timing \
-  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
-  --out-dir target/phase711b-pythia160m/chunk-sweep \
-  --input-tokens 512,1024 \
-  --max-new-tokens 16 \
-  --prefill-chunks 8,16,32,64,128,256 \
-  --ctx 2048 \
-  --memory-budget 100mb \
-  --rama-integrity verify-once
+# System / CLI info
+./target/release/rllm doctor
 ```
 
-`models/` is ignored because model files and `.rllm` outputs are large reproducible local artifacts.
-See [docs/phase76-release-rss-benchmark.md](docs/phase76-release-rss-benchmark.md) for the measured matrix.
-See [docs/phase77-hf-logits-comparison.md](docs/phase77-hf-logits-comparison.md) for the HF/PyTorch reference comparison.
-See [docs/phase78-range-decode-foundation.md](docs/phase78-range-decode-foundation.md) for the range-decode/checksum foundation.
-See [docs/phase78-tileblock-rss-benchmark.md](docs/phase78-tileblock-rss-benchmark.md) for the measured tile-block RSS matrix.
-See [docs/phase79-rama-trace-profiler.md](docs/phase79-rama-trace-profiler.md) for the opt-in RAMA trace profiler and bottleneck evidence.
-See [docs/phase79-embedding-row-recall.md](docs/phase79-embedding-row-recall.md) for the measured selective embedding row recall speedup.
-See [docs/phase79-low-ram-fast-runtime-layout.md](docs/phase79-low-ram-fast-runtime-layout.md) for the measured raw/tile-block low-ram-fast profile and verify-once integrity benchmark.
-See [docs/phase79-long-prompt-benchmark.md](docs/phase79-long-prompt-benchmark.md) for the real long-prompt prefill/context benchmark and next bottleneck evidence.
-See [docs/phase79e-rama-prefill-chunking.md](docs/phase79e-rama-prefill-chunking.md) for chunked prefill timing and long-prompt improvements.
-See [docs/phase710a-row-span-linear-accumulation.md](docs/phase710a-row-span-linear-accumulation.md) for row-span tiled-linear optimization.
-See [docs/phase710b-rama-prefill-homeostasis.md](docs/phase710b-rama-prefill-homeostasis.md) for the post-rowspan matrix and measured 32-token prefill default.
-See [docs/phase710c-deep-prefill-timing.md](docs/phase710c-deep-prefill-timing.md) for deep prefill sub-phase timing and the measured next bottleneck.
-See [docs/phase710d-mlp-prefill-row-reuse.md](docs/phase710d-mlp-prefill-row-reuse.md) for MLP prefill split timing, rejected optimizations, and the accepted four-row accumulation reuse speedup.
-See [docs/phase710e-attention-row-slice.md](docs/phase710e-attention-row-slice.md) for attention split timing, rejected softmax optimization, and the accepted K/V row-slice score/context speedup.
-See [docs/phase711a-pythia160m-scale-validation.md](docs/phase711a-pythia160m-scale-validation.md) for GPT-NeoX/Pythia-family scale validation on Pythia-160M.
-See [docs/phase711b-pythia160m-prefill-window-sweep.md](docs/phase711b-pythia160m-prefill-window-sweep.md) for the Pythia-160M prefill window and transient memory-budget sweep.
-See [docs/phase712a-shape-budget-prefill-policy.md](docs/phase712a-shape-budget-prefill-policy.md) for the generic shape/budget-aware RAMA prefill policy.
-See [docs/phase712b-eight-row-projection-reuse.md](docs/phase712b-eight-row-projection-reuse.md) for the generic eight-row projection reuse optimization.
+### Useful environment variables
 
+- `RLLM_INTEGRITY=unchecked|verify-once|strict` — skip / once-per-process / per-recall SHA-256 verification.
+- `RLLM_THREADS=N` — cap worker threads (decode auto-pins to performance cores on big.LITTLE; see [docs/android-termux.md](docs/android-termux.md)).
+- `RLLM_DECODE_RESIDENT=1` — decode weights once at load and cache (bf16-class steady speed; the default inside `rllm chat`).
+- `RLLM_STREAM_EMBEDDING=1` — stream the tied embedding instead of holding it resident (resident ≈ compressed size, for the >RAM regime).
+- `--fast` (chat) — q8 turbo: `mlock` residency + int8-activation kernels.
+
+> The historical Pythia/RAMA phase-7x benchmark recipes and the experimental sparse-path
+> (AIP) env flags now live under [docs/archive/](docs/archive/).
 
 ## Architecture
 
