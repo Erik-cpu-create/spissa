@@ -44,7 +44,7 @@ Pack command:
 
 ```bash
 target/release/rllm pack models/pythia-160m/model.safetensors \
-  --out models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
+  --out models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa \
   --codec raw \
   --tile-block-elements 65536 \
   --config models/pythia-160m/config.json \
@@ -87,7 +87,7 @@ Verify command:
 ```bash
 target/release/rllm verify \
   models/pythia-160m/model.safetensors \
-  models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm
+  models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa
 ```
 
 Result:
@@ -103,7 +103,7 @@ Smoke command shape:
 
 ```bash
 /usr/bin/time -l target/release/rllm run \
-  models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
+  models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa \
   --token-ids 12092 \
   --ctx 128 \
   --max-new-tokens 1 \
@@ -149,7 +149,7 @@ Command:
 uv run --with torch --with transformers --with safetensors \
   scripts/phase77_compare_logits.py \
   --model-dir models/pythia-160m \
-  --rllm-artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
+  --rllm-artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa \
   --token-ids 12092 \
   --ctx 128 \
   --memory-budget 100mb \
@@ -181,7 +181,7 @@ Benchmark command shape:
 ```bash
 python3 scripts/phase79d_long_prompt_benchmark.py \
   --skip-build \
-  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
+  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa \
   --input-tokens 1,128,512,1024 \
   --max-new-tokens 1,4,16 \
   --ctx 2048 \
@@ -239,7 +239,7 @@ Matching 16-token rows:
 
 Pythia-160M validates the intended architecture boundary:
 
-- Same `.rllm` format.
+- Same `.spsa` format.
 - Same GPT-NeoX/Pythia adapter.
 - Same RAMA tiled linear, chunked prefill, verify-once, MLP row reuse, and attention row-slice kernels.
 - No model-specific Pythia-160M code path was required.

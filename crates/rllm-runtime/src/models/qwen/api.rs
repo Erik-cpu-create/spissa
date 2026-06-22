@@ -2,7 +2,7 @@
 // Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
 // distribution of this file, via any medium, is strictly prohibited.
 
-//! Qwen3.5 text adapter: build a `PreparedQwenTransformer` from `.rllm` metadata and
+//! Qwen3.5 text adapter: build a `PreparedQwenTransformer` from `.spsa` metadata and
 //! run greedy/top-p generation with heterogeneous per-layer dispatch.
 
 use crate::models::qwen::generate::validate_prepared;

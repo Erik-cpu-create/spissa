@@ -659,7 +659,7 @@ where `dump_bf16_embedding_sample` is added to `crates/rllm-runtime/src/lazy.rs`
 fn dump_bf16_embedding_sample() {
     // Dump the bf16 tied embedding of the raw Llama 1B model to /tmp for the
     // rtc-codec feasibility measurement. Needs the local artifact.
-    let path = "../../models/Llama-3.2-1B-Instruct-raw.rllm";
+    let path = "../../models/Llama-3.2-1B-Instruct-raw.spsa";
     let mut m = LazyRllmModel::open(path).unwrap();
     let name = "model.embed_tokens.weight";
     let meta = m.tensor(name).unwrap().clone();
@@ -734,7 +734,7 @@ Append a "## Feasibility result (measured)" section to
 with the measured bits/weight and decode GB/s, and a one-line GO/NO-GO call for
 R140b: GO if decode throughput is high enough that decoding ~11-bit data plus the
 matmul beats reading raw 16-bit bf16; otherwise NO-GO (record as a useful negative
-result; R140 stops at the codec, still usable for smaller lossless `.rllm` on disk).
+result; R140 stops at the codec, still usable for smaller lossless `.spsa` on disk).
 
 - [ ] **Step 5: Commit**
 

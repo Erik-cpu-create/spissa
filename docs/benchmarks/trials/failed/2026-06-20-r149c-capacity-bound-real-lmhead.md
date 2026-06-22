@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Kernel lineage: REESTREAM (R148) + REEPLANE-W6 (R149b), reused
-- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.rllm`; lm-head [262144×1152] bf16, w=6)
+- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.spsa`; lm-head [262144×1152] bf16, w=6)
 - Device: Apple aarch64, **8 GB RAM**, fast internal NVMe; cold I/O via `F_NOCACHE`
 - Verdict: **NO-GO (speed)** — with a *fair* pipelined-raw baseline, streaming the
   compressed lm-head is **0.71–0.83× (slower)** than reading raw bf16. The earlier

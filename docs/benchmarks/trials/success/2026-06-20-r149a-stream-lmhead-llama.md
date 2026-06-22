@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Kernel lineage: REESTREAM (reused from R148 — `streaming_bitplane_gemv` + sidecar writer/reader)
-- Model: Llama-3.2-1B-Instruct-raw.rllm (raw bf16; tied lm-head `model.embed_tokens.weight`, shape [vocab=128256, hidden=2048]; confirmed w=5, vocab%256==0)
+- Model: Llama-3.2-1B-Instruct-raw.spsa (raw bf16; tied lm-head `model.embed_tokens.weight`, shape [vocab=128256, hidden=2048]; confirmed w=5, vocab%256==0)
 - Verdict: **GO** (lossless integration proven on real w=5 weights)
 
 ## Scope

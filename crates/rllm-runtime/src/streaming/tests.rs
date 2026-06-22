@@ -223,7 +223,7 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("rllm-streaming-{name}-{}.rllm", std::process::id()))
+        std::env::temp_dir().join(format!("rllm-streaming-{name}-{}.spsa", std::process::id()))
     }
 
     fn write_chunked_weight(path: &std::path::Path) {

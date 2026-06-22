@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Kernel lineage: REESTREAM-RANS (R153/R154), generalized
-- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.rllm`) — all 7 layer-0 projections
+- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.spsa`) — all 7 layer-0 projections
 - Verdict: **GO** — the rANS streaming GEMV is a lossless drop-in for the resident bf16
   matmul on **every** projection shape in a real transformer layer, including the ones
   whose row count isn't a multiple of `block_rows` (o_proj/down_proj at 1152 rows). This

@@ -12,7 +12,7 @@ Avoiding materialization of the LLaMA MLP `up_proj` output and adding a direct r
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/SmolLM2-135M-raw.rllm`
+- Model/artifact: `models/SmolLM2-135M-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: MLP gate/up/down projection memory bandwidth and per-token matvec overhead
@@ -23,7 +23,7 @@ Avoiding materialization of the LLaMA MLP `up_proj` output and adding a direct r
 Commands:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.rllm' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r5-fused-up-multiply-smollm2.md'
+cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.spsa' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r5-fused-up-multiply-smollm2.md'
 ```
 
 ## Results

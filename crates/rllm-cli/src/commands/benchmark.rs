@@ -588,7 +588,7 @@ mod tests {
         let out =
             std::env::temp_dir().join(format!("rllm-benchmark-report-{}.md", std::process::id()));
         let options = BenchmarkOptions {
-            file: "model.rllm".to_string(),
+            file: "model.spsa".to_string(),
             prompts: vec!["good morning".to_string(), "who are you?".to_string()],
             runs: 1,
             ctx: 2048,

@@ -16,7 +16,7 @@ Llama 3.2 1B Q8 prefill path.
 
 - Mode: exact-lowram runtime gate
 - REE kernel lineage: `REEBUNDLE-Q8-OUTPUT2`
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Prompt: `Answer yes or no: is fire cold?`
 - Threading: `RLLM_THREADS=1`
 - Integrity: `--rama-integrity unchecked`
@@ -24,7 +24,7 @@ Llama 3.2 1B Q8 prefill path.
 - Bottleneck tag: CPU arithmetic / Q8 output-feature bundling
 
 The change is limited to normal batch>1 Q8 linear accumulation. It does not
-change `.rllm` format, Q8 format, tokenizer, prompt template, sampling policy,
+change `.spsa` format, Q8 format, tokenizer, prompt template, sampling policy,
 memory budget logic, Q8 multiply-into, Q8 argmax, or batch1 row fast paths.
 
 ## Setup
@@ -33,7 +33,7 @@ Pre-control, before runtime source change:
 
 ```bash
 cargo build --release -p rllm-cli --bin llama-test
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r108-pre-control.txt 2> target/r108-pre-control.time
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r108-pre-control.txt 2> target/r108-pre-control.time
 ```
 
 Candidate:
@@ -41,9 +41,9 @@ Candidate:
 ```bash
 cargo build --release -p rllm-cli --bin llama-test
 for i in 1 2 3; do
-  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r108-run${i}.txt" 2> "target/r108-run${i}.time"
+  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r108-run${i}.txt" 2> "target/r108-run${i}.time"
 done
-RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r108-profile.txt 2> target/r108-profile.time
+RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r108-profile.txt 2> target/r108-profile.time
 ```
 
 Profile control was also run from a detached R107 worktree at commit `2dd3b91`
@@ -53,7 +53,7 @@ to preserve the pre-R108 runtime code:
 git worktree add --detach /tmp/rllm-r108-profile-control 2dd3b91
 cd /tmp/rllm-r108-profile-control
 cargo build --release -p rllm-cli --bin llama-test
-RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model /Users/deansanbhnanwr/Projects/rllm/models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > /Users/deansanbhnanwr/Projects/rllm/target/r108-pre-profile-control-warm.txt 2> /Users/deansanbhnanwr/Projects/rllm/target/r108-pre-profile-control-warm.time
+RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model /Users/deansanbhnanwr/Projects/rllm/models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > /Users/deansanbhnanwr/Projects/rllm/target/r108-pre-profile-control-warm.txt 2> /Users/deansanbhnanwr/Projects/rllm/target/r108-pre-profile-control-warm.time
 ```
 
 Runtime context:

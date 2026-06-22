@@ -39,7 +39,7 @@ cargo build --release --bin llama-test
 - [ ] Run traced R81:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-trace target/r82-r81-trace.json"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-trace target/r82-r81-trace.json"
 ```
 
 - [ ] Summarize trace:
@@ -89,13 +89,13 @@ fn unchecked_integrity_records_no_checksum_events() {
 ```rust
 #[test]
 fn args_default_to_verify_once_integrity_and_accept_unchecked() {
-    let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+    let default_args = Args::parse_from(["llama-test", "--model", "model.spsa"]);
     assert_eq!(default_args.rama_integrity, "verify-once");
 
     let unchecked_args = Args::parse_from([
         "llama-test",
         "--model",
-        "model.rllm",
+        "model.spsa",
         "--rama-integrity",
         "unchecked",
     ]);
@@ -158,7 +158,7 @@ Run:
 cargo test -p rllm-runtime unchecked_integrity_records_no_checksum_events
 cargo test -p rllm-cli --bin llama-test
 cargo build --release --bin llama-test
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
 ```
 
 Expected quality: output remains `No`.

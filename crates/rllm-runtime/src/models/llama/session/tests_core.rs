@@ -34,7 +34,7 @@
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "rllm-llama-session-{name}-{}.rllm",
+            "rllm-llama-session-{name}-{}.spsa",
             std::process::id()
         ))
     }

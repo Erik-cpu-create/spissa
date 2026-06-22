@@ -580,7 +580,7 @@ Fusing Q8_0 gate/up accumulation without repacking activations should reduce MLP
 cargo build --release -p rllm-cli --bin llama-test
 for i in 1 2 3; do
   /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm \
+    --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa \
     --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" \
     > /tmp/r90-run${i}.txt 2> /tmp/r90-run${i}.time
 done
@@ -622,7 +622,7 @@ If the gate fails, revert runtime changes and move the report to `docs/benchmark
 Add this row, replacing the result/status fields with measured data:
 
 ```markdown
-| 2026-06-16 | 2026-06-16-r90-zero-repack-q8-fused-gate-up.md | active | Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm | exact-lowram | CPU arithmetic / Q8 fused gate-up | R88 best prefill 10.24s, MLP 8380ms, output `No`; R89 failed best 12.23s | pending R90 measurement | active | validates whether zero-repack Q8 gate/up fusion can beat repack-based failed kernels |
+| 2026-06-16 | 2026-06-16-r90-zero-repack-q8-fused-gate-up.md | active | Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa | exact-lowram | CPU arithmetic / Q8 fused gate-up | R88 best prefill 10.24s, MLP 8380ms, output `No`; R89 failed best 12.23s | pending R90 measurement | active | validates whether zero-repack Q8 gate/up fusion can beat repack-based failed kernels |
 ```
 
 ## Self-Review

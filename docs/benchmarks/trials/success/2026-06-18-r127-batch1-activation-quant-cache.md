@@ -18,7 +18,7 @@ floor, losslessly (the cache uses the identical absmax/round/clamp).
 
 - Mode: exact-lowram runtime
 - REE kernel: REEBORN-Q8-SDOT (batch1 activation cache)
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: LLaMA 3.2 1B, Q8_0
 - Target device/profile: Apple A18 Pro, single-thread, CPU-only
 - Bottleneck tag: CPU arithmetic (redundant quantization)

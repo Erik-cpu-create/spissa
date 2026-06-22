@@ -2,7 +2,7 @@
 
 ## Setup
 
-- Model: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm`
+- Model: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa`
 - Runner: `/Users/deansanbhnanwr/Projects/rllm/target/release/llama-test`
 - Prompt: `good morning`
 - Runs: 5 alternating control/candidate pairs

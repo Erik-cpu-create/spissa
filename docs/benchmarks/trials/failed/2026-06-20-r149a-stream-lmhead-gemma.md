@@ -17,7 +17,7 @@ gate is correctness/lossless first; speed is deferred (Gemma 1B fits RAM).
 
 - Mode: experimental, lm-head streaming, opt-in (`RLLM_STREAM_LMHEAD`)
 - REE kernel: REESTREAM (reused from R148; `streaming_bitplane_gemv` + `stream_lmhead_from_sidecar`)
-- Model/artifact: Gemma 3 1B (`models/gemma-3-1b-it-rawcodec.rllm`, repacked `--quantize raw --codec raw`)
+- Model/artifact: Gemma 3 1B (`models/gemma-3-1b-it-rawcodec.spsa`, repacked `--quantize raw --codec raw`)
 - Tied lm-head tensor: `model.embed_tokens.weight`, shape **[262144, 1152]** (vocab 262144 × hidden 1152), bf16
 - Target device/profile: Apple aarch64, macOS; release
 - Bottleneck tag: codec width selection (decode-kernel constraint)
@@ -26,7 +26,7 @@ gate is correctness/lossless first; speed is deferred (Gemma 1B fits RAM).
 
 ```bash
 # Step 1 — repack Gemma 1B with raw codec (embedding readable by with_raw_tensor)
-./target/release/rllm pack /tmp/gemma1b --out models/gemma-3-1b-it-rawcodec.rllm \
+./target/release/rllm pack /tmp/gemma1b --out models/gemma-3-1b-it-rawcodec.spsa \
   --quantize raw --codec raw --config /tmp/gemma1b/config.json --tokenizer /tmp/gemma1b/tokenizer.json
 # -> "Found 340 tensors (340 packed for architecture 'gemma3')"; raw, ratio 100.0%, written.
 

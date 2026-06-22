@@ -12,7 +12,7 @@ Keeping KV-cache alive across turns should reduce turn 2 prefill latency because
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/SmolLM2-135M-raw.rllm`
+- Model/artifact: `models/SmolLM2-135M-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: full-history replay and memory bandwidth
@@ -24,8 +24,8 @@ Commands:
 
 ```bash
 cargo build --release -p rllm-cli
-printf 'Hello\nContinue\nexit\n' | /usr/bin/time -l target/release/llama-test --model models/SmolLM2-135M-raw.rllm
-/usr/bin/time -l cargo run --release -p rllm-cli -- chat-session models/SmolLM2-135M-raw.rllm --turn 'Hello' --turn 'Continue' --max-new-tokens 64 --ctx 2048 --out docs/benchmarks/trials/active/2026-06-14-r1-session-smollm2.md
+printf 'Hello\nContinue\nexit\n' | /usr/bin/time -l target/release/llama-test --model models/SmolLM2-135M-raw.spsa
+/usr/bin/time -l cargo run --release -p rllm-cli -- chat-session models/SmolLM2-135M-raw.spsa --turn 'Hello' --turn 'Continue' --max-new-tokens 64 --ctx 2048 --out docs/benchmarks/trials/active/2026-06-14-r1-session-smollm2.md
 ```
 
 Runtime context:

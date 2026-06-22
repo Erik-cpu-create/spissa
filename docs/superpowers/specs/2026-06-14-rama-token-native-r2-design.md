@@ -76,7 +76,7 @@ must report `replayed_tokens=0` after turn 1.
 Add a narrow scripted benchmark command or mode that supports:
 
 ```bash
-rllm chat-session-token <model.rllm> \
+rllm chat-session-token <model.spsa> \
   --turn-ids 1,2,3 \
   --turn-ids 4,5 \
   --max-new-tokens 64 \

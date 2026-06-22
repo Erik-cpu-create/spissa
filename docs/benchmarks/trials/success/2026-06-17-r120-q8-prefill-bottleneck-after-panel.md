@@ -16,7 +16,7 @@ that fails to help, attributes the new bottleneck.
 
 - Mode: exact-lowram diagnostic + runtime trial
 - REE kernel lineage: REEFUSE-Q8-I8MM-PANEL (threading attempt, reverted)
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Device: Apple A18 Pro
 - Bottleneck tag: scheduler / kernel coverage
 

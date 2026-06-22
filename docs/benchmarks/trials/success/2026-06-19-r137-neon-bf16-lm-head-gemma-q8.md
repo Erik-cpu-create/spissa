@@ -19,7 +19,7 @@ q8 layers) and roughly double end-to-end decode, while staying lossless.
 
 - Mode: fast-lowram runtime (q8 layers + bf16 lm_head)
 - REE kernel: bf16 lm_head GEMV (NEON, lane-parallel FMA) — name pending Erik
-- Model/artifact: `models/gemma-3-4b-it-q8.rllm` (bf16 tied embedding, 262208 vocab x 2560 hidden)
+- Model/artifact: `models/gemma-3-4b-it-q8.spsa` (bf16 tied embedding, 262208 vocab x 2560 hidden)
 - Architecture: Gemma 3 4B
 - Target device/profile: Apple Silicon, 8 GB RAM, CPU only
 - Expected bottleneck: scalar bf16 upcast + f32 FMA (compute), not bandwidth
@@ -30,7 +30,7 @@ q8 layers) and roughly double end-to-end decode, while staying lossless.
 ```bash
 cargo build --release -p rllm-cli
 RLLM_Q8_KERNEL_PROFILE=1 ./target/release/gemma-test \
-  --model models/gemma-3-4b-it-q8.rllm --prompt "The capital of France is" \
+  --model models/gemma-3-4b-it-q8.spsa --prompt "The capital of France is" \
   --fast --max-new-tokens 32 --ctx 256
 ```
 

@@ -14,7 +14,7 @@ better exact-lowram decode speed without changing output quality.
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: Llama 3.2 1B Instruct
 - Target device/profile: local CPU, release build
 - Expected bottleneck: Q8 transformer projection chunk locality
@@ -25,11 +25,11 @@ better exact-lowram decode speed without changing output quality.
 Commands:
 
 ```bash
-target/release/rllm pack models/downloads/llama-3.2-1b-instruct-unsloth/model.safetensors --out models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --codec raw --quantize q8_transformer_keep_io
+target/release/rllm pack models/downloads/llama-3.2-1b-instruct-unsloth/model.safetensors --out models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --codec raw --quantize q8_transformer_keep_io
 
-printf '%s\nquit\n' 'Answer in one short sentence: what is 2 plus 2?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 8
-printf '%s\nquit\n' 'Translate to Indonesian: I am learning Rust.' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 8
-printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4
+printf '%s\nquit\n' 'Answer in one short sentence: what is 2 plus 2?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 8
+printf '%s\nquit\n' 'Translate to Indonesian: I am learning Rust.' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 8
+printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4
 ```
 
 Runtime context:

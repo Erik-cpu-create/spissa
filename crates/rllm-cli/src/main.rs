@@ -16,7 +16,7 @@ mod commands;
 #[command(about = "Spissa - Runtime-compressed Local LLM (compressed · local · yours)")]
 #[command(version = "0.1.0")]
 #[command(
-    long_about = "Spissa is a from-scratch local LLM runtime built around runtime-compressed model storage. It stores model tensors in a chunked compressed container (.rllm) — lossless by default (rANS / bit-plane), with optional lossy quantization (q8 / q4) — and runs inference by decoding only the tensor blocks needed at runtime. One self-contained binary, no dependencies, runs on any device."
+    long_about = "Spissa is a from-scratch local LLM runtime built around runtime-compressed model storage. It stores model tensors in a chunked compressed container (.spsa) — lossless by default (rANS / bit-plane), with optional lossy quantization (q8 / q4) — and runs inference by decoding only the tensor blocks needed at runtime. One self-contained binary, no dependencies, runs on any device."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -29,12 +29,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Pack a model file into a .rllm container
+    /// Pack a model file into a .spsa container
     Pack {
         /// Input model file
         input: String,
 
-        /// Output .rllm file path
+        /// Output .spsa file path
         #[arg(short, long)]
         out: String,
 
@@ -89,24 +89,24 @@ enum Commands {
         quantize: Option<String>,
     },
 
-    /// Inspect a .rllm file
+    /// Inspect a .spsa file
     Inspect {
-        /// Path to .rllm file
+        /// Path to .spsa file
         file: String,
     },
 
-    /// Verify that a .rllm file matches the original model
+    /// Verify that a .spsa file matches the original model
     Verify {
         /// Original model file
         original: String,
 
-        /// Path to .rllm file
+        /// Path to .spsa file
         compressed: String,
     },
 
-    /// Unpack a .rllm file back to original data
+    /// Unpack a .spsa file back to original data
     Unpack {
-        /// Path to .rllm file
+        /// Path to .spsa file
         file: String,
 
         /// Output file path
@@ -114,9 +114,9 @@ enum Commands {
         out: String,
     },
 
-    /// Run inference or low-memory runtime planning from a .rllm file
+    /// Run inference or low-memory runtime planning from a .spsa file
     Run {
-        /// Path to .rllm file
+        /// Path to .spsa file
         file: String,
 
         /// Runtime mode: full-decode, layer-stream, tile-stream
@@ -187,7 +187,7 @@ enum Commands {
 
     /// Run an alternating control/candidate llama-test benchmark harness
     Benchmark {
-        /// Path to .rllm file
+        /// Path to .spsa file
         file: String,
 
         /// Prompt sent to llama-test before exit. Repeat for a prompt matrix.
@@ -255,7 +255,7 @@ enum Commands {
 
     /// Interactive multi-turn chat over a packed model (any codec: rANS/q8/bf16)
     Chat {
-        /// Path to .rllm file
+        /// Path to .spsa file
         file: String,
 
         /// Context length (KV cache cap)
@@ -312,7 +312,7 @@ enum Commands {
 
     /// Run a scripted persistent chat-session benchmark
     ChatSession {
-        /// Path to .rllm file
+        /// Path to .spsa file
         file: String,
 
         /// Conversation turn text; pass this flag more than once
@@ -334,7 +334,7 @@ enum Commands {
 
     /// Run a token-native full-replay vs persistent chat-session benchmark
     ChatSessionToken {
-        /// Path to .rllm file
+        /// Path to .spsa file
         file: String,
 
         /// Comma-separated token IDs for one user turn; pass this flag more than once

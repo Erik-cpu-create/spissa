@@ -19,7 +19,7 @@ CPU — the open niche the R140 series identified.
 
 - Mode: experimental (compressed-resident codec; decode throughput gate, Phase B)
 - REE kernel: REEPLANE (working name; Erik's final call before any paper use)
-- Model/artifact: `Llama-3.2-1B-Instruct-raw.rllm` tied bf16 embedding (262.7M weights, 525 MB; palette 32, w=5)
+- Model/artifact: `Llama-3.2-1B-Instruct-raw.spsa` tied bf16 embedding (262.7M weights, 525 MB; palette 32, w=5)
 - Architecture: LLaMA 3.2 1B bf16 embedding/LM head
 - Target device/profile: Apple A18 Pro (2 P + 4 E), macOS; release build
 - Expected bottleneck: index-plane unpack + palette gather (NEON `tbl`)

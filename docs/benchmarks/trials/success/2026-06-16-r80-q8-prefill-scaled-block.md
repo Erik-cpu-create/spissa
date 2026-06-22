@@ -12,7 +12,7 @@ This targets the R79 finding that Q8 MLP compute dominates prefill time.
 
 ## Artifact
 
-- Model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Mode: exact-lowram Q8 transformer keep-IO rowchunks
 - Prompt: `Answer yes or no: is fire cold?`
 - Chat template: `llama3`
@@ -41,7 +41,7 @@ The path keeps exact math and does not allocate heap scratch:
 ## Command
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases"
 ```
 
 ## Verification

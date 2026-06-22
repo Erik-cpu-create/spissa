@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Model: Gemma 3 1B IT packed `--codec rans` (1.325 GB); run via `gemma-test`
-- Verdict: **GO (correctness)** — a rANS-packed `.rllm` runs full generation through the
+- Verdict: **GO (correctness)** — a rANS-packed `.spsa` runs full generation through the
   existing engine and produces **token-identical output to the bf16 resident model**
   (lossless e2e). **Speed is decode-bound** (0.28 tok/s vs bf16's 2.19) because the
   container decodes the whole tensor per access; the streaming forward-pass optimization
@@ -15,12 +15,12 @@ No forward-pass rewrite was needed for correctness: the container's `codec_for_i
 rANS-packed model as-is.
 
 ```
-$ gemma-test --model gemma1b-rans.rllm --prompt "The capital of France is" -n 12
+$ gemma-test --model gemma1b-rans.spsa --prompt "The capital of France is" -n 12
   Paris. The largest city in France is Paris.
   token ids: [9079,236761,108,818,7488,3207,528,7001,563,9079,236761,108]
   Tokens: 12 in 43.45s (0.28 tok/s) | peak transient 1.81 GB
 
-$ gemma-test --model gemma-3-1b-it-rawcodec.rllm (bf16)  ...
+$ gemma-test --model gemma-3-1b-it-rawcodec.spsa (bf16)  ...
   token ids: [9079,236761,108,818,7488,3207,528,7001,563,9079,236761,108]  (IDENTICAL)
   Tokens: 12 in 5.47s (2.19 tok/s) | peak transient 16 KB
 ```

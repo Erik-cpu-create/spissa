@@ -57,7 +57,7 @@ fn rans_sidecar_streams_equal_to_reference() {
 #[test]
 #[ignore]
 fn r153_gemma_rans_lmhead_lossless() {
-    let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+    let model = "../../models/gemma-3-1b-it-rawcodec.spsa";
     let tname = "model.embed_tokens.weight";
     let sidecar = "/tmp/gemma1b-lmhead-rans.sidecar";
     write_lmhead_sidecar_rans(model, tname, 256, sidecar).unwrap();
@@ -83,7 +83,7 @@ fn r153_gemma_rans_lmhead_lossless() {
 #[test]
 #[ignore]
 fn r158_lmhead_resident_ram() {
-    let model = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/gemma-3-1b-it-rawcodec.rllm");
+    let model = concat!(env!("CARGO_MANIFEST_DIR"), "/../../models/gemma-3-1b-it-rawcodec.spsa");
     let tname = "model.embed_tokens.weight";
     let sidecar = "/tmp/r158_lmhead.sidecar";
     let bf16_file = "/tmp/r158_bf16.bin";
@@ -170,7 +170,7 @@ fn gemv_from_resident_rans(c: &[u8], act: &[f32]) -> Vec<f32> {
 #[test]
 #[ignore]
 fn r156a_gemma_body_projection_lossless() {
-    let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+    let model = "../../models/gemma-3-1b-it-rawcodec.spsa";
     let tname = "model.layers.0.mlp.gate_proj.weight";
     let sidecar = "/tmp/r156a_gate_proj.sidecar";
     write_lmhead_sidecar_rans(model, tname, 256, sidecar).unwrap();
@@ -193,7 +193,7 @@ fn r156a_gemma_body_projection_lossless() {
 #[test]
 #[ignore]
 fn r157b_gemma_layer0_all_projections_lossless() {
-    let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+    let model = "../../models/gemma-3-1b-it-rawcodec.spsa";
     let projections = [
         "model.layers.0.self_attn.q_proj.weight",
         "model.layers.0.self_attn.k_proj.weight",
@@ -270,7 +270,7 @@ fn cold_parallel_read_ms(path: &str, total: usize, chunk: usize, n_threads: usiz
 #[ignore]
 fn r153_rans_capacity_bound() {
     use std::io::{Read, Seek, SeekFrom};
-    let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+    let model = "../../models/gemma-3-1b-it-rawcodec.spsa";
     let tname = "model.embed_tokens.weight";
     let one = "/tmp/r153_rans_one.sidecar";
     let rans_big = "/tmp/r153_rans_big.bin";
@@ -351,7 +351,7 @@ fn r153_rans_capacity_bound() {
 #[ignore]
 fn r154_rans_thread_sweep() {
     use std::io::{Read, Seek, SeekFrom};
-    let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+    let model = "../../models/gemma-3-1b-it-rawcodec.spsa";
     let tname = "model.embed_tokens.weight";
     let one = "/tmp/r154_rans_one.sidecar";
     let rans_big = "/tmp/r154_rans_big.bin";

@@ -179,7 +179,7 @@ double-buffer later. **No precedent in the codebase — write it fresh.**
 
 ---
 
-## 4. Packing plan (text-only `.rllm`)
+## 4. Packing plan (text-only `.spsa`)
 
 - `normalize_architecture_type` → `"qwen3"`.
 - `map_tensor_names`: strip `model.language_model.` → canonical `model.layers.{i}.*`,
@@ -211,7 +211,7 @@ The recurrence is subtle; build a numerical oracle before trusting decode output
 ## 6. Phased plan
 
 - **P0 — pack plumbing.** Config fields + arch normalize + tensor-name map (drop vision/MTP). Produce a
-  text-only `.rllm`; verify metadata/inspect. *No inference.*
+  text-only `.spsa`; verify metadata/inspect. *No inference.*
 - **P1 — REEGATE (full attn) + FFN + embed + tied head.** Reuses existing SDPA/QK-norm/partial-rotary.
   Stub the 18 linear layers as pass-through to get a compiling end-to-end forward (won't be coherent).
 - **P2 — REEDELTA recurrent kernel + parity test.** The novel core; validate against the P5 dump.
@@ -220,7 +220,7 @@ The recurrence is subtle; build a numerical oracle before trusting decode output
 - **P4 — rollback-safe state checkpoint + `RamaSessionAdapter`.** Wire into `RamaChatSession`.
 - **P5 — chunked GatedDeltaNet prefill** (perf) + codec/quant tuning + REEPOOL integration.
 
-P0–P3 is the milestone: *coherent text from a real Qwen3.5-2B `.rllm` on the laptop.*
+P0–P3 is the milestone: *coherent text from a real Qwen3.5-2B `.spsa` on the laptop.*
 
 ---
 

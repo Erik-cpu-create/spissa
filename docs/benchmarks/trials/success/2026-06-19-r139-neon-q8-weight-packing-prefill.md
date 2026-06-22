@@ -19,7 +19,7 @@ that copy should remove the overhead and approach the smmla kernel's real speed.
 
 - Mode: fast-lowram runtime (q8, codec rtc-raw-v1)
 - REE kernel: REEFUSE-Q8-I8MM-PANEL weight packing (NEON)
-- Model/artifact: `models/gemma-3-4b-it-q8.rllm`
+- Model/artifact: `models/gemma-3-4b-it-q8.spsa`
 - Architecture: Gemma 3 4B, Q8_0
 - Target device/profile: Apple A18 Pro (iPhone-class SoC), 2P+4E cores, CPU only
 - Expected bottleneck: scalar weight repack in the i8mm panel hot loop

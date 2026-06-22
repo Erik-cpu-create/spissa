@@ -831,23 +831,23 @@ mod tests {
 
     #[test]
     fn args_default_to_2k_context_and_accept_override() {
-        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        let default_args = Args::parse_from(["llama-test", "--model", "model.spsa"]);
         assert_eq!(default_args.ctx, 2048);
 
         let overridden_args =
-            Args::parse_from(["llama-test", "--model", "model.rllm", "--ctx", "4096"]);
+            Args::parse_from(["llama-test", "--model", "model.spsa", "--ctx", "4096"]);
         assert_eq!(overridden_args.ctx, 4096);
     }
 
     #[test]
     fn args_default_to_64_new_tokens_and_accept_override() {
-        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        let default_args = Args::parse_from(["llama-test", "--model", "model.spsa"]);
         assert_eq!(default_args.max_new_tokens, 64);
 
         let overridden_args = Args::parse_from([
             "llama-test",
             "--model",
-            "model.rllm",
+            "model.spsa",
             "--max-new-tokens",
             "1",
         ]);
@@ -856,24 +856,24 @@ mod tests {
 
     #[test]
     fn args_disable_phase_profile_by_default_and_accept_override() {
-        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        let default_args = Args::parse_from(["llama-test", "--model", "model.spsa"]);
         assert!(!default_args.profile_phases);
 
         let profiled_args =
-            Args::parse_from(["llama-test", "--model", "model.rllm", "--profile-phases"]);
+            Args::parse_from(["llama-test", "--model", "model.spsa", "--profile-phases"]);
         assert!(profiled_args.profile_phases);
     }
 
     #[test]
     fn args_default_to_raw_chat_template_and_accept_llama3() {
-        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        let default_args = Args::parse_from(["llama-test", "--model", "model.spsa"]);
         assert_eq!(default_args.chat_template, "raw");
         assert_eq!(default_args.system_prompt, None);
 
         let templated_args = Args::parse_from([
             "llama-test",
             "--model",
-            "model.rllm",
+            "model.spsa",
             "--chat-template",
             "llama3",
             "--system-prompt",
@@ -888,13 +888,13 @@ mod tests {
 
     #[test]
     fn args_default_to_no_rama_trace_and_accept_path() {
-        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        let default_args = Args::parse_from(["llama-test", "--model", "model.spsa"]);
         assert_eq!(default_args.rama_trace, None);
 
         let traced_args = Args::parse_from([
             "llama-test",
             "--model",
-            "model.rllm",
+            "model.spsa",
             "--rama-trace",
             "/tmp/rama-trace.json",
         ]);
@@ -906,13 +906,13 @@ mod tests {
 
     #[test]
     fn args_default_to_verify_once_integrity_and_accept_unchecked() {
-        let default_args = Args::parse_from(["llama-test", "--model", "model.rllm"]);
+        let default_args = Args::parse_from(["llama-test", "--model", "model.spsa"]);
         assert_eq!(default_args.rama_integrity, "verify-once");
 
         let unchecked_args = Args::parse_from([
             "llama-test",
             "--model",
-            "model.rllm",
+            "model.spsa",
             "--rama-integrity",
             "unchecked",
         ]);

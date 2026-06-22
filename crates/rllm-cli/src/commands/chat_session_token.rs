@@ -903,14 +903,14 @@ mod tests {
     #[test]
     fn replay_command_uses_shell_quotes_not_markdown_backticks() {
         let command = super::replay_command(
-            "models/space model.rllm",
+            "models/space model.spsa",
             &[vec![1]],
             16,
             2048,
             "docs/benchmarks/trials/active/space out.md",
         );
 
-        assert!(command.contains("'models/space model.rllm'"));
+        assert!(command.contains("'models/space model.spsa'"));
         assert!(command.contains("'docs/benchmarks/trials/active/space out.md'"));
         assert!(!command.contains('`'));
     }

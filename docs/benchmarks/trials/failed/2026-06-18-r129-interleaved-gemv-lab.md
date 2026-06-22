@@ -10,7 +10,7 @@ Folder: failed
 R128b found a no-repack ceiling and pointed to the 4-column interleaved repack
 (llama.cpp's q8_0 4x8 GEMV) as the real lever: lay weights so one `sdot`'s 4 lanes
 hold 4 DIFFERENT outputs → no per-block `addv`, one vectorized scale-FMA per block.
-This would justify a `.rllm` weight-format change. Test the interleaved kernel in
+This would justify a `.spsa` weight-format change. Test the interleaved kernel in
 the lab BEFORE committing to the format change.
 
 ## Scope
@@ -50,7 +50,7 @@ tiles, so only 1–2 independent dependency chains, vs R128b's 4 independent
 per-row chains. On these cores, **ILP (more independent chains) matters more than
 removing the `addv`** — so the interleave is a net regression here.
 
-This overturns the R128b doc's projection that the interleaved `.rllm` format was
+This overturns the R128b doc's projection that the interleaved `.spsa` format was
 the lever. It is not — at least not for batch=1 GEMV in this form. (llama.cpp's ~3x
 from the repack appears to come from contiguous bandwidth at scale + its overall
 kernel structure, not from the per-block instruction mix in isolation.)
@@ -60,7 +60,7 @@ kernel structure, not from the per-block instruction mix in isolation.)
 rejected
 
 Reason: the interleaved 4-output kernel (1-tile and 2-tile) is measurably slower
-than the no-repack 4-row ILP kernel (R128b), so a `.rllm` interleaved weight-format
+than the no-repack 4-row ILP kernel (R128b), so a `.spsa` interleaved weight-format
 change would REGRESS decode, not improve it. Lab-first measurement avoided a large
 wasted format migration.
 

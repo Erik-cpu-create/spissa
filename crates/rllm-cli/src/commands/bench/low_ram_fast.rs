@@ -27,10 +27,10 @@ pub struct Args {
     #[arg(long, default_value = "models/pythia-70m/tokenizer.json")]
     pub tokenizer: String,
 
-    /// Output/benchmark .rllm artifact.
+    /// Output/benchmark .spsa artifact.
     #[arg(
         long,
-        default_value = "models/pythia-70m-low-ram-fast-raw-tileblocks.rllm"
+        default_value = "models/pythia-70m-low-ram-fast-raw-tileblocks.spsa"
     )]
     pub artifact: String,
 

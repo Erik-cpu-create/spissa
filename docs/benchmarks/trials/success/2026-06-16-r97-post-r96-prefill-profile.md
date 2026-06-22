@@ -13,7 +13,7 @@ checks where the remaining prefill time goes before starting another kernel.
 ## Scope
 
 - Mode: exact-lowram diagnostic
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Runtime state: after R96 `REEVEC-Q8-NEON-BATCH4`
 - Target device/profile: CPU-only, single-thread benchmark
 - Bottleneck tag: post-NEON Q8 prefill attribution
@@ -27,7 +27,7 @@ Normal controls:
 ```bash
 cargo build --release -p rllm-cli --bin llama-test
 for i in 1 2 3; do
-  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r97-control${i}.txt" 2> "target/r97-control${i}.time"
+  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r97-control${i}.txt" 2> "target/r97-control${i}.time"
 done
 ```
 
@@ -35,7 +35,7 @@ Q8 profiled trials:
 
 ```bash
 for i in 1 2; do
-  RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r97-profile${i}.txt" 2> "target/r97-profile${i}.time"
+  RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r97-profile${i}.txt" 2> "target/r97-profile${i}.time"
 done
 ```
 

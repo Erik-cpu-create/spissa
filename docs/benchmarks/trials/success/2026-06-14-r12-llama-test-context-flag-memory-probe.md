@@ -14,7 +14,7 @@ without changing source code.
 ## Scope
 
 - Mode: exact-lowram
-- Models/artifacts: `models/SmolLM2-135M-raw.rllm`, `models/Llama-3.2-1B-Instruct-raw.rllm`
+- Models/artifacts: `models/SmolLM2-135M-raw.spsa`, `models/Llama-3.2-1B-Instruct-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Bottleneck tag: context capacity
@@ -26,13 +26,13 @@ Commands:
 ```bash
 printf 'good morning\nexit\n' | \
   /usr/bin/time -l target/release/llama-test \
-    --model models/SmolLM2-135M-raw.rllm \
+    --model models/SmolLM2-135M-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 1
 
 printf 'good morning\nexit\n' | \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 1
 ```

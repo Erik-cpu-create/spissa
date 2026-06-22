@@ -16,7 +16,7 @@ falling further below the speed floor.
 ## Scope
 
 - Mode: exact-lowram and experimental-speed smoke
-- Model/artifact: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: sparse decode-state quality
@@ -28,7 +28,7 @@ Commands:
 
 ```bash
 printf 'good morning\nexit\n' | target/release/llama-test \
-  --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+  --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
   --ctx 2048 \
   --max-new-tokens 16 \
   --chat-template llama3 \
@@ -45,7 +45,7 @@ printf 'good morning\nexit\n' | \
   RLLM_AIP_ATTENTION_LOCALITY_WINDOW=8 \
   RLLM_AIP_ATTENTION_LOCALITY_EXTRA=1 \
   target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
     --ctx 2048 \
     --max-new-tokens 16 \
     --chat-template llama3 \
@@ -63,7 +63,7 @@ printf 'good morning\nexit\n' | \
   RLLM_AIP_ATTENTION_LOCALITY_EXTRA=1 \
   RLLM_AIP_EXACT_PREFILL=1 \
   target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
     --ctx 2048 \
     --max-new-tokens 16 \
     --chat-template llama3 \
@@ -82,7 +82,7 @@ printf 'good morning\nexit\n' | \
   RLLM_AIP_EXACT_PREFILL=1 \
   RLLM_AIP_LM_HEAD_TOPK=8 \
   target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
     --ctx 2048 \
     --max-new-tokens 16 \
     --chat-template llama3 \
@@ -101,7 +101,7 @@ printf 'good morning\nexit\n' | \
   RLLM_AIP_EXACT_EDGE_LAYERS=1 \
   RLLM_AIP_EXACT_EDGE_PROJECTION=attention \
   target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
     --ctx 2048 \
     --max-new-tokens 16 \
     --chat-template llama3 \
@@ -121,7 +121,7 @@ printf 'good morning\nexit\n' | \
   RLLM_AIP_EXACT_EDGE_LAYERS=1 \
   RLLM_AIP_EXACT_EDGE_PROJECTION=attention \
   target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
     --ctx 2048 \
     --max-new-tokens 16 \
     --chat-template llama3 \

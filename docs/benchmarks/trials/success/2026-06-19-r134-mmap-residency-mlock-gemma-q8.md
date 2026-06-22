@@ -28,7 +28,7 @@ working set from 7.43 to 6.09 GB so a 4.5 GB pin can fit in 8 GB RAM.
 - Mode: exact-lowram runtime (q8, codec rtc-raw-v1 zero-copy)
 - REE kernel: none — this is a residency/IO change (mmap advise + mlock), not
   an execution kernel, so the REE-kernel naming rule does not apply.
-- Model/artifact: `models/gemma-3-4b-it-q8.rllm` (q8_transformer_keep_io, ~4.5 GB)
+- Model/artifact: `models/gemma-3-4b-it-q8.spsa` (q8_transformer_keep_io, ~4.5 GB)
 - Architecture: Gemma 3 4B, Q8_0
 - Target device/profile: Apple Silicon, 8 GB RAM, CPU only
 - Expected bottleneck: weight residency (page eviction / re-fault from disk)
@@ -43,12 +43,12 @@ cargo build --release -p rllm-cli
 
 # baseline (WILLNEED only — mlock off)
 /usr/bin/time -l ./target/release/gemma-test \
-  --model models/gemma-3-4b-it-q8.rllm \
+  --model models/gemma-3-4b-it-q8.spsa \
   --prompt "The capital of France is" --max-new-tokens 8 --ctx 256
 
 # trial (mlock pin)
 /usr/bin/time -l ./target/release/gemma-test \
-  --model models/gemma-3-4b-it-q8.rllm \
+  --model models/gemma-3-4b-it-q8.spsa \
   --prompt "The capital of France is" --mlock --max-new-tokens 8 --ctx 256
 ```
 

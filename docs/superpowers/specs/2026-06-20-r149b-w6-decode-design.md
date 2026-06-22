@@ -83,7 +83,7 @@ runtime stays width-agnostic (correct layering: codec selects the kernel).
    write a v2 sidecar, `stream_lmhead_from_sidecar` == single-thread decode+dot
    reference, bit-for-bit.
 3. **Lossless e2e (hard rule), real Gemma 3 1B:** `#[ignore]` test —
-   `write_lmhead_sidecar(gemma-3-1b-it-rawcodec.rllm, embed, 256, sidecar)` then
+   `write_lmhead_sidecar(gemma-3-1b-it-rawcodec.spsa, embed, 256, sidecar)` then
    generate a fixed prompt twice (resident vs `RLLM_STREAM_LMHEAD=<sidecar>`);
    assert **identical token-id sequence**. This is the gate R149a-Gemma could not
    reach.

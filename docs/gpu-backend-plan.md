@@ -17,7 +17,7 @@
 
 Decision: add an auto-detecting GPU backend so RLLM is **plug-and-play** on phones — one
 generic binary that picks the GPU when present and falls back to CPU otherwise. User copies
-the binary + a repacked `.rllm` and runs; no per-device rebuild. (The CPU binary already
+the binary + a repacked `.spsa` and runs; no per-device rebuild. (The CPU binary already
 works this way: one generic aarch64 ELF + runtime feature detection.)
 
 ## Why this is achievable (proven in the prototype)
@@ -34,7 +34,7 @@ works this way: one generic aarch64 ELF + runtime feature detection.)
 - Startup: try `GpuContext::new()` → wgpu instance → request a compute-capable adapter.
   - Found → GPU backend. Not found / init fails → **graceful CPU fallback** (today's path).
   - `RLLM_BACKEND=cpu|gpu|auto` override; `auto` (default) prefers GPU.
-- Same `rllm chat <model.rllm>` UX; the binary decides CPU vs GPU at runtime.
+- Same `rllm chat <model.spsa>` UX; the binary decides CPU vs GPU at runtime.
 
 ## Honest constraints (from the prototype + physics)
 
@@ -66,7 +66,7 @@ works this way: one generic aarch64 ELF + runtime feature detection.)
   lm_head + argmax. Wire `gemma_forward_logits` to run on the GPU backend; parity vs CPU.
 
 **Phase 3 — weights + f16.**
-- Load path: decode `.rllm` (rANS/q8/bf16) → upload to GPU buffers (bf16 = lossless).
+- Load path: decode `.spsa` (rANS/q8/bf16) → upload to GPU buffers (bf16 = lossless).
 - f16 kernels via **SPIR-V** (glslc) for the perf the GPU is for.
 
 **Phase 4 — optimize + measure.**

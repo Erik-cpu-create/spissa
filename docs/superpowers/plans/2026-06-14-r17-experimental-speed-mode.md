@@ -6,7 +6,7 @@
 
 **Architecture:** Add a small runtime speed module for env parsing, deterministic top-k activation selection, and telemetry. Wire it through session metrics, then add sparse raw-16-bit projection kernels for LLaMA MLP `gate/up` and `down` paths behind `RLLM_EXPERIMENTAL_SPEED=1`. Exact mode stays unchanged and all benchmark evidence is documented as `experimental-speed`.
 
-**Tech Stack:** Rust workspace, `rllm-runtime`, `rllm-cli`, existing `.rllm` raw BF16/FP16 streaming kernels, `cargo test`, local benchmark reports under `docs/benchmarks/trials`.
+**Tech Stack:** Rust workspace, `rllm-runtime`, `rllm-cli`, existing `.spsa` raw BF16/FP16 streaming kernels, `cargo test`, local benchmark reports under `docs/benchmarks/trials`.
 
 ---
 
@@ -1441,7 +1441,7 @@ exact-lowram behavior.
 ## Scope
 
 - Mode: experimental-speed
-- Models/artifacts: `models/SmolLM2-135M-raw.rllm`, `models/Llama-3.2-1B-Instruct-raw.rllm`
+- Models/artifacts: `models/SmolLM2-135M-raw.spsa`, `models/Llama-3.2-1B-Instruct-raw.spsa`
 - Architecture: llama
 - Target device/profile: CPU-only, low RAM
 - Bottleneck tag: sparse MLP projection
@@ -1457,14 +1457,14 @@ cargo build --release -p rllm-cli --bin llama-test
 
 printf 'good morning\nexit\n' | \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_TURBO_TOPK=256 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1531,7 +1531,7 @@ Run:
 ```bash
 printf 'good morning\nexit\n' | \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1553,7 +1553,7 @@ Run:
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_TURBO_TOPK=256 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1574,14 +1574,14 @@ Run:
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_TURBO_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_TURBO_TOPK=512 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1596,7 +1596,7 @@ Run:
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_TURBO_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/SmolLM2-135M-raw.rllm \
+    --model models/SmolLM2-135M-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```

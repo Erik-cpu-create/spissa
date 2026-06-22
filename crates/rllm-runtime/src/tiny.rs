@@ -252,7 +252,7 @@ pub struct StreamingTinyGenerationResult {
     pub context_echo_bytes: usize,
 }
 
-/// Low-RAM embedding lookup over a chunked `.rllm` embedding tensor.
+/// Low-RAM embedding lookup over a chunked `.spsa` embedding tensor.
 ///
 /// The returned activation is caller-owned. `budget` tracks only transient
 /// compressed/decoded/f32 scratch for the streamed chunks.
@@ -1328,7 +1328,7 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("rllm-tiny-{name}-{}.rllm", std::process::id()))
+        std::env::temp_dir().join(format!("rllm-tiny-{name}-{}.spsa", std::process::id()))
     }
 
     fn add_f32_tensor(

@@ -17,7 +17,7 @@ that scalar remainder cost without changing exact math.
 
 - Mode: exact-lowram lab/runtime gate
 - REE kernel lineage: `REETAIL-Q8-NEON-TAIL3-LAB`
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: Llama 3.2 1B Instruct Q8 transformer keep-IO row chunks
 - Target device/profile: Apple A18 Pro, 8 GiB RAM, CPU-only single-thread benchmark
 - Expected bottleneck: Q8 normal-path scalar tail after batch4 groups
@@ -35,8 +35,8 @@ target/release/q8-microbench --json target/r104-reetail-lab.json --markdown targ
 target/release/q8-microbench --json target/r104-reetail-lab-long.json --markdown target/r104-reetail-lab-long.md --iters 10000 --batch 55
 cargo test -p rllm-runtime streaming_tile_linear_accumulates_q8_0_without_f32_chunk_scratch -- --nocapture
 cargo build --release -p rllm-cli --bin llama-test
-for i in 1 2 3; do RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r104-run${i}.txt" 2> "target/r104-run${i}.time"; done
-RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r104-profile.txt 2> target/r104-profile.time
+for i in 1 2 3; do RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r104-run${i}.txt" 2> "target/r104-run${i}.time"; done
+RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r104-profile.txt 2> target/r104-profile.time
 ```
 
 Runtime context:

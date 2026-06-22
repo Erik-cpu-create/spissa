@@ -236,7 +236,7 @@ pub type StreamingRamaTransformerTensorNames<'a> = StreamingEchoTransformerTenso
 pub type StreamingRamaTransformerParameters<'a> = StreamingEchoTransformerParameters<'a>;
 pub type StreamingRamaGenerationResult = StreamingEchoGenerationResult;
 
-/// Multi-layer token-ID RAMA loop over chunked `.rllm` weights.
+/// Multi-layer token-ID RAMA loop over chunked `.spsa` weights.
 ///
 /// This is the first all-layer RAMA orchestration primitive: callers still
 /// provide token IDs and model-specific norm/bias parameters, but each layer owns
@@ -906,7 +906,7 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("rllm-echo-{name}-{}.rllm", std::process::id()))
+        std::env::temp_dir().join(format!("rllm-echo-{name}-{}.spsa", std::process::id()))
     }
 
     fn add_f32_tensor(

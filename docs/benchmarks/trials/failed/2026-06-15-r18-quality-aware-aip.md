@@ -14,7 +14,7 @@ layers, `mlp_down`, attention, and LM-head exact.
 ## Scope
 
 - Mode: experimental-speed
-- Models/artifacts: `models/SmolLM2-135M-raw.rllm`, `models/Llama-3.2-1B-Instruct-raw.rllm`
+- Models/artifacts: `models/SmolLM2-135M-raw.spsa`, `models/Llama-3.2-1B-Instruct-raw.spsa`
 - Architecture: llama
 - Target device/profile: CPU-only, low RAM
 - Expected bottleneck: MLP projection arithmetic and memory access
@@ -32,28 +32,28 @@ cargo build --release -p rllm-cli --bin llama-test
 
 printf 'good morning\nexit\n' | \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=quality RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=quality RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/SmolLM2-135M-raw.rllm \
+    --model models/SmolLM2-135M-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```

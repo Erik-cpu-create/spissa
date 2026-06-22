@@ -39,7 +39,7 @@ Touched runtime boundary only:
   - CLI passes `collect_logits = logits_out.is_some()`.
   - `--logits-out` therefore keeps the old full-logits path.
 
-No `.rllm` format changes, no codec changes, no model-specific branches.
+No `.spsa` format changes, no codec changes, no model-specific branches.
 
 ## Correctness checks
 

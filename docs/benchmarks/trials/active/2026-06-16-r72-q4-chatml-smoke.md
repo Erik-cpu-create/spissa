@@ -16,12 +16,12 @@ show immediate stop-token collapse or malformed ChatML prompting.
 
 - Mode: exact-lowram
 - Model/artifact:
-  - `models/SmolLM2-135M-Instruct-raw.rllm`
-  - `models/SmolLM2-135M-Instruct-q4_0.rllm`
-  - `models/SmolLM2-135M-Instruct-q4_0_keep_io.rllm`
-  - `models/SmolLM2-135M-Instruct-q4_0_mlp_only.rllm`
-  - `models/SmolLM2-135M-Instruct-q4_0_attention_only.rllm`
-  - `models/SmolLM2-135M-Instruct-q8_transformer_keepio.rllm`
+  - `models/SmolLM2-135M-Instruct-raw.spsa`
+  - `models/SmolLM2-135M-Instruct-q4_0.spsa`
+  - `models/SmolLM2-135M-Instruct-q4_0_keep_io.spsa`
+  - `models/SmolLM2-135M-Instruct-q4_0_mlp_only.spsa`
+  - `models/SmolLM2-135M-Instruct-q4_0_attention_only.spsa`
+  - `models/SmolLM2-135M-Instruct-q8_transformer_keepio.spsa`
 - Architecture: SmolLM2/Llama-compatible decoder
 - Target device/profile: local macOS CPU, release binary
 - Expected bottleneck: memory footprint vs dequantization CPU cost
@@ -34,7 +34,7 @@ Commands:
 ```bash
 printf 'Answer in one short sentence: what is 2 plus 2?\nquit\n' \
   | /usr/bin/time -l target/release/llama-test \
-      --model models/SmolLM2-135M-Instruct-q4_0.rllm \
+      --model models/SmolLM2-135M-Instruct-q4_0.spsa \
       --ctx 512 \
       --max-new-tokens 32 \
       --chat-template chatml
@@ -42,7 +42,7 @@ printf 'Answer in one short sentence: what is 2 plus 2?\nquit\n' \
 set -u
 out=/tmp/rllm-smollm-chatml-matrix-20260616.txt
 : > "$out"
-models=("models/SmolLM2-135M-Instruct-raw.rllm" "models/SmolLM2-135M-Instruct-q4_0.rllm")
+models=("models/SmolLM2-135M-Instruct-raw.spsa" "models/SmolLM2-135M-Instruct-q4_0.spsa")
 prompts=(
   "Answer in one short sentence: what is 2 plus 2?"
   "Answer in one short sentence: what color is the sky on a clear day?"
@@ -88,7 +88,7 @@ Keep-IO Q4_0 repack:
 ```bash
 target/release/rllm pack \
   models/downloads/smollm2-135m-instruct/model.safetensors \
-  --out models/SmolLM2-135M-Instruct-q4_0_keep_io.rllm \
+  --out models/SmolLM2-135M-Instruct-q4_0_keep_io.spsa \
   --codec raw \
   --quantize q4_0_keep_io
 ```
@@ -98,19 +98,19 @@ Projection-family Q4_0 controls:
 ```bash
 target/release/rllm pack \
   models/downloads/smollm2-135m-instruct/model.safetensors \
-  --out models/SmolLM2-135M-Instruct-q4_0_mlp_only.rllm \
+  --out models/SmolLM2-135M-Instruct-q4_0_mlp_only.spsa \
   --codec raw \
   --quantize q4_0_mlp_only
 
 target/release/rllm pack \
   models/downloads/smollm2-135m-instruct/model.safetensors \
-  --out models/SmolLM2-135M-Instruct-q4_0_attention_only.rllm \
+  --out models/SmolLM2-135M-Instruct-q4_0_attention_only.spsa \
   --codec raw \
   --quantize q4_0_attention_only
 
 target/release/rllm pack \
   models/downloads/smollm2-135m-instruct/model.safetensors \
-  --out models/SmolLM2-135M-Instruct-q8_transformer_keepio.rllm \
+  --out models/SmolLM2-135M-Instruct-q8_transformer_keepio.spsa \
   --codec raw \
   --quantize q8_transformer_keep_io
 ```
@@ -129,12 +129,12 @@ Artifact sizes:
 
 | artifact | size |
 |---|---:|
-| `SmolLM2-135M-Instruct-raw.rllm` | 260M |
-| `SmolLM2-135M-Instruct-q4_0.rllm` | 76M |
-| `SmolLM2-135M-Instruct-q4_0_keep_io.rllm` | 115M |
-| `SmolLM2-135M-Instruct-q4_0_mlp_only.rllm` | 151M |
-| `SmolLM2-135M-Instruct-q4_0_attention_only.rllm` | 224M |
-| `SmolLM2-135M-Instruct-q8_transformer_keepio.rllm` | 165M |
+| `SmolLM2-135M-Instruct-raw.spsa` | 260M |
+| `SmolLM2-135M-Instruct-q4_0.spsa` | 76M |
+| `SmolLM2-135M-Instruct-q4_0_keep_io.spsa` | 115M |
+| `SmolLM2-135M-Instruct-q4_0_mlp_only.spsa` | 151M |
+| `SmolLM2-135M-Instruct-q4_0_attention_only.spsa` | 224M |
+| `SmolLM2-135M-Instruct-q8_transformer_keepio.spsa` | 165M |
 
 Prompt matrix:
 

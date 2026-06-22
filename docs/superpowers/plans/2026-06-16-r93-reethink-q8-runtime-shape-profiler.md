@@ -500,7 +500,7 @@ Expected:
 Run:
 
 ```bash
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r93-control.txt 2> target/r93-control.time
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r93-control.txt 2> target/r93-control.time
 ```
 
 Expected:
@@ -514,7 +514,7 @@ Run two profiled runs:
 
 ```bash
 for i in 1 2; do
-  RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r93-q8-profile-run${i}.txt" 2> "target/r93-q8-profile-run${i}.time"
+  RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r93-q8-profile-run${i}.txt" 2> "target/r93-q8-profile-run${i}.time"
 done
 ```
 
@@ -573,7 +573,7 @@ If the profiler did not print usable rows, create the failed report with the com
 Append one R93 row to `docs/benchmarks/trials/index.md` with:
 
 ```text
-2026-06-16 | 2026-06-16-r93-reethink-q8-runtime-shape-profiler.md | success or failed | Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm | exact-lowram diagnostic, REETHINK-Q8-SHAPE-PROFILER | CPU arithmetic / Q8 runtime branch attribution | R92 showed lab/runtime mismatch | profile identifies dominant branch or fails to produce attribution | decision | paper value
+2026-06-16 | 2026-06-16-r93-reethink-q8-runtime-shape-profiler.md | success or failed | Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa | exact-lowram diagnostic, REETHINK-Q8-SHAPE-PROFILER | CPU arithmetic / Q8 runtime branch attribution | R92 showed lab/runtime mismatch | profile identifies dominant branch or fails to produce attribution | decision | paper value
 ```
 
 - [x] **Step 3: Run final verification**

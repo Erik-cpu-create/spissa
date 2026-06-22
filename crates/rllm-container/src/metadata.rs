@@ -148,7 +148,7 @@ pub struct ChunkMeta {
 
 /// Architecture/config fields imported from an original model `config.json`.
 ///
-/// This stays optional so older `.rllm` files continue to deserialize. Runtime
+/// This stays optional so older `.spsa` files continue to deserialize. Runtime
 /// adapters should still validate tensor shapes because config metadata is a
 /// hint/contract, not a replacement for container truth.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -243,7 +243,7 @@ pub struct ModelConfigMetadata {
     pub mrope_section: Option<Vec<u64>>,
 }
 
-/// Minimal tokenizer vocabulary/config metadata persisted in `.rllm` global metadata.
+/// Minimal tokenizer vocabulary/config metadata persisted in `.spsa` global metadata.
 ///
 /// This intentionally stores a runtime-ready `id_to_token` table instead of a
 /// full HuggingFace tokenizer graph. Phase 5E uses it for a narrow text smoke

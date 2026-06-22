@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Kernel lineage: **REEPLANE-W6** (new w=6 decode; extends R143 REEPLANE / R148 REESTREAM)
-- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.rllm`, raw codec; tied lm-head
+- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.spsa`, raw codec; tied lm-head
   `model.embed_tokens.weight` [vocab=262144, hidden=1152] bf16; **34 exponents → w=6**)
 - Verdict: **GO** — lossless streaming lm-head on Gemma proven bit-identical to
   resident, and the full generation token sequence is identical end-to-end.

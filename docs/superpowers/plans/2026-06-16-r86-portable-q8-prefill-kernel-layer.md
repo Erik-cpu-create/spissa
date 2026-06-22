@@ -480,7 +480,7 @@ Expected: release build succeeds.
 - [ ] Run three unchecked benchmark passes:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
 ```
 
 Expected each run:
@@ -494,7 +494,7 @@ Expected each run:
 - [ ] Run one trace only if a benchmark pass beats `11.45s`:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace target/r86-rllm-trace.json"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace target/r86-rllm-trace.json"
 jq '[.summary.duration_by_phase[] | {phase,event_count,total_ms}]' target/r86-rllm-trace.json
 jq '[.summary.duration_by_tensor_bucket[] | {bucket,event_count,total_ms}] | sort_by(.total_ms) | reverse' target/r86-rllm-trace.json
 ```

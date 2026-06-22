@@ -10,7 +10,7 @@ The Llama 3.2 1B Q8 exact-lowram prefill slowdown can be attributed to a concret
 
 ## Artifact
 
-- Model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Mode: exact-lowram Q8 transformer keep-IO rowchunks
 - Prompt: `Answer yes or no: is fire cold?`
 - Chat template: `llama3`
@@ -19,7 +19,7 @@ The Llama 3.2 1B Q8 exact-lowram prefill slowdown can be attributed to a concret
 ## Command
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-trace target/r79-q8-mlp-trace.json"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-trace target/r79-q8-mlp-trace.json"
 ```
 
 ## Verification

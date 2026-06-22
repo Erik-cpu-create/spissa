@@ -385,7 +385,7 @@ Expected: the required section structure.
 - [ ] **Step 2: Write the trial report**
 
 Create the report in the verdict folder. Fill from Task 2's numbers:
-- **Scope → REE kernel:** `REESTREAM (working name; Erik's final call)`. Mode: `experimental (capacity-bound streaming GEMV, pipelined)`. Artifact: `Llama-3.2-1B-Instruct-raw.rllm` embedding, block-framed, replicated > RAM. Device: Apple A18 Pro. Bottleneck tag: storage bandwidth.
+- **Scope → REE kernel:** `REESTREAM (working name; Erik's final call)`. Mode: `experimental (capacity-bound streaming GEMV, pipelined)`. Artifact: `Llama-3.2-1B-Instruct-raw.spsa` embedding, block-framed, replicated > RAM. Device: Apple A18 Pro. Bottleneck tag: storage bandwidth.
 - **Hypothesis:** double-buffer pipelining (overlap disk read with decode) hides the decode under the cold SSD, pushing R147's 1.13× toward the ~1.23× pure-byte ratio.
 - **Results:** raw-bf16 vs R148-pipelined ms + GB/s on the >RAM cold stream; the speedup; comparison to R147's 1.13×; lossless parity bit-identical (test green).
 - **Analysis:** did pipelining close the un-pipelined residual (1.50→toward 1.62 GB/s effective)? Place in the R140–R148 arc as the production capacity-bound kernel.

@@ -2,7 +2,7 @@
 
 **Date**: 2026-06-16
 **Goal**: Test whether combining fully exact Prefix Layers (N=2) with globally exact MLPs can stabilize hidden-state numerical drift and prevent hallucination, while keeping decode speed high.
-**Model**: Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm
+**Model**: Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa
 
 ## Configuration
 

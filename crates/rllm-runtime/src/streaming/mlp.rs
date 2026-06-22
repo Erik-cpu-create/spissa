@@ -23,7 +23,7 @@ fn streaming_default_tile_linear_from_model(
     )
 }
 
-/// Low-RAM two-layer MLP block over chunked `.rllm` weight tensors.
+/// Low-RAM two-layer MLP block over chunked `.spsa` weight tensors.
 ///
 /// Computes `Linear(input, w_in, b_in) -> GELU -> Linear(hidden, w_out, b_out)`.
 /// The intermediate activation is reserved in `budget` for the duration of the

@@ -64,7 +64,7 @@ RLLM R83 is still much slower than Ollama CPU-only because its prefill kernels l
 
 ## Artifact
 
-- RLLM model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- RLLM model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Ollama model: `llama3.2:1b`
 - RLLM mode: exact-lowram Q8, `--rama-integrity unchecked`
 - Ollama mode: CPU-only, `num_gpu:0`
@@ -187,7 +187,7 @@ Finished `release` profile
 - [x] Run RLLM benchmark:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
 ```
 
 Expected:
@@ -207,7 +207,7 @@ Expected:
 - [x] Run RLLM trace:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace target/r84-rllm-trace.json"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace target/r84-rllm-trace.json"
 ```
 
 Expected:
@@ -259,7 +259,7 @@ Use `success` if R84 produces usable benchmark + trace evidence. Use `inconclusi
 - [x] Add index row:
 
 ```markdown
-| 2026-06-16 | 2026-06-16-r84-fair-ollama-cpu-benchmark-and-rllm-trace.md | success | Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm vs llama3.2:1b | exact-lowram vs Ollama CPU-only | benchmark parity | R83 RLLM unchecked best prefill 11.45s | R84 measured RLLM and Ollama CPU-only plus post-R83 trace attribution | success | next R85 target chosen from trace |
+| 2026-06-16 | 2026-06-16-r84-fair-ollama-cpu-benchmark-and-rllm-trace.md | success | Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa vs llama3.2:1b | exact-lowram vs Ollama CPU-only | benchmark parity | R83 RLLM unchecked best prefill 11.45s | R84 measured RLLM and Ollama CPU-only plus post-R83 trace attribution | success | next R85 target chosen from trace |
 ```
 
 Replace the measured values in the row with actual R84 numbers before committing.

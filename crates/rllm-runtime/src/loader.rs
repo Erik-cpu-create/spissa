@@ -261,7 +261,7 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("rllm-runtime-{name}-{}.rllm", std::process::id()))
+        std::env::temp_dir().join(format!("rllm-runtime-{name}-{}.spsa", std::process::id()))
     }
 
     #[test]

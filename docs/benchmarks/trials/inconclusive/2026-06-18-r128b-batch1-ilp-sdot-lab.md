@@ -58,7 +58,7 @@ ARE the 4 outputs — accumulate across blocks with NO per-block reduce, one
 vectorized scale-FMA per block. That is llama.cpp's q8_0 4x8 GEMV and the source
 of its ~13x.
 
-Crucially, **pre-packing the interleaved layout in the `.rllm` is NOT a RAM cost**
+Crucially, **pre-packing the interleaved layout in the `.spsa` is NOT a RAM cost**
 — it is a one-time format change, a single mmap'd copy (the pack IS the storage).
 llama.cpp pays RAM for it (repack at load = a 2nd resident copy, 3.30 GB); RLLM can
 bake it into its own format → the decode speed at the low-RAM point. This makes the
@@ -82,7 +82,7 @@ Paper value:
 ## Next Experiment
 
 R129 (the real decode lever): add a 4-row-interleaved q8 weight layout to the
-`.rllm` pack format, and a decode GEMV kernel that holds 4 outputs in one sdot's 4
+`.spsa` pack format, and a decode GEMV kernel that holds 4 outputs in one sdot's 4
 lanes (no per-block `addv`), register-accumulates across blocks, scales once per
 block. Low-RAM-compatible (format change, 1 copy). Substantial multi-stage work
 (packer + loader + kernel + parity) — do it fresh on a thermally-quiet machine for

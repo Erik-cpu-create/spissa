@@ -1,6 +1,6 @@
 # Phase 7.10A Row-Span Linear Accumulation
 
-Phase 7.10A optimizes the core RAMA tiled-linear accumulation loop without changing the `.rllm` format, model artifact, codec policy, logits semantics, or memory budget contract.
+Phase 7.10A optimizes the core RAMA tiled-linear accumulation loop without changing the `.spsa` format, model artifact, codec policy, logits semantics, or memory budget contract.
 
 This is an original RLLM/RAMA compute-path optimization. It does **not** use hot/cold neurons, activation-locality prediction, GPU residency scheduling, sparse neuron routing, or any PowerInfer-style mechanism.
 
@@ -50,7 +50,7 @@ No CLI flag, no file format change, no model repack, no new dependency.
 Artifact/runtime:
 
 ```text
-artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm
+artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa
 runtime integrity: verify-once
 input tokens: 1
 new tokens: 16
@@ -176,7 +176,7 @@ Real Pythia-70M 512-token HF/PyTorch logits comparison was run with chunked pref
 ```bash
 uv run --with torch --with transformers --with safetensors \
   scripts/phase77_compare_logits.py \
-  --rllm-artifact models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
+  --rllm-artifact models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa \
   --out-dir target/phase710a-logits-512-c64 \
   --token-ids <512 deterministic ids> \
   --ctx 2048 \

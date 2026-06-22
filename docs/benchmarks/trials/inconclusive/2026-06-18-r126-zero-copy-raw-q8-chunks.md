@@ -17,7 +17,7 @@ by the fp16 path) should eliminate that and speed up decode (and prefill).
 
 - Mode: exact-lowram runtime
 - REE kernel: none (IO/decode path change)
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm` (codec rtc-raw-v1)
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa` (codec rtc-raw-v1)
 - Architecture: LLaMA 3.2 1B, Q8_0
 - Target device/profile: Apple A18 Pro, single-thread
 - Bottleneck tag: allocation / IO-decode

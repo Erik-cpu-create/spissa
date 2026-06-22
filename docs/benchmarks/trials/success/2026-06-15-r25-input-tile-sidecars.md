@@ -16,7 +16,7 @@ can read only the feature columns used by AIP.
 ## Scope
 
 - Mode: experimental-speed
-- Model/artifact: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa`
 - Source model: `models/downloads/llama-3.2-1b-instruct-unsloth/model.safetensors`
 - Architecture: llama
 - Target device/profile: CPU-only, low RAM
@@ -40,7 +40,7 @@ Pack artifact:
 ```bash
 target/release/rllm pack \
   models/downloads/llama-3.2-1b-instruct-unsloth/model.safetensors \
-  --out models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+  --out models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
   --codec raw \
   --chunk-size 1mb \
   --config models/downloads/llama-3.2-1b-instruct-unsloth/config.json \
@@ -66,7 +66,7 @@ Benchmark command shape:
 printf 'good morning\nexit\n' | \
   RLLM_AIP_INPUT_TILES=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=<k> \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
     --ctx 2048 \
     --max-new-tokens <n> \
     --profile-phases

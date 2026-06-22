@@ -7,7 +7,7 @@ This benchmark turns the Phase 7.6 smoke test into a repeatable release-build ma
 Artifact:
 
 ```text
-models/pythia-70m-phase76-16mb.rllm
+models/pythia-70m-phase76-16mb.spsa
 ```
 
 Artifact properties:

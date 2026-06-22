@@ -18,7 +18,7 @@ be embarrassingly parallel and bit-identical, reclaiming the idle cores.
 
 - Mode: exact-lowram runtime
 - Kernel: `lm_head_logits_parallel` (vocab-row split, scalar inner dot per row)
-- Model/artifact: `gemma-3-4b-it-q8.rllm` (`q8_transformer_keep_io`, embedding/norms raw)
+- Model/artifact: `gemma-3-4b-it-q8.spsa` (`q8_transformer_keep_io`, embedding/norms raw)
 - Architecture: Gemma 3 4B, Q8_0 transformer + raw BF16 tied LM head
 - Target device/profile: Intel Xeon @ 2.10GHz, 4 cores (x86_64)
 - Bottleneck tag: CPU arithmetic (scalar single-thread LM-head GEMV)

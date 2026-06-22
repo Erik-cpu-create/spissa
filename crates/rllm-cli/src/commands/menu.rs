@@ -26,7 +26,7 @@ const LOGO: &str = r"          \    \    |    /    /
                |_________|";
 
 const FETCH: &str = "📥  Fetch model dari Hugging Face";
-const PACK: &str = "📦  Pack model → .rllm";
+const PACK: &str = "📦  Pack model → .spsa";
 const CHAT: &str = "💬  Chat sama model";
 const INSPECT: &str = "🔍  Inspect / list model";
 const EXIT: &str = "🚪  Keluar";
@@ -136,8 +136,8 @@ fn menu_pack() -> Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("model");
-    let default_out = format!("models/{base}.rllm");
-    let out = match Text::new("Output .rllm:").with_default(&default_out).prompt() {
+    let default_out = format!("models/{base}.spsa");
+    let out = match Text::new("Output .spsa:").with_default(&default_out).prompt() {
         Ok(o) => o,
         Err(_) => return Ok(()),
     };
@@ -226,11 +226,11 @@ fn menu_inspect() -> Result<()> {
     }
 }
 
-/// Prompt the user to pick a `.rllm` from `models/`; `None` = none found or cancelled.
+/// Prompt the user to pick a `.spsa` from `models/`; `None` = none found or cancelled.
 fn pick_rllm(prompt: &str) -> Option<String> {
     let models = discover_rllm("models");
     if models.is_empty() {
-        println!("  (belum ada .rllm di models/ — Pack dulu)");
+        println!("  (belum ada .spsa di models/ — Pack dulu)");
         return None;
     }
     Select::new(prompt, models).prompt().ok()
@@ -241,7 +241,7 @@ fn pick_rllm(prompt: &str) -> Option<String> {
 fn discover_rllm(root: &str) -> Vec<String> {
     let mut out = Vec::new();
     walk(Path::new(root), 4, &mut |p, is_dir| {
-        if !is_dir && p.extension().and_then(|e| e.to_str()) == Some("rllm") {
+        if !is_dir && p.extension().and_then(|e| e.to_str()) == Some("spsa") {
             out.push(p.display().to_string());
         }
     });

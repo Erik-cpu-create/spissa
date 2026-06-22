@@ -382,7 +382,7 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("rllm-plan-{name}-{}.rllm", std::process::id()))
+        std::env::temp_dir().join(format!("rllm-plan-{name}-{}.spsa", std::process::id()))
     }
 
     fn write_test_model(path: &std::path::Path) {

@@ -87,7 +87,7 @@ What R118 still does NOT model:
   timed loop (consistent with prior int8 variants). At runtime it is one shuffle
   pass over `batch × in_features` int8 bytes per matmul — amortized across
   hundreds of out_features chunks per pack, but not zero.
-- Weight pre-packing at `.rllm` pack time. The `.rllm` container currently stores
+- Weight pre-packing at `.spsa` pack time. The `.spsa` container currently stores
   the Q8 format directly; a runtime promotion needs either an opt-in packed-panel
   layout in the container, or a one-shot pack on artifact load (memory cost).
 
@@ -116,6 +116,6 @@ R119: promote `REEFUSE-Q8-I8MM-PANEL` into the runtime under a same-turn f32
 control, gated to batch>1 (prefill) so batch1 decode stays on the f32 fast path
 (R111/R112 lesson). Open design choices: (a) pack the activation per matmul into
 a scratch buffer reused across chunks, and (b) pack the weight per chunk at
-recall time vs adding an opt-in pre-packed panel layout to `.rllm` at pack time.
+recall time vs adding an opt-in pre-packed panel layout to `.spsa` at pack time.
 R111 logit parity must hold; R115 threading should still apply. The bigger
 8x8 / 4x4 tile variants and MLP down/lm_head extensions are R120+.

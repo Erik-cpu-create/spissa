@@ -14,7 +14,7 @@ without changing generated text, peak transient memory, or CPU-only semantics.
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: Llama 3.2 1B Instruct
 - Target device/profile: local CPU-only RLLM release build
 - Expected bottleneck: Q8 MLP projection prefill
@@ -29,7 +29,7 @@ cargo build --release -p rllm-cli --bin llama-test
 
 printf '%s\nquit\n' 'Answer yes or no: is fire cold?' \
   | target/release/llama-test \
-      --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm \
+      --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa \
       --chat-template llama3 \
       --max-new-tokens 4 \
       --profile-phases

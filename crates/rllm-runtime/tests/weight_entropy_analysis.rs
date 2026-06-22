@@ -20,7 +20,7 @@
 
 use rllm_runtime::LazyRllmModel;
 
-const MODEL: &str = "../../models/gemma-3-1b-it-rawcodec.rllm";
+const MODEL: &str = "../../models/gemma-3-1b-it-rawcodec.spsa";
 
 fn shannon_bits(hist: &[u64]) -> f64 {
     let total: u64 = hist.iter().sum();

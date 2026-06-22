@@ -1898,7 +1898,7 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("rllm-gpt-neox-{name}-{}.rllm", std::process::id()))
+        std::env::temp_dir().join(format!("rllm-gpt-neox-{name}-{}.spsa", std::process::id()))
     }
 
     fn add_f32_tensor(

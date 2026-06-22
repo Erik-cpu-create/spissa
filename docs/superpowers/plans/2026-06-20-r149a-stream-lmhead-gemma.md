@@ -300,7 +300,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: Repack Gemma 1B with raw codec (so the embedding is raw bf16)**
 
 ```bash
-./target/release/rllm pack /tmp/gemma1b --out models/gemma-3-1b-it-rawcodec.rllm \
+./target/release/rllm pack /tmp/gemma1b --out models/gemma-3-1b-it-rawcodec.spsa \
   --quantize raw --codec raw --config /tmp/gemma1b/config.json --tokenizer /tmp/gemma1b/tokenizer.json 2>&1 | tail -2
 ```
 Expected: "Found 340 tensors (... 'gemma3')", written.
@@ -314,7 +314,7 @@ Add to `mod bitplane_stream_tests` in `bitplane_stream.rs`:
 #[ignore]
 fn write_gemma_lmhead_sidecar() {
     write_lmhead_sidecar(
-        "../../models/gemma-3-1b-it-rawcodec.rllm",
+        "../../models/gemma-3-1b-it-rawcodec.spsa",
         "model.embed_tokens.weight",
         256,
         "/tmp/gemma1b-lmhead.sidecar",
@@ -332,8 +332,8 @@ Expected: "wrote /tmp/gemma1b-lmhead.sidecar" (asserts w=5 internally).
 ```bash
 cargo build --release -p rllm-cli
 P="Name three colors."
-echo "=== resident ==="; ./target/release/gemma-test --model models/gemma-3-1b-it-rawcodec.rllm --prompt "$P" --max-new-tokens 16 --ctx 256 2>&1 | grep "Generated token ids"
-echo "=== streaming ==="; RLLM_STREAM_LMHEAD=/tmp/gemma1b-lmhead.sidecar ./target/release/gemma-test --model models/gemma-3-1b-it-rawcodec.rllm --prompt "$P" --max-new-tokens 16 --ctx 256 2>&1 | grep "Generated token ids"
+echo "=== resident ==="; ./target/release/gemma-test --model models/gemma-3-1b-it-rawcodec.spsa --prompt "$P" --max-new-tokens 16 --ctx 256 2>&1 | grep "Generated token ids"
+echo "=== streaming ==="; RLLM_STREAM_LMHEAD=/tmp/gemma1b-lmhead.sidecar ./target/release/gemma-test --model models/gemma-3-1b-it-rawcodec.spsa --prompt "$P" --max-new-tokens 16 --ctx 256 2>&1 | grep "Generated token ids"
 ```
 Expected: the two `Generated token ids: [...]` lines are **identical** → lossless streaming lm-head. **Record both lines.** (If they differ, the streaming path has a bug — diff the logits before declaring done.)
 

@@ -18,7 +18,7 @@ fix it — but the split axis matters.
 
 - Mode: fast-lowram runtime (q8, codec rtc-raw-v1)
 - REE kernel: q8 panel prefill (i8mm `smmla`), row-parallel wrapper — name pending Erik
-- Model/artifact: `models/gemma-3-4b-it-q8.rllm`
+- Model/artifact: `models/gemma-3-4b-it-q8.spsa`
 - Architecture: Gemma 3 4B, Q8_0
 - Target device/profile: Apple Silicon, 8 GB RAM, CPU only
 - Expected bottleneck: prefill single-threaded (parallelization axis)

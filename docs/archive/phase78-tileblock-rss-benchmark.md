@@ -4,19 +4,19 @@ Phase 7.8E preliminarily benchmarks a real local Pythia-70M artifact packed with
 
 ```bash
 cargo run --quiet -- pack models/pythia-70m/model.safetensors \
-  --out models/pythia-70m-phase78d-tileblocks.rllm \
+  --out models/pythia-70m-phase78d-tileblocks.spsa \
   --chunk-size 16mb \
   --tile-block-elements 65536 \
   --config models/pythia-70m/config.json \
   --tokenizer models/pythia-70m/tokenizer.json
 ```
 
-The runtime path is still the existing chunk-verified tiled RAMA path. The improvement comes from pack-time chunk alignment: each tile/block is stored as an independently verified `.rllm` chunk, so the existing chunk decode path no longer materializes 16 MiB chunks for every tiled projection.
+The runtime path is still the existing chunk-verified tiled RAMA path. The improvement comes from pack-time chunk alignment: each tile/block is stored as an independently verified `.spsa` chunk, so the existing chunk decode path no longer materializes 16 MiB chunks for every tiled projection.
 
 ## Artifact
 
 ```text
-Artifact: models/pythia-70m-phase78d-tileblocks.rllm
+Artifact: models/pythia-70m-phase78d-tileblocks.spsa
 Original size: 166,019,180 bytes
 Compressed size: 127,330,065 bytes
 Compression ratio: 76.7%
@@ -34,7 +34,7 @@ Command:
 ```bash
 python3 scripts/phase76_release_rss_benchmark.py \
   --skip-build \
-  --artifact models/pythia-70m-phase78d-tileblocks.rllm \
+  --artifact models/pythia-70m-phase78d-tileblocks.spsa \
   --out-dir target/phase78e-tileblock-bench \
   --tokens 1,4,8,16 \
   --ctx 128,512,1024 \
@@ -96,7 +96,7 @@ Command:
 ```bash
 uv run --with torch --with transformers --with safetensors \
   scripts/phase77_compare_logits.py \
-  --rllm-artifact models/pythia-70m-phase78d-tileblocks.rllm \
+  --rllm-artifact models/pythia-70m-phase78d-tileblocks.spsa \
   --out-dir target/phase78e-tileblock-logits \
   --token-ids 12092,13 \
   --ctx 128 \

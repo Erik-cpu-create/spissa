@@ -369,7 +369,7 @@ Expected: the required section structure.
 - [ ] **Step 2: Write the trial report**
 
 Create the report in the verdict-matching folder. Fill from Task 2's numbers:
-- **Scope → REE kernel:** `REEFUSE-PLANE-DOT v2 (working name; Erik's final call)`. Mode: `experimental (compressed-resident fused GEMV, optimized)`. Artifact: `Llama-3.2-1B-Instruct-raw.rllm` embedding. Device: Apple A18 Pro. Bottleneck tag: CPU arithmetic (decode) vs memory bandwidth.
+- **Scope → REE kernel:** `REEFUSE-PLANE-DOT v2 (working name; Erik's final call)`. Mode: `experimental (compressed-resident fused GEMV, optimized)`. Artifact: `Llama-3.2-1B-Instruct-raw.spsa` embedding. Device: Apple A18 Pro. Bottleneck tag: CPU arithmetic (decode) vs memory bandwidth.
 - **Hypothesis:** tile-fusion (no L1 scratch) + OOO overlap closes the R144 gap; multi-core lets decode scale past the bus-bound bf16 read.
 - **Results:** the per-thread table (plain bf16 vs R144 naive-fused vs R145 tile-fused), best ms each, speedup, resident MB; lossless parity bit-identical (test green).
 - **Analysis:** compare R145 best vs plain 9.6 ms and vs R144's 19.9 ms; how much did fusion+OOO recover, and did multi-core flip it. If GO: the lossless-compressed-resident speed win is demonstrated (the arc's first speed GO). If MARGINAL/NO-GO: state exactly the remaining gap and that 16-wide `vqtbl2q` decode + strategy-B pipelining are the next levers (R146).

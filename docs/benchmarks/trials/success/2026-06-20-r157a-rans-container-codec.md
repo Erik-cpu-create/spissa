@@ -1,9 +1,9 @@
-# R157a — rANS as a real .rllm container codec: `pack --codec rans` lossless (GO)
+# R157a — rANS as a real .spsa container codec: `pack --codec rans` lossless (GO)
 
 - Date: 2026-06-20
 - Codec: rtc-rans-v1 (`RansCodec: TensorCodec`)
 - Models: pythia-160m (375 MB), Gemma 3 1B IT bf16 (2.0 GB) — both packed + verified
-- Verdict: **GO** — rANS is now a first-class `.rllm` codec. `rllm pack --codec rans`
+- Verdict: **GO** — rANS is now a first-class `.spsa` codec. `rllm pack --codec rans`
   produces a **lossless** container the runtime decodes natively; Gemma 1B packs to
   **2.0 GB → 1.325 GB (−33.7%)** and `rllm verify` reports **LOSSLESS VERIFIED**. The
   rANS invention moves from research/sidecar to a real, usable feature.
@@ -25,11 +25,11 @@
 ## Results
 
 ```
-$ rllm pack /tmp/gemma1b --out gemma1b-rans.rllm --codec rans ...
+$ rllm pack /tmp/gemma1b --out gemma1b-rans.spsa --codec rans ...
   Encoded 2189 chunks   Codec policy: rtc-rans-v1
   Original 1,999,771,904 B -> Compressed 1,324,908,500 B   ratio 66.3%  (1.3 GB file)
 
-$ rllm verify gemma1b/model.safetensors gemma1b-rans.rllm
+$ rllm verify gemma1b/model.safetensors gemma1b-rans.spsa
   [OK] Verified 340 tensors, 1,999,771,904 bytes total
   [OK] LOSSLESS VERIFIED
 
@@ -42,9 +42,9 @@ exactly. Suites: rtc-codec 54 / rllm-runtime lib 296, 0 warnings.
 
 ## Analysis
 
-- **The milestone "packed to .rllm" is real:** before R157a, rANS lived only as a library
+- **The milestone "packed to .spsa" is real:** before R157a, rANS lived only as a library
   + experimental sidecars; the container's `codec_for_id` knew only raw/rle/huff (not even
-  bitplane/dfloat). Now `rllm pack --codec rans` yields a genuine lossless `.rllm` and the
+  bitplane/dfloat). Now `rllm pack --codec rans` yields a genuine lossless `.spsa` and the
   runtime/verify/unpack all decode it.
 - **Lossless verified end-to-end** on two real models (byte-exact vs original safetensors),
   not just synthetic roundtrips.
@@ -53,7 +53,7 @@ exactly. Suites: rtc-codec 54 / rllm-runtime lib 296, 0 warnings.
 
 ## Decision
 
-**GO.** rANS is a first-class lossless `.rllm` codec. A user can now `rllm pack --codec rans`
+**GO.** rANS is a first-class lossless `.spsa` codec. A user can now `rllm pack --codec rans`
 and ship a 1.3 GB lossless Gemma 1B (vs 2.0 GB raw). This is the resident/container path;
 the >RAM streaming forward-pass integration is R157b/c.
 
@@ -66,6 +66,6 @@ the >RAM streaming forward-pass integration is R157b/c.
 ## Verification status
 
 - [x] `RansCodec` roundtrip (bf16 compresses + raw fallback), unit.
-- [x] `rllm pack --codec rans` → lossless `.rllm`; `rllm verify` LOSSLESS VERIFIED on
+- [x] `rllm pack --codec rans` → lossless `.spsa`; `rllm verify` LOSSLESS VERIFIED on
       pythia-160m (184 tensors) and Gemma 3 1B bf16 (340 tensors, 2.0 GB → 1.325 GB).
 - [x] Registered in loader/verify/unpack; rtc-codec 54 / rllm-runtime 296, 0 warnings.

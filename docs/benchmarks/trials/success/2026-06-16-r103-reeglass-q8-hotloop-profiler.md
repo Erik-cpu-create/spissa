@@ -16,7 +16,7 @@ the Q8 hot loop so R104 can target the correct remaining cost.
 
 - Mode: exact-lowram diagnostic
 - REE kernel lineage: `REEGLASS-Q8-HOTLOOP-PROFILER`
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Prompt: `Answer yes or no: is fire cold?`
 - Threading: `RLLM_THREADS=1`
 - Integrity: `--rama-integrity unchecked`
@@ -33,8 +33,8 @@ cargo test -p rllm-runtime q8_profile -- --nocapture
 cargo test -p rllm-runtime streaming_tile_linear_accumulates_q8_0_without_f32_chunk_scratch -- --nocapture
 cargo test -p rllm-cli q8_kernel_profile_suffix -- --nocapture
 cargo build --release -p rllm-cli --bin llama-test
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r103-control.txt 2> target/r103-control.time
-RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r103-profile-top8.txt 2> target/r103-profile-top8.time
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r103-control.txt 2> target/r103-control.time
+RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r103-profile-top8.txt 2> target/r103-profile-top8.time
 ```
 
 ## Runtime Results

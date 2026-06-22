@@ -20,7 +20,7 @@ decode meant to overlap the dot via out-of-order execution.
 
 - Mode: experimental (compressed-resident fused GEMV, optimized kernel)
 - REE kernel: REEFUSE-PLANE-DOT v2 (working name; Erik's final call)
-- Model/artifact: `Llama-3.2-1B-Instruct-raw.rllm` embedding (vocab 128256 × hidden 2048, 525 MB)
+- Model/artifact: `Llama-3.2-1B-Instruct-raw.spsa` embedding (vocab 128256 × hidden 2048, 525 MB)
 - Architecture: LLaMA 3.2 1B bf16 LM head
 - Target device/profile: Apple A18 Pro (2 P + 4 E), macOS; release; 1–8 threads
 - Expected bottleneck: per-row decode compute vs DRAM bandwidth

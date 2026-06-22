@@ -25,7 +25,7 @@ without abandoning the chunk machinery (kept for compressed/low-RAM/integrity).
 
 - Mode: exact-lowram runtime (q8, near-exact int8 activation — quant-only diff, same as llama.cpp q8 inference)
 - REE kernel: REEBORN-Q8-SDOT-DECODE (whole-tensor int8 sdot, row-parallel; name pending Erik's confirmation)
-- Model/artifact: `models/gemma-3-4b-it-q8.rllm` (q8_transformer_keep_io, codec rtc-raw-v1)
+- Model/artifact: `models/gemma-3-4b-it-q8.spsa` (q8_transformer_keep_io, codec rtc-raw-v1)
 - Architecture: Gemma 3 4B, Q8_0
 - Target device/profile: Apple Silicon, CPU only
 - Bottleneck tag: CPU arithmetic (scalar→sdot) + per-chunk dispatch structure

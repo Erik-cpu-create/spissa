@@ -16,7 +16,7 @@ batch (prompt token) rows — speeds up prefill while keeping output exact.
 
 - Mode: exact-lowram runtime
 - REE kernel lineage: `REEWEAVE-Q8-PREFILL`
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Device: Apple A18 Pro (2 perf + 4 eff cores), 8 GB
 - Bottleneck tag: scheduler / CPU parallelism
 - Implementation: `accumulate_q8_0_chunk_parallel` wraps the existing kernel.

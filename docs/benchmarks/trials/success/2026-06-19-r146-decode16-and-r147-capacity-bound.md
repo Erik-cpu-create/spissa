@@ -21,7 +21,7 @@ wins on speed AND RAM. This is exactly the low-RAM-device mission.
 
 - Mode: experimental (codec decode throughput + capacity-bound streaming)
 - REE kernel: REEPLANE 16-wide (`decode16_w5_into`); the streaming proof reuses it
-- Model/artifact: `Llama-3.2-1B-Instruct-raw.rllm` bf16 embedding (262.7M weights), replicated to >RAM for the stream test
+- Model/artifact: `Llama-3.2-1B-Instruct-raw.spsa` bf16 embedding (262.7M weights), replicated to >RAM for the stream test
 - Target device/profile: Apple A18 Pro, macOS; release; single-core decode
 - Bottleneck tag: IO/decode; storage bandwidth (the decisive one for R147)
 

@@ -19,7 +19,7 @@ before any runtime kernel is promoted.
 
 - Mode: exact-lowram runtime gate (validation only)
 - REE kernel lineage: none (validation harness, not a promoted kernel)
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: Llama 3.2 1B Instruct, chat-template llama3
 - Target device/profile: Apple A18 Pro, single-thread (`RLLM_THREADS=1`)
 - Bottleneck tag: runtime bug / quality validation
@@ -40,7 +40,7 @@ Mechanism added (default off; exact f32 path stays default):
 cargo build --release -p rllm-cli --bin llama-test
 # token parity: OFF (f32) vs ON (int8 activations), 3 diverse prompts
 for P in "Answer yes or no: is fire cold?" "Answer yes or no: is the sky blue?" "Answer yes or no: is ice hot?"; do
-  printf '%s\nquit\n' "$P" | RLLM_THREADS=1 target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 6 --rama-integrity unchecked
+  printf '%s\nquit\n' "$P" | RLLM_THREADS=1 target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 6 --rama-integrity unchecked
   printf '%s\nquit\n' "$P" | RLLM_THREADS=1 RLLM_Q8_ACTIVATION=1 target/release/llama-test --model ... (same)
 done
 # logit parity: dump first-step logits OFF vs ON with RLLM_FULL_LOGITS=1, compare top-1 / top-10 / max abs diff

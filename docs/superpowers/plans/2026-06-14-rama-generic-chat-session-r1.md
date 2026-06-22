@@ -872,7 +872,7 @@ Add this variant to `Commands` in `crates/rllm-cli/src/main.rs`:
 ```rust
     /// Run a scripted persistent chat-session benchmark
     ChatSession {
-        /// Path to .rllm file
+        /// Path to .spsa file
         file: String,
 
         /// Conversation turn text; pass this flag more than once
@@ -1083,7 +1083,7 @@ Expected result: release CLI builds successfully.
 Run:
 
 ```bash
-printf 'Hello\nContinue\nexit\n' | /usr/bin/time -l target/release/llama-test --model models/SmolLM2-135M-raw.rllm
+printf 'Hello\nContinue\nexit\n' | /usr/bin/time -l target/release/llama-test --model models/SmolLM2-135M-raw.spsa
 ```
 
 Expected evidence to record in the report:
@@ -1100,7 +1100,7 @@ Expected evidence to record in the report:
 Run:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session models/SmolLM2-135M-raw.rllm --turn "Hello" --turn "Continue" --max-new-tokens 64 --ctx 2048 --out docs/benchmarks/trials/active/2026-06-14-r1-session-smollm2.md
+cargo run --release -p rllm-cli -- chat-session models/SmolLM2-135M-raw.spsa --turn "Hello" --turn "Continue" --max-new-tokens 64 --ctx 2048 --out docs/benchmarks/trials/active/2026-06-14-r1-session-smollm2.md
 ```
 
 Expected result:

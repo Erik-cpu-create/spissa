@@ -268,7 +268,7 @@ pub fn run(
     }
 
     println!("\n✓ {repo} -> {}", dest.display());
-    println!("  pack it with:  rllm pack {} --out <name>.rllm", dest.display());
+    println!("  pack it with:  rllm pack {} --out <name>.spsa", dest.display());
     Ok(())
 }
 

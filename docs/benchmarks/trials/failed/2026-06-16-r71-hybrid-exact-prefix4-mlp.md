@@ -2,7 +2,7 @@
 
 **Date**: 2026-06-16
 **Goal**: Push the hybrid exactness strategy further. Since Trial R70 (Prefix N=2 + Exact MLP) failed at Layer 5 due to sparse attention drift in Layers 2-4, we extended the fully exact prefix to **N=4 layers**.
-**Model**: Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm
+**Model**: Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa
 
 ## Configuration
 

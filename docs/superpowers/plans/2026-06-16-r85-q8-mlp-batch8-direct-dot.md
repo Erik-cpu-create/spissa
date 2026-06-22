@@ -4,7 +4,7 @@
 
 **Goal:** Reduce Llama 3.2 1B Q8 exact-lowram prefill time by optimizing the shared Q8 MLP dot path used by gate/up/down without increasing resident RAM.
 
-**Architecture:** R85 keeps the current `.rllm` container, Q8_0 block format, and streaming low-RAM execution. It adds scalar batch8 direct-dot micro-kernels for Q8_0 blocks so prefill can process eight prompt rows per 32-weight block without first materializing a temporary `[f32; 32]` scaled block. The first implementation is portable Rust; target-specific SIMD is left for a later stage only if this slice proves the bottleneck and correctness remain stable.
+**Architecture:** R85 keeps the current `.spsa` container, Q8_0 block format, and streaming low-RAM execution. It adds scalar batch8 direct-dot micro-kernels for Q8_0 blocks so prefill can process eight prompt rows per 32-weight block without first materializing a temporary `[f32; 32]` scaled block. The first implementation is portable Rust; target-specific SIMD is left for a later stage only if this slice proves the bottleneck and correctness remain stable.
 
 **Tech Stack:** Rust, `rllm-runtime` streaming kernels, Q8_0 block weights, `llama-test`, benchmark docs.
 
@@ -406,7 +406,7 @@ Expected: release build succeeds.
 - [ ] Run three unchecked benchmark passes:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
 ```
 
 Expected each run:
@@ -420,7 +420,7 @@ Expected each run:
 - [ ] Run one trace if a benchmark pass beats `11.45s`:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace target/r85-rllm-trace.json"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace target/r85-rllm-trace.json"
 jq '[.summary.duration_by_phase[] | {phase,event_count,total_ms}]' target/r85-rllm-trace.json
 jq '[.summary.duration_by_tensor_bucket[] | {bucket,event_count,total_ms}] | sort_by(.total_ms) | reverse' target/r85-rllm-trace.json
 ```

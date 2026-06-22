@@ -12,7 +12,7 @@ Replacing resident f32 LLaMA session LM-head logits with raw BF16 streaming argm
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/SmolLM2-135M-raw.rllm`
+- Model/artifact: `models/SmolLM2-135M-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: resident LM-head memory and logit materialization
@@ -23,7 +23,7 @@ Replacing resident f32 LLaMA session LM-head logits with raw BF16 streaming argm
 Commands:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.rllm' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r9-lm-head-argmax-smollm2.md'
+cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.spsa' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r9-lm-head-argmax-smollm2.md'
 ```
 
 ## Results

@@ -35,7 +35,7 @@ R108 must not claim runtime speedup from R107 alone. The acceptance evidence mus
 - Tests owner: `crates/rllm-runtime/src/streaming/tests.rs`
 - Benchmark docs owner: `docs/benchmarks/trials/`
 
-Do not change the `.rllm` container format, Q8 block format, tokenizer, prompt template, memory budget logic, Q8 multiply-into path, Q8 argmax path, or batch1 complete-row fast path.
+Do not change the `.spsa` container format, Q8 block format, tokenizer, prompt template, memory budget logic, Q8 multiply-into path, Q8 argmax path, or batch1 complete-row fast path.
 
 ## Files
 
@@ -427,7 +427,7 @@ Expected: PASS.
 Run this before applying Task 3 runtime routing, or reset to `HEAD` temporarily if needed:
 
 ```bash
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r108-pre-control.txt 2> target/r108-pre-control.time
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r108-pre-control.txt 2> target/r108-pre-control.time
 ```
 
 Expected:
@@ -442,7 +442,7 @@ Run:
 
 ```bash
 for i in 1 2 3; do
-  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r108-run${i}.txt" 2> "target/r108-run${i}.time"
+  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r108-run${i}.txt" 2> "target/r108-run${i}.time"
 done
 ```
 
@@ -456,7 +456,7 @@ Expected:
 Run:
 
 ```bash
-RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r108-profile.txt 2> target/r108-profile.time
+RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r108-profile.txt 2> target/r108-profile.time
 ```
 
 Expected:

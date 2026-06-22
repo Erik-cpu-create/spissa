@@ -98,7 +98,7 @@ This means R98's NEON scale/dequant is not the dominant remaining cost inside
 the lab shape. Pre-scaling weights into a larger f32 sidecar increases memory
 traffic enough to lose despite removing Q8 scale/dequant from the timed loop.
 
-Because the lab gate failed, R102 did not change `.rllm`, packer, importer, or
+Because the lab gate failed, R102 did not change `.spsa`, packer, importer, or
 runtime streaming paths.
 
 ## Decision

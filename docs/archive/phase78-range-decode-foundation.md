@@ -75,7 +75,7 @@ non-native range codec:
 `--tile-block-elements` overrides `--chunk-size` per tensor by multiplying the
 element count by that tensor's dtype size. This creates chunk-level tile/block
 alignment while preserving existing full-chunk SHA-256 verification. It works for
-compressed chunks because each tile/block is still an independent `.rllm` chunk.
+compressed chunks because each tile/block is still an independent `.spsa` chunk.
 
 `--range-checksum-size` is also opt-in and currently emits per-range checksums
 only for identity-mapped raw chunks (`rtc-raw-v1`) where compressed and original

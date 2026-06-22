@@ -228,7 +228,7 @@ impl TensorSource {
     }
 }
 
-/// Map raw checkpoint tensor names to the names stored in the `.rllm`, returning
+/// Map raw checkpoint tensor names to the names stored in the `.spsa`, returning
 /// `(rllm_name, source_name)` pairs. For multimodal Gemma checkpoints
 /// (`Gemma3ForConditionalGeneration`) this keeps only the language model
 /// (`language_model.*`), strips that prefix so tensors match the standard
@@ -329,7 +329,7 @@ pub fn run(
         .as_ref()
         .and_then(|config| config.architecture_type.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    // Map raw checkpoint names to `.rllm` names (filters vision + strips the
+    // Map raw checkpoint names to `.spsa` names (filters vision + strips the
     // `language_model.` prefix for multimodal Gemma; identity otherwise).
     let tensors = map_tensor_names(&raw_names, &architecture);
     println!(
@@ -394,7 +394,7 @@ pub fn run(
             tensors.len()
         );
 
-        // Read from the source (original) name; store under the `.rllm` (mapped)
+        // Read from the source (original) name; store under the `.spsa` (mapped)
         // name so quant matchers + the runtime see standard `model.layers.*`.
         let mut tensor_data = source.read_tensor(src_name)?;
         let mut meta = source.to_rllm_meta(src_name)?;
