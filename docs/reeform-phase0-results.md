@@ -118,6 +118,23 @@ Two honest numbers:
   **zigzag** recovers part of it (10.1% → 13.5%). Realising the full 27% needs a delta-specialised
   **u16-symbol** coder — the clear Phase-2 task.
 
+## 5d. Phase-2 — the 27% REALISED (`reeform-rans16`)
+
+The shipped byte-wise rANS left the u16-symbol correlation on the table (9.19 bit). A static
+**u16-SYMBOL rANS** (one global normalized frequency table, 20-bit probability scale, 64-bit
+state) codes the zigzag delta at its true symbol entropy:
+
+```
+self-test (skewed synthetic)            : round-trip ✅ EXACT
+u16-rANS(zigzag Δ), incl. global table  : 7.7442 bit/weight   (≈ the 7.70 entropy)
+vs rANS(full fine-tune)                 : 10.6277 bit/weight
+→ 27.1% LOSSLESS reduction — REALISED, real bytes, round-trip BIT-EXACT over 134.5M weights ✅
+```
+
+So the ceiling is now the realised result: **the full 27% lossless win works end-to-end with a
+real codec.** Instrument: `reeform-rans16` (self-tested). Remaining for product: wire it as a
+container codec + the `spissa pack --base <base.spsa>` / delta-load path.
+
 ## 6. Honest framing for the record
 
 The original "extreme lossless of arbitrary weights" target is **physically walled** (mantissa).
