@@ -85,6 +85,39 @@ entropy should fall **well below 7.70**. This is the obvious next experiment and
 into a much larger lossless win. Also: validate across more ≤1B base/fine-tune pairs; encode the
 delta with the shipped rANS to confirm real bytes ≈ entropy; design the `spissa pack --base` path.
 
+## 5b. Phase-1 amplifier results (`reeform-amplify`)
+
+Tested two amplifiers over the int-delta floor, on the top-6 MLP matrices (Δ floor there = 7.42):
+
+| Amplifier | Result | Verdict |
+|---|---|---|
+| **Low-rank-on-Δ** (the LoRA bet): store rank-32 `A,B` of float Δ + exact int residual | residual 7.0–7.4 **+ 1.22 U,V overhead → net 8.36** | ❌ **worse.** The mantissa wall is universal — it hits the delta residual too. LoRA-style low-rank does NOT help *lossless*. |
+| **Δ neighbour context** (order-1 on the delta) | H1(Δ) **7.02 vs 7.42 = −0.39 bit/weight**, 0 round-trip mismatches | ✅ real. The fine-tune update is spatially smooth (unlike the raw weights), so a context coder squeezes the delta further → ~**31%** total. |
+
+So: the **low-rank intuition is a dead end for lossless** (good to know — it only ever helped *lossy*),
+but the delta carries genuine **spatial** structure the raw weights lacked. Caveat: the H1 gain is an
+order-1 entropy and may carry some finite-sample bias; harden with a real context coder + a model-cost-
+aware measure before quoting the 31% headline. The **rock-solid, caveat-free number remains the 27%
+order-0 int-delta.**
+
+## 5c. End-to-end validation through the SHIPPED rANS codec (`reeform-e2e`)
+
+Not entropy — real bytes, real codec, full reconstruction. Encode `Δ` (zigzag of the signed
+int-delta) with the shipped `rtc-rans-v1`, decode, rebuild `W_ft = W_base + Δ`, assert bit-exact:
+
+```
+rANS(full fine-tune)  baseline = 10.6277 bit/weight   (178.7 MB)
+rANS(zigzag Δ)        OURS     =  9.1900 bit/weight   (154.5 MB)   ✅ BIT-EXACT
+→ 13.5% LOSSLESS reduction with TODAY'S shipped codec (170 MB → 147 MB per fine-tune)
+```
+
+Two honest numbers:
+- **13.5%** — realised *today*, end-to-end, with the existing byte-wise rANS.
+- **27%** — the theoretical ceiling (u16-symbol order-0 entropy, 7.70 vs 10.54). The gap exists
+  because the shipped rANS codes the delta byte-by-byte and loses the high/low-byte correlation;
+  **zigzag** recovers part of it (10.1% → 13.5%). Realising the full 27% needs a delta-specialised
+  **u16-symbol** coder — the clear Phase-2 task.
+
 ## 6. Honest framing for the record
 
 The original "extreme lossless of arbitrary weights" target is **physically walled** (mantissa).
