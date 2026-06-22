@@ -149,6 +149,15 @@ fn menu_chat() -> Result<()> {
         .prompt()
         .unwrap_or(true);
 
+    // Max tokens per reply (Enter = default). Falls back to 512 on bad/empty input.
+    let max_new_tokens = Text::new("Max token per balasan:")
+        .with_default("512")
+        .prompt()
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(512);
+
     // Optional system prompt (Qwen ChatML / Llama). Enter = skip.
     let system = Text::new("System prompt (Enter = lewati):")
         .with_help_message("kasih persona/aturan, mis. 'jawab singkat pakai bahasa gaul'")
@@ -191,7 +200,7 @@ fn menu_chat() -> Result<()> {
     super::chat::run(
         &model,
         2048,
-        256,
+        max_new_tokens,
         false,
         fast,
         "llama3",
