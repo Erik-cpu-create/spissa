@@ -7,6 +7,7 @@ pub mod doctor;
 pub mod fetch;
 pub mod import;
 pub mod inspect;
+pub mod menu;
 pub mod pack;
 pub mod run;
 pub mod unpack;

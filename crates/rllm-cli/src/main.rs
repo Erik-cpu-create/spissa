@@ -346,6 +346,9 @@ enum Commands {
         models_dir: String,
     },
 
+    /// Interactive menu launcher (logo + arrow-key navigation)
+    Menu,
+
     /// Check system dependencies and configuration
     Doctor,
 }
@@ -510,6 +513,7 @@ fn main() -> Result<()> {
             &revision,
             &models_dir,
         ),
+        Commands::Menu => commands::menu::run(),
         Commands::Doctor => commands::doctor::run(),
     }
 }

@@ -43,3 +43,6 @@ libc = "0.2"
 
 # HTTP client for the HF model downloader (rustls, no system OpenSSL — universal)
 ureq = "2"
+
+# Interactive arrow-key menus for `rllm menu` (crossterm-based, cross-platform)
+inquire = "0.7"
