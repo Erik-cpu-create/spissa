@@ -398,6 +398,30 @@ fn byte_level_char_to_byte() -> &'static HashMap<char, u8> {
     })
 }
 
+/// Inverse of [`byte_level_char_to_byte`]: a raw byte -> its GPT-2 byte-level char. Used
+/// by the ENCODE path so EVERY UTF-8 byte (emoji, accents, CJK, …) maps to an in-vocab
+/// base char, instead of a multibyte char being looked up whole (which isn't a token and
+/// errored with "BPE token \"😊\" is not present in tokenizer vocab").
+fn byte_level_byte_to_char(byte: u8) -> char {
+    static MAP: std::sync::OnceLock<[char; 256]> = std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        let mut map = ['\0'; 256];
+        for b in 0u16..256 {
+            if byte_level_byte_is_printable(b as u8) {
+                map[b as usize] = b as u8 as char;
+            }
+        }
+        let mut n = 0u32;
+        for b in 0u16..256 {
+            if !byte_level_byte_is_printable(b as u8) {
+                map[b as usize] = char::from_u32(0x100 + n).unwrap();
+                n += 1;
+            }
+        }
+        map
+    })[byte as usize]
+}
+
 fn is_raw_special_token(token: &str) -> bool {
     token.len() >= 4 && token.starts_with('<') && token.ends_with('>')
 }
@@ -451,7 +475,12 @@ fn byte_level_pretokens(segment: &str) -> Vec<String> {
             if byte_level_char_class(current) != class {
                 break;
             }
-            token.push(current);
+            // Byte-level map: push each UTF-8 byte's GPT-2 char (ASCII printable is
+            // identity; non-ASCII bytes become the in-vocab 0x100+ base chars).
+            let mut utf8 = [0u8; 4];
+            for &byte in current.encode_utf8(&mut utf8).as_bytes() {
+                token.push(byte_level_byte_to_char(byte));
+            }
             idx += 1;
         }
         tokens.push(token);
@@ -491,6 +520,37 @@ mod tests {
             bpe_merges,
             unk_token_id,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn byte_level_byte_to_char_is_inverse_of_char_to_byte() {
+        let to_byte = byte_level_char_to_byte();
+        for b in 0u8..=255 {
+            let ch = byte_level_byte_to_char(b);
+            assert_eq!(
+                to_byte.get(&ch),
+                Some(&b),
+                "byte<->char round-trip failed for {b:#04x}"
+            );
+        }
+        assert_eq!(byte_level_byte_to_char(b' '), 'Ġ');
+        assert_eq!(byte_level_byte_to_char(b'\n'), 'Ċ');
+        assert_eq!(byte_level_byte_to_char(b'A'), 'A');
+    }
+
+    #[test]
+    fn byte_level_pretokens_byte_maps_multibyte_chars() {
+        // "😊" (U+1F60A) must be decomposed into its 4 UTF-8 bytes' base chars, not kept
+        // as a raw multibyte char (the emoji-encode regression: it isn't a vocab token).
+        let joined: String = byte_level_pretokens("😊").concat();
+        assert!(!joined.contains('😊'), "raw emoji leaked: {joined:?}");
+        assert_eq!(joined.chars().count(), 4);
+        for ch in joined.chars() {
+            assert!(
+                byte_level_char_to_byte().contains_key(&ch),
+                "produced non-base char {ch:?}"
+            );
         }
     }
 
