@@ -8,7 +8,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ContainerError {
-    #[error("Invalid magic header: expected 'RLLM'")]
+    #[error("Invalid magic header: expected 'SPSA'")]
     InvalidMagic,
 
     #[error("Unsupported format version: {0}")]
