@@ -149,7 +149,8 @@ impl PackQuantizePolicy {
         }
         if self == Self::Q8TransformerKeepIo {
             return (is_llama_attention_projection_weight(tensor_name)
-                || is_llama_mlp_projection_weight(tensor_name))
+                || is_llama_mlp_projection_weight(tensor_name)
+                || is_qwen_linear_attn_projection_weight(tensor_name))
             .then_some(DType::Q8_0);
         }
         if self == Self::Q4_0MlpOnly {
@@ -589,6 +590,18 @@ fn is_llama_attention_projection_weight(tensor_name: &str) -> bool {
 
 fn is_llama_lm_head_weight(tensor_name: &str) -> bool {
     tensor_name == "lm_head.weight" || tensor_name == "model.embed_tokens.weight"
+}
+
+/// Qwen3.5 Gated-DeltaNet large 2-D projections (the per-token-streamed weights that
+/// dominate decode cost). The small `in_proj_a`/`in_proj_b` (per-head decay/beta) and
+/// the depthwise `conv1d` are intentionally left bf16 — they feed the sensitive
+/// recurrence and are tiny.
+fn is_qwen_linear_attn_projection_weight(tensor_name: &str) -> bool {
+    tensor_name.starts_with("model.layers.")
+        && tensor_name.contains(".linear_attn.")
+        && (tensor_name.ends_with(".in_proj_qkv.weight")
+            || tensor_name.ends_with(".in_proj_z.weight")
+            || tensor_name.ends_with(".out_proj.weight"))
 }
 
 fn input_tile_sidecar_bytes(
