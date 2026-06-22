@@ -96,6 +96,34 @@ enum Commands {
         file: String,
     },
 
+    /// Pack a fine-tune as a lossless delta from its base (~27% smaller than the full model)
+    Delta {
+        /// Fine-tune safetensors (file or dir)
+        finetune: String,
+
+        /// Base safetensors the fine-tune was derived from (file or dir)
+        #[arg(long)]
+        base: String,
+
+        /// Output .spsd delta file
+        #[arg(short, long)]
+        out: String,
+    },
+
+    /// Reconstruct a fine-tune (bit-exact) from a .spsd delta + its base
+    Undelta {
+        /// Input .spsd delta file
+        input: String,
+
+        /// Base safetensors (must match the one used to pack the delta)
+        #[arg(long)]
+        base: String,
+
+        /// Output reconstructed safetensors
+        #[arg(short, long)]
+        out: String,
+    },
+
     /// Verify that a .spsa file matches the original model
     Verify {
         /// Original model file
@@ -451,6 +479,12 @@ fn main() -> Result<()> {
             verbose,
         ),
         Commands::Inspect { file } => commands::inspect::run(&file),
+        Commands::Delta { finetune, base, out } => {
+            commands::delta::run_pack(&finetune, &base, &out, verbose)
+        }
+        Commands::Undelta { input, base, out } => {
+            commands::delta::run_unpack(&input, &base, &out)
+        }
         Commands::Verify {
             original,
             compressed,
