@@ -41,10 +41,23 @@ pub fn run(
     fast: bool,
     chat_template: &str,
     system_prompt: Option<&str>,
+    temp: f32,
+    top_p: f32,
+    seed: u64,
 ) -> Result<()> {
     if ctx == 0 || max_new_tokens == 0 {
         anyhow::bail!("--ctx and --max-new-tokens must be greater than zero");
     }
+    // temp <= 0 → deterministic greedy; temp > 0 → top-p nucleus sampling.
+    let sampling = if temp <= 0.0 {
+        StreamingSamplingConfig::Argmax
+    } else {
+        StreamingSamplingConfig::TopP {
+            temperature: temp,
+            top_p,
+            seed,
+        }
+    };
     // Mode levers — set before the model opens and the kernels read them.
     if low_ram {
         std::env::set_var("RLLM_STREAM_EMBEDDING", "1");
@@ -80,9 +93,16 @@ pub fn run(
         if low_ram { "low-ram (stream-embedding)" } else { "decode-once" },
     );
     match architecture.as_str() {
-        "gemma3" | "gemma" => gemma_chat(&mut model, ctx, max_new_tokens),
-        "llama" => llama_chat(&mut model, ctx, max_new_tokens, chat_template, system_prompt),
-        "qwen3" | "qwen" => qwen_chat(&mut model, ctx, max_new_tokens),
+        "gemma3" | "gemma" => gemma_chat(&mut model, ctx, max_new_tokens, sampling),
+        "llama" => llama_chat(
+            &mut model,
+            ctx,
+            max_new_tokens,
+            chat_template,
+            system_prompt,
+            sampling,
+        ),
+        "qwen3" | "qwen" => qwen_chat(&mut model, ctx, max_new_tokens, sampling),
         other => {
             anyhow::bail!(
                 "rllm chat: unsupported architecture {other:?} (supported: gemma3, llama, qwen3)"
@@ -95,7 +115,12 @@ pub fn run(
 /// only prefills the NEW user message onto the existing context (no O(n²) re-prefill of
 /// the whole conversation). Qwen3.5 is a reasoning model, so replies open with a
 /// `<think>…</think>` block before the answer.
-fn qwen_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> Result<()> {
+fn qwen_chat(
+    model: &mut LazyRllmModel,
+    ctx: usize,
+    max_new_tokens: usize,
+    sampling: StreamingSamplingConfig,
+) -> Result<()> {
     let tok_meta = model
         .metadata()
         .tokenizer
@@ -121,14 +146,19 @@ fn qwen_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> Re
             max_new_tokens,
             max_seq_len: Some(ctx),
             causal: true,
-            sampling: StreamingSamplingConfig::Argmax,
+            sampling,
         },
     )?;
-    let sampling = StreamingSamplingConfig::Argmax;
     let mut budget = MemoryBudget::unbounded();
     let mut session = QwenSession::new(model, prepared)?;
 
-    println!("Qwen3.5 chat (KV-session, greedy). Commands: /reset, /exit.\n");
+    let mode = match sampling {
+        StreamingSamplingConfig::Argmax => "greedy".to_string(),
+        StreamingSamplingConfig::TopP {
+            temperature, top_p, ..
+        } => format!("sampling temp={temperature} top_p={top_p}"),
+    };
+    println!("Qwen3.5 chat (KV-session, {mode}). Commands: /reset, /exit.\n");
     let stdin = io::stdin();
     let mut handle = stdin.lock();
     loop {
@@ -170,39 +200,66 @@ fn qwen_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> Re
             }
         }
 
-        print!("bot> ");
-        io::stdout().flush().ok();
-        let started = Instant::now();
-        let mut shown = String::new();
-        let mut acc: Vec<usize> = Vec::new();
-        let generated = session.generate(
+        stream_qwen_turn(
+            &mut session,
             model,
             &ids,
             max_new_tokens,
             sampling,
             &stop,
             &mut budget,
-            &mut |tok| {
-                acc.push(tok);
-                if let Ok(full) = tokenizer.decode(&acc) {
-                    if full.starts_with(&shown) && full.len() > shown.len() {
-                        print!("{}", &full[shown.len()..]);
-                        io::stdout().flush().ok();
-                        shown = full;
-                    }
-                }
-                true
-            },
+            &tokenizer,
         )?;
-        let dt = started.elapsed().as_secs_f64();
-        println!(
-            "\n[{} tokens, {:.2} tok/s, ctx {}]",
-            generated.len(),
-            generated.len() as f64 / dt.max(1e-9),
-            session.context_len()
-        );
     }
     println!("bye!");
+    Ok(())
+}
+
+/// Decode one Qwen turn: prefill `ids`, stream the reply suffix to stdout, then print the
+/// `[N tokens, X tok/s, ctx Y]` line. Re-decodes the running reply each token so multi-token
+/// glyphs render, printing only the new tail.
+#[allow(clippy::too_many_arguments)]
+fn stream_qwen_turn(
+    session: &mut QwenSession,
+    model: &mut LazyRllmModel,
+    ids: &[usize],
+    max_new_tokens: usize,
+    sampling: StreamingSamplingConfig,
+    stop: &[usize],
+    budget: &mut MemoryBudget,
+    tokenizer: &RllmTokenizer,
+) -> Result<()> {
+    print!("bot> ");
+    io::stdout().flush().ok();
+    let started = Instant::now();
+    let mut shown = String::new();
+    let mut acc: Vec<usize> = Vec::new();
+    let generated = session.generate(
+        model,
+        ids,
+        max_new_tokens,
+        sampling,
+        stop,
+        budget,
+        &mut |tok| {
+            acc.push(tok);
+            if let Ok(full) = tokenizer.decode(&acc) {
+                if full.starts_with(&shown) && full.len() > shown.len() {
+                    print!("{}", &full[shown.len()..]);
+                    io::stdout().flush().ok();
+                    shown = full;
+                }
+            }
+            true
+        },
+    )?;
+    let dt = started.elapsed().as_secs_f64();
+    println!(
+        "\n[{} tokens, {:.2} tok/s, ctx {}]",
+        generated.len(),
+        generated.len() as f64 / dt.max(1e-9),
+        session.context_len()
+    );
     Ok(())
 }
 
@@ -244,7 +301,12 @@ fn gemma_user_turn(
     Ok(ids)
 }
 
-fn gemma_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> Result<()> {
+fn gemma_chat(
+    model: &mut LazyRllmModel,
+    ctx: usize,
+    max_new_tokens: usize,
+    sampling: StreamingSamplingConfig,
+) -> Result<()> {
     let tokenizer = model
         .metadata()
         .tokenizer
@@ -272,7 +334,7 @@ fn gemma_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> R
             max_new_tokens,
             max_seq_len: Some(ctx),
             causal: true,
-            sampling: StreamingSamplingConfig::Argmax,
+            sampling,
         },
     )?;
     let mut budget = MemoryBudget::unbounded();
@@ -372,6 +434,7 @@ fn llama_chat(
     max_new_tokens: usize,
     chat_template: &str,
     system_prompt: Option<&str>,
+    sampling: StreamingSamplingConfig,
 ) -> Result<()> {
     let tokenizer_meta = model
         .metadata()
@@ -389,7 +452,7 @@ fn llama_chat(
             max_new_tokens,
             max_seq_len: Some(ctx),
             causal: true,
-            sampling: StreamingSamplingConfig::Argmax,
+            sampling,
         },
     )?;
     let mut budget = MemoryBudget::unbounded();

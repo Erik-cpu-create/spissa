@@ -110,6 +110,25 @@ pub(crate) fn sample_next(logits: &[f32], sampling: StreamingSamplingConfig) -> 
     }
 }
 
+/// Per-step seed advance for stochastic sampling: `sample_top_p` derives its draw from a
+/// single seed, so reusing one seed every decode step would always pick the same quantile
+/// of the nucleus. Mix the step index in so each token draws independently while staying
+/// reproducible for a fixed base seed. Argmax is returned unchanged (deterministic).
+fn sampling_for_step(sampling: StreamingSamplingConfig, step: usize) -> StreamingSamplingConfig {
+    match sampling {
+        StreamingSamplingConfig::TopP {
+            temperature,
+            top_p,
+            seed,
+        } => StreamingSamplingConfig::TopP {
+            temperature,
+            top_p,
+            seed: seed.wrapping_add(step as u64),
+        },
+        other => other,
+    }
+}
+
 /// A persistent Qwen chat session. Owns the prepared transformer + per-layer caches; each
 /// `generate` call PREFILLS the new tokens onto the existing context and decodes from there.
 pub struct QwenSession {
@@ -170,7 +189,7 @@ impl QwenSession {
     ) -> Result<Vec<usize>> {
         let mut generated = Vec::new();
         let mut feed: Vec<usize> = prompt.to_vec();
-        for _ in 0..max_new {
+        for step in 0..max_new {
             if feed.is_empty() {
                 break;
             }
@@ -184,7 +203,7 @@ impl QwenSession {
                 budget,
             )?;
             self.pos += feed.len();
-            let next = sample_next(&logits, sampling)?;
+            let next = sample_next(&logits, sampling_for_step(sampling, step))?;
             if stop.contains(&next) {
                 break;
             }

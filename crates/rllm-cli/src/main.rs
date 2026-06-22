@@ -278,6 +278,19 @@ enum Commands {
         /// Optional system prompt (Llama templates)
         #[arg(long)]
         system: Option<String>,
+
+        /// Sampling temperature. 0 = greedy (deterministic argmax); >0 enables top-p
+        /// sampling (Qwen3.5 thinking-mode recommends 0.6).
+        #[arg(long, default_value_t = 0.0)]
+        temp: f32,
+
+        /// Top-p (nucleus) cutoff, used only when --temp > 0 (Qwen3.5 recommends 0.95).
+        #[arg(long = "top-p", default_value_t = 0.95)]
+        top_p: f32,
+
+        /// RNG seed for sampling (reproducible given the same prompt + seed).
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
     },
 
     /// Run a scripted persistent chat-session benchmark
@@ -477,6 +490,9 @@ fn main() -> Result<()> {
             fast,
             chat_template,
             system,
+            temp,
+            top_p,
+            seed,
         } => commands::chat::run(
             &file,
             ctx,
@@ -485,6 +501,9 @@ fn main() -> Result<()> {
             fast,
             &chat_template,
             system.as_deref(),
+            temp,
+            top_p,
+            seed,
         ),
         Commands::ChatSession {
             file,
