@@ -269,6 +269,46 @@ pub fn prepare_qwen_transformer_from_metadata(
     Ok(prepared)
 }
 
+/// Gather `tokens` rows from the (bf16) embedding table directly from the mmap,
+/// converting bf16→f32, instead of decoding the whole 248k×2048 table to f32 (~1 GB)
+/// just to index a few rows per step. Falls back to a full decode for a non-raw
+/// (compressed) embedding tensor.
+fn gather_embedding_rows(
+    model: &mut LazyRllmModel,
+    name: &str,
+    hidden: usize,
+    tokens: &[usize],
+    budget: &mut MemoryBudget,
+) -> Result<Vec<f32>> {
+    let tensor = model.tensor(name)?.clone();
+    if tensor.dtype == rllm_container::DType::Bf16 {
+        let mut out = vec![0.0f32; tokens.len() * hidden];
+        let handled = model.with_raw_tensor(tensor.tensor_id, |bytes| {
+            for (i, &tok) in tokens.iter().enumerate() {
+                let row = tok * hidden * 2;
+                if row + hidden * 2 > bytes.len() {
+                    return Err(RuntimeError::Shape(format!(
+                        "embedding row {tok} out of range ({} rows)",
+                        bytes.len() / (hidden * 2)
+                    )));
+                }
+                for h in 0..hidden {
+                    let bits = u16::from_le_bytes([bytes[row + h * 2], bytes[row + h * 2 + 1]]);
+                    out[i * hidden + h] = crate::bf16_to_f32(bits);
+                }
+            }
+            Ok(())
+        })?;
+        if handled.is_some() {
+            return Ok(out);
+        }
+    }
+    // Fallback: non-raw (compressed) embedding — decode once and gather.
+    let full = model.decode_tensor(name, budget)?.data;
+    let vocab = full.len() / hidden;
+    embedding_lookup(&full, vocab, hidden, tokens)
+}
+
 /// Greedy/top-p generation. Calls `on_token(token_id) -> continue?` for each new token.
 pub fn qwen_generate_from_model(
     model: &mut LazyRllmModel,
@@ -280,11 +320,11 @@ pub fn qwen_generate_from_model(
     let cfg = prepared.config;
     let hidden = cfg.hidden_size;
 
-    // Pin the embedding once for the input lookup. The tied lm_head reads the SAME
-    // weight through the streaming NEON kernel below (not a scalar f32 GEMV over the
-    // 248k-row table — that scalar path was the dominant decode cost, ~278ms/token).
-    let embedding = model.decode_tensor(&prepared.embedding_weight, budget)?.data;
-    let vocab_size = embedding.len() / hidden;
+    // Vocab from metadata — the input lookup gathers rows straight from the bf16 mmap
+    // (see `gather_embedding_rows`) and the tied lm_head streams the same weight through
+    // the NEON kernel, so we never materialize the whole 248k×2048 table as f32 (~1 GB).
+    let vocab_size = model.tensor(&prepared.embedding_weight)?.shape.first().copied().unwrap_or(0)
+        as usize;
 
     // Per-layer mixing state.
     let mut caches: Vec<QwenLayerCache> = prepared
@@ -318,7 +358,8 @@ pub fn qwen_generate_from_model(
         let seq_len = current.len();
         let position_offset = token_ids.len() - seq_len;
 
-        let mut hidden_states = embedding_lookup(&embedding, vocab_size, hidden, current)?;
+        let mut hidden_states =
+            gather_embedding_rows(model, &prepared.embedding_weight, hidden, current, budget)?;
 
         for (i, tensors) in prepared.layers.iter().enumerate() {
             let params = &prepared.layer_params[i];
