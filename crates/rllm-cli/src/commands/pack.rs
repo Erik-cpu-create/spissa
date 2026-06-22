@@ -244,6 +244,19 @@ fn map_tensor_names(raw: &[String], architecture: &str) -> Vec<(String, String)>
             .collect();
         mapped.sort();
         mapped
+    } else if architecture.starts_with("qwen") {
+        // Qwen3.5 (`Qwen3_5ForConditionalGeneration`) nests the text decoder under
+        // `model.language_model.*`. Keep only that, rewrite the prefix to the standard
+        // `model.*` convention, and DROP the vision tower (`model.visual.*`) and the
+        // multi-token-prediction head (`mtp.*`) — this is the text-only adapter.
+        const QPREFIX: &str = "model.language_model.";
+        let mut mapped: Vec<(String, String)> = raw
+            .iter()
+            .filter(|t| t.starts_with(QPREFIX))
+            .map(|t| (format!("model.{}", &t[QPREFIX.len()..]), t.clone()))
+            .collect();
+        mapped.sort();
+        mapped
     } else {
         raw.iter().map(|t| (t.clone(), t.clone())).collect()
     }
@@ -763,11 +776,22 @@ fn write_input_tile_sidecar_tensor(
     Ok(stats)
 }
 
+/// Directory holding the checkpoint's sidecar files: for a directory input that's
+/// the directory itself; for a file/index input it's the file's parent. Lets pack
+/// auto-resolve `config.json`/`tokenizer.json` whether the input is a folder or a file.
+fn checkpoint_sidecar_dir(input_path: &Path) -> Option<PathBuf> {
+    if input_path.is_dir() {
+        Some(input_path.to_path_buf())
+    } else {
+        input_path.parent().map(Path::to_path_buf)
+    }
+}
+
 fn resolve_model_config_path(input_path: &Path, explicit_config: Option<&str>) -> Option<PathBuf> {
     if let Some(config) = explicit_config {
         return Some(PathBuf::from(config));
     }
-    let sibling = input_path.parent()?.join("config.json");
+    let sibling = checkpoint_sidecar_dir(input_path)?.join("config.json");
     sibling.exists().then_some(sibling)
 }
 
@@ -782,7 +806,7 @@ fn resolve_tokenizer_path(
     if let Some(tokenizer) = explicit_tokenizer {
         return Some(PathBuf::from(tokenizer));
     }
-    let sibling = input_path.parent()?.join("tokenizer.json");
+    let sibling = checkpoint_sidecar_dir(input_path)?.join("tokenizer.json");
     sibling.exists().then_some(sibling)
 }
 
@@ -837,6 +861,36 @@ mod tests {
         assert_eq!(mapped.len(), 1, "vision tower dropped, LM kept");
         assert_eq!(mapped[0].0, "model.layers.0.self_attn.q_proj.weight");
         assert_eq!(mapped[0].1, "language_model.model.layers.0.self_attn.q_proj.weight");
+    }
+
+    #[test]
+    fn map_tensor_names_qwen_text_only_strips_prefix_drops_vision_and_mtp() {
+        // Qwen3.5 (Qwen3_5ForConditionalGeneration): the text decoder lives under
+        // `model.language_model.*`. Keep only that, rewrite to the canonical `model.*`
+        // convention, and drop the vision tower (`model.visual.*`) and MTP head (`mtp.*`).
+        let raw = vec![
+            "model.language_model.embed_tokens.weight".to_string(),
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight".to_string(),
+            "model.language_model.layers.3.self_attn.q_proj.weight".to_string(),
+            "model.language_model.norm.weight".to_string(),
+            "model.visual.blocks.0.attn.qkv.weight".to_string(),
+            "mtp.layers.0.self_attn.q_proj.weight".to_string(),
+        ];
+        let mapped = map_tensor_names(&raw, "qwen3");
+        assert_eq!(mapped.len(), 4, "vision + mtp dropped, text decoder kept");
+        assert!(
+            mapped.iter().all(|(dst, _)| dst.starts_with("model.")
+                && !dst.contains("language_model")
+                && !dst.contains("visual")
+                && !dst.contains("mtp")),
+            "names canonicalized to model.* with no language_model/visual/mtp"
+        );
+        let qkv = mapped
+            .iter()
+            .find(|(_, src)| src.ends_with("layers.0.linear_attn.in_proj_qkv.weight"))
+            .expect("linear_attn tensor kept");
+        assert_eq!(qkv.0, "model.layers.0.linear_attn.in_proj_qkv.weight");
+        assert_eq!(qkv.1, "model.language_model.layers.0.linear_attn.in_proj_qkv.weight");
     }
 
     #[test]

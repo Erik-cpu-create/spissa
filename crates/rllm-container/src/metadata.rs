@@ -207,6 +207,36 @@ pub struct ModelConfigMetadata {
     /// layers are unscaled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rope_scaling_factor: Option<f32>,
+    // --- Qwen3.5 / Qwen3-Next hybrid linear-attention fields ---
+    /// Per-layer operator schedule (`"linear_attention"` / `"full_attention"`). When
+    /// absent, the interleave can be derived from `full_attention_interval`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_types: Option<Vec<String>>,
+    /// Period of the full-attention interleave (Qwen3.5: 4 → every 4th layer is full attn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_attention_interval: Option<u64>,
+    /// Gated-DeltaNet key/value head dim (Qwen3.5: 128 each).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_key_head_dim: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_value_head_dim: Option<u64>,
+    /// Gated-DeltaNet key/value head counts (Qwen3.5: 16 each).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_num_key_heads: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_num_value_heads: Option<u64>,
+    /// Depthwise causal short-conv kernel over q‖k‖v (Qwen3.5: 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_conv_kernel_dim: Option<u64>,
+    /// Whether gated full-attention emits a per-head output gate from `q_proj`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attn_output_gate: Option<bool>,
+    /// Fraction of `head_dim` that RoPE rotates (Qwen3.5: 0.25 → 64 of 256).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_rotary_factor: Option<f32>,
+    /// Multimodal-RoPE section split (collapses to ordinary RoPE for text-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mrope_section: Option<Vec<u64>>,
 }
 
 /// Minimal tokenizer vocabulary/config metadata persisted in `.rllm` global metadata.
