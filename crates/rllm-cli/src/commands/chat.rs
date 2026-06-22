@@ -111,7 +111,7 @@ pub fn run(
 
     let architecture = model.metadata().architecture.clone();
     println!(
-        "RLLM chat — {} | arch={architecture} | ctx={ctx} | mode={}",
+        "spissa chat — {} | arch={architecture} | ctx={ctx} | mode={}",
         model.metadata().model_name,
         if low_ram { "low-ram (stream-embedding)" } else { "decode-once" },
     );

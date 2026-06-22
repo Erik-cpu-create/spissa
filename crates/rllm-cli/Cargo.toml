@@ -3,11 +3,11 @@ name = "rllm-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "CLI for RLLM - Runtime-compressed Local LLM"
-default-run = "rllm"
+description = "CLI for Spissa - Runtime-compressed Local LLM"
+default-run = "spissa"
 
 [[bin]]
-name = "rllm"
+name = "spissa"
 path = "src/main.rs"
 
 [dependencies]

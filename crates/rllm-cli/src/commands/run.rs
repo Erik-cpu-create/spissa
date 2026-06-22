@@ -128,7 +128,7 @@ fn run_generation(
             "--no-rama-prefill-chunking cannot be combined with --rama-prefill-chunk-tokens"
         );
     }
-    println!("RLLM Runtime — Phase 7 tiled RAMA layer-decode text generation");
+    println!("spissa runtime — Phase 7 tiled RAMA layer-decode text generation");
     println!("====================================================\n");
     println!("Loading metadata and streamed tensors: {}", file);
 
@@ -450,7 +450,7 @@ fn write_rama_timing_json(path: &str, timing: &RamaGenerationTiming) -> Result<(
 }
 
 fn run_full_decode(path: &Path, file: &str) -> Result<()> {
-    println!("RLLM Runtime — Phase 5A full-decode loader");
+    println!("spissa runtime — Phase 5A full-decode loader");
     println!("==========================================\n");
     println!("Loading: {}", file);
     println!("Mode: full-decode\n");
@@ -503,7 +503,7 @@ fn run_planned(
     memory_budget_bytes: Option<usize>,
     dry_run: bool,
 ) -> Result<()> {
-    println!("RLLM Runtime — Phase 5B low-memory planner");
+    println!("spissa runtime — Phase 5B low-memory planner");
     println!("===========================================\n");
     println!("Loading metadata only: {}", file);
 

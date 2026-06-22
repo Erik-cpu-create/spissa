@@ -5,7 +5,7 @@
 use anyhow::Result;
 
 pub fn run() -> Result<()> {
-    println!("RLLM Doctor");
+    println!("spissa doctor");
     println!("============\n");
     println!("[OK] Rust toolchain detected");
     println!("[INFO] SIMD support: baseline (AVX2/SSE detected at runtime)");

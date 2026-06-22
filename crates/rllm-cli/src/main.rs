@@ -12,11 +12,11 @@ mod chat_template;
 mod commands;
 
 #[derive(Parser)]
-#[command(name = "rllm")]
-#[command(about = "RLLM - Runtime-compressed Local LLM")]
+#[command(name = "spissa")]
+#[command(about = "Spissa - Runtime-compressed Local LLM (compressed · local · yours)")]
 #[command(version = "0.1.0")]
 #[command(
-    long_about = "RLLM is an experimental local LLM runtime built around lossless compressed model storage.\n\nIt stores model tensors in a chunked compressed container (.rllm) and aims to run inference by decoding only the tensor blocks needed at runtime."
+    long_about = "Spissa is a from-scratch local LLM runtime built around runtime-compressed model storage. It stores model tensors in a chunked compressed container (.rllm) — lossless by default (rANS / bit-plane), with optional lossy quantization (q8 / q4) — and runs inference by decoding only the tensor blocks needed at runtime. One self-contained binary, no dependencies, runs on any device."
 )]
 struct Cli {
     #[command(subcommand)]
