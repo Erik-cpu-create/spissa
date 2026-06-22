@@ -4,8 +4,8 @@
 
 //! Standalone smoke/bring-up harness for the Qwen3.5 text adapter.
 //!
-//! Usage: qwen-test [model.rllm] [prompt] [max_new_tokens]
-//! Loads a packed Qwen3.5 `.rllm`, encodes a ChatML prompt, runs greedy generation,
+//! Usage: qwen-test [model.spsa] [prompt] [max_new_tokens]
+//! Loads a packed Qwen3.5 `.spsa`, encodes a ChatML prompt, runs greedy generation,
 //! and streams the decoded reply + a tok/s line. This is a validation tool, not the
 //! production chat path (that wiring lands in a later phase).
 
@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let model_path = args
         .next()
-        .unwrap_or_else(|| "models/qwen3.5-2b-textonly-raw.rllm".to_string());
+        .unwrap_or_else(|| "models/qwen3.5-2b-textonly-raw.spsa".to_string());
     let prompt = args
         .next()
         .unwrap_or_else(|| "What is the capital of France? Answer in one word.".to_string());

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Determine whether a pack-time pre-scaled sidecar can beat the current R98 Q8 runtime micro-kernel before changing the `.rllm` container or packer.
+**Goal:** Determine whether a pack-time pre-scaled sidecar can beat the current R98 Q8 runtime micro-kernel before changing the `.spsa` container or packer.
 
-**Architecture:** R102 adds a lab-only variant named `REESIDE-Q8-PRESCALED-SIDECAR-LAB`. The lab precomputes Q8 blocks into `[f32; 32]` sidecar blocks outside the timed loop, then runs the same proven batch4 NEON accumulator. If the lab wins, R103 can design a real `.rllm` sidecar format with explicit storage/RAM accounting; if it loses, we avoid a large packer/runtime change.
+**Architecture:** R102 adds a lab-only variant named `REESIDE-Q8-PRESCALED-SIDECAR-LAB`. The lab precomputes Q8 blocks into `[f32; 32]` sidecar blocks outside the timed loop, then runs the same proven batch4 NEON accumulator. If the lab wins, R103 can design a real `.spsa` sidecar format with explicit storage/RAM accounting; if it loses, we avoid a large packer/runtime change.
 
 **Tech Stack:** Rust, `rllm-runtime`, aarch64 NEON intrinsics, existing `q8-microbench`, benchmark trial docs.
 

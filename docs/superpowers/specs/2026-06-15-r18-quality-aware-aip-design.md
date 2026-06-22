@@ -79,7 +79,7 @@ the paper trail. Public references:
 - Do not add GPU, Metal, Accelerate, or external BLAS dependencies.
 - Do not add sparse LM-head shortlist projection in R18 unless the design is
   revised. LM-head stays exact for token selection.
-- Do not rewrite the `.rllm` artifact format or import pipeline in this stage.
+- Do not rewrite the `.spsa` artifact format or import pipeline in this stage.
 
 ## Mode Contract
 
@@ -276,21 +276,21 @@ Primary Llama 3.2 1B runs:
 ```bash
 printf 'good morning\nexit\n' | \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=quality RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -301,7 +301,7 @@ SmolLM2 remains the small-model control:
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=quality RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/SmolLM2-135M-raw.rllm \
+    --model models/SmolLM2-135M-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```

@@ -26,10 +26,10 @@ Users can override or disable it:
 
 ```bash
 # Override the window
-rllm run model.rllm --token-ids ... --rama-prefill-chunk-tokens 64
+rllm run model.spsa --token-ids ... --rama-prefill-chunk-tokens 64
 
 # Disable chunked prefill and process the full prompt in one pass
-rllm run model.rllm --token-ids ... --no-rama-prefill-chunking
+rllm run model.spsa --token-ids ... --no-rama-prefill-chunking
 ```
 
 `--no-rama-prefill-chunking` and `--rama-prefill-chunk-tokens` are intentionally rejected together to avoid ambiguous CLI behavior.
@@ -37,7 +37,7 @@ rllm run model.rllm --token-ids ... --no-rama-prefill-chunking
 ## Artifact / runtime
 
 ```text
-artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm
+artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa
 codec/layout: raw tile-block, --tile-block-elements 65536
 runtime integrity: verify-once
 ctx: 2048

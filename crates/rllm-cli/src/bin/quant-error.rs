@@ -32,7 +32,7 @@ fn err_sums(orig: &[f32], deq: &[f32]) -> (f64, f64) {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: q8-error <model.rllm>");
+    let path = std::env::args().nth(1).expect("usage: q8-error <model.spsa>");
     let mut model = LazyRllmModel::open(&path).expect("open");
     model.set_rama_integrity_mode(RamaIntegrityMode::Unchecked);
 

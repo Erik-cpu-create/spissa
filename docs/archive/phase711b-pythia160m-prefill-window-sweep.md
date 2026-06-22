@@ -9,7 +9,7 @@ Result: larger prefill windows transfer cleanly to Pythia-160M. `--rama-prefill-
 Artifact:
 
 ```text
-models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm
+models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa
 ```
 
 Benchmark scope:
@@ -28,7 +28,7 @@ The benchmark used the existing timing harness:
 ```bash
 python3 scripts/phase79e_prefill_timing_benchmark.py \
   --bin target/release/rllm \
-  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
+  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa \
   --out-dir target/phase711b-pythia160m/chunk-sweep \
   --input-tokens 512,1024 \
   --max-new-tokens 16 \
@@ -129,7 +129,7 @@ A safe user-facing 160M command is:
 ```bash
 python3 scripts/phase79d_long_prompt_benchmark.py \
   --skip-build \
-  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
+  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa \
   --input-tokens 1024 \
   --max-new-tokens 16 \
   --ctx 2048 \
@@ -143,7 +143,7 @@ A speed-biased command is:
 ```bash
 python3 scripts/phase79d_long_prompt_benchmark.py \
   --skip-build \
-  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm \
+  --artifact models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa \
   --input-tokens 1024 \
   --max-new-tokens 16 \
   --ctx 2048 \

@@ -12,7 +12,7 @@ After: compute requested token row byte ranges, recall only overlapping chunks/r
 It stays distinct from PowerInfer-style activation locality:
 
 ```text
-Unit of recall: tensor row/chunk byte ranges in `.rllm`
+Unit of recall: tensor row/chunk byte ranges in `.spsa`
 Not used: hot/cold neurons, activation prediction, GPU/CPU neuron partitioning
 ```
 
@@ -49,7 +49,7 @@ The tiny embedding fixture has two row-aligned chunks. The test requests token `
 Command:
 
 ```bash
-/usr/bin/time -l target/release/rllm run models/pythia-70m-phase78d-tileblocks.rllm \
+/usr/bin/time -l target/release/rllm run models/pythia-70m-phase78d-tileblocks.spsa \
   --token-ids 12092 \
   --max-new-tokens 1 \
   --ctx 128 \
@@ -78,12 +78,12 @@ Commands compared:
 
 ```bash
 # Phase 7.9A baseline trace
-/usr/bin/time -l target/release/rllm run models/pythia-70m-phase78d-tileblocks.rllm \
+/usr/bin/time -l target/release/rllm run models/pythia-70m-phase78d-tileblocks.spsa \
   --token-ids 12092 --max-new-tokens 1 --ctx 128 --memory-budget 100mb \
   --rama-trace target/phase79a/rama_trace_timed.json
 
 # Phase 7.9B trace
-/usr/bin/time -l target/release/rllm run models/pythia-70m-phase78d-tileblocks.rllm \
+/usr/bin/time -l target/release/rllm run models/pythia-70m-phase78d-tileblocks.spsa \
   --token-ids 12092 --max-new-tokens 1 --ctx 128 --memory-budget 100mb \
   --rama-trace target/phase79b/rama_trace_timed.json
 ```
@@ -125,7 +125,7 @@ Command:
 ```bash
 python3 scripts/phase76_release_rss_benchmark.py \
   --skip-build \
-  --artifact models/pythia-70m-phase78d-tileblocks.rllm \
+  --artifact models/pythia-70m-phase78d-tileblocks.spsa \
   --out-dir target/phase79b-embedding-row-bench \
   --tokens 1,4,8,16 \
   --ctx 128,512,1024 \
@@ -177,7 +177,7 @@ Command:
 ```bash
 uv run --with torch --with transformers --with safetensors \
   scripts/phase77_compare_logits.py \
-  --rllm-artifact models/pythia-70m-phase78d-tileblocks.rllm \
+  --rllm-artifact models/pythia-70m-phase78d-tileblocks.spsa \
   --out-dir target/phase79b-logits \
   --token-ids 12092,13 \
   --ctx 128 \
@@ -208,7 +208,7 @@ Next candidates:
 1. Keep exact full-vocab logits baseline unchanged.
 2. Split `chunk_compute_closure` into conversion vs matmul timing if needed.
 3. Parallelize/tile `embed_out.weight` / lm-head compute under the same low-RAM envelope.
-4. Avoid PowerInfer-style hot/cold neuron prediction; keep the unit of optimization as verified `.rllm` tensor chunks/ranges.
+4. Avoid PowerInfer-style hot/cold neuron prediction; keep the unit of optimization as verified `.spsa` tensor chunks/ranges.
 
 ## Status
 

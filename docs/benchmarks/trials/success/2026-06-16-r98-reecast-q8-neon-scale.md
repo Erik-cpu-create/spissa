@@ -16,12 +16,12 @@ batch4 accumulator path.
 
 - Mode: exact-lowram lab plus runtime gate
 - REE kernel lineage: `REECAST-Q8-NEON-SCALE`
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: aarch64 NEON scale/dequant helper with portable scalar fallback
 - Target branch: R93/R97 `batch_gt1_scaled`
 - Bottleneck tag: CPU arithmetic / Q8 NEON scale-dequant prefill
 
-R98 does not change `.rllm`, Q8 format, prompt formatting, sampling, tokenizer,
+R98 does not change `.spsa`, Q8 format, prompt formatting, sampling, tokenizer,
 or memory-budget logic.
 
 ## Setup
@@ -42,11 +42,11 @@ Runtime:
 
 ```bash
 cargo build --release -p rllm-cli --bin llama-test
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r98-pre-control.txt 2> target/r98-pre-control.time
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r98-pre-control.txt 2> target/r98-pre-control.time
 for i in 1 2 3; do
-  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r98-run${i}.txt" 2> "target/r98-run${i}.time"
+  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r98-run${i}.txt" 2> "target/r98-run${i}.time"
 done
-RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r98-profile.txt 2> target/r98-profile.time
+RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r98-profile.txt 2> target/r98-profile.time
 ```
 
 ## Lab Results

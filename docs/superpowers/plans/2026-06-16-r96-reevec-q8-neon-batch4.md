@@ -33,7 +33,7 @@ Allowed:
 Not allowed:
 
 - removing portable CPU support
-- changing `.rllm` format, Q8 format, tokenizer, prompt formatting, sampling, or memory budget logic
+- changing `.spsa` format, Q8 format, tokenizer, prompt formatting, sampling, or memory budget logic
 - adding permanent repack buffers or resident f32 caches
 - changing the R93 profiler API
 - claiming a universal speedup if only aarch64 was tested
@@ -246,7 +246,7 @@ If lab passes, continue to Task 3.
 
 ```bash
 cargo build --release -p rllm-cli --bin llama-test
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r96-pre-control.txt 2> target/r96-pre-control.time
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r96-pre-control.txt 2> target/r96-pre-control.time
 ```
 
 Expected: answer `No`, peak transient `1,050,673,152 bytes`.
@@ -337,7 +337,7 @@ cargo build --release -p rllm-cli --bin llama-test
 
 ```bash
 for i in 1 2 3; do
-  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r96-run${i}.txt" 2> "target/r96-run${i}.time"
+  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r96-run${i}.txt" 2> "target/r96-run${i}.time"
 done
 ```
 
@@ -350,7 +350,7 @@ Expected:
 - [x] **Step 3: Run profiled attribution trial**
 
 ```bash
-RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r96-profile.txt 2> target/r96-profile.time
+RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r96-profile.txt 2> target/r96-profile.time
 ```
 
 Expected: `Q8KernelProfile` exists and top branch remains `batch_gt1_scaled`.

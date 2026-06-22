@@ -15,7 +15,7 @@ actual R10 session behavior.
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/SmolLM2-135M-raw.rllm`
+- Model/artifact: `models/SmolLM2-135M-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Bottleneck tag: full-history replay
@@ -27,7 +27,7 @@ Command:
 ```bash
 printf 'good morning\nhalo\nwho are you ?\nexit\n' | \
   cargo run --release -p rllm-cli --bin llama-test -- \
-    --model models/SmolLM2-135M-raw.rllm
+    --model models/SmolLM2-135M-raw.spsa
 ```
 
 ## Results

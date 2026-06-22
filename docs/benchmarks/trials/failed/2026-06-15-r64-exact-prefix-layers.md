@@ -13,7 +13,7 @@ We hypothesize that a "prefix-style" exact policy, specifically making the first
 ## Scope
 
 - Mode: experimental-speed diagnostic
-- Model/artifact: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: hidden-state calibration across layers
@@ -47,7 +47,7 @@ printf 'good morning\nexit\n' | /usr/bin/time -l env \
   RLLM_AIP_LAYER_DRIFT_PROBE=1 \
   RLLM_AIP_EXACT_PREFIX_LAYERS=2 \
   target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
     --ctx 2048 \
     --max-new-tokens 2 \
     --chat-template llama3 \

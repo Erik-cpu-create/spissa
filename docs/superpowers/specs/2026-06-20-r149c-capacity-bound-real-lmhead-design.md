@@ -46,7 +46,7 @@ MARGINAL is not fudged.
   (truthy = "1"/"true"); pass it as `nocache` to `streaming_bitplane_gemv`. Default
   false → byte-identical behavior to today.
 - **Bench** (`bitplane_stream.rs` tests, `#[ignore]`, aarch64):
-  - `write_lmhead_sidecar(gemma-3-1b-it-rawcodec.rllm, embed, 256, sidecar)`.
+  - `write_lmhead_sidecar(gemma-3-1b-it-rawcodec.spsa, embed, 256, sidecar)`.
   - dump raw bf16 via `with_raw_tensor(..|b| b.to_vec())` → `/tmp/gemma1b-lmhead-raw.bin`.
   - raw cold: `F_NOCACHE` open, `read_exact` the 604 MB, `black_box` (zero compute —
     the conservative baseline; a real raw path would add the dot on top).

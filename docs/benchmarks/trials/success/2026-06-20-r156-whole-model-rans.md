@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Kernel lineage: REESTREAM-RANS (R152–R154), applied model-wide
-- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.rllm`, raw bf16, 340 tensors, ~1.0 B weights)
+- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.spsa`, raw bf16, 340 tensors, ~1.0 B weights)
 - Verdict: **GO** — the rANS streaming GEMV is lossless on transformer **body** projections
   (not just the lm-head), and the **whole model** compresses **2.000 GB → 1.324 GB
   (−34%, 10.60 bits/weight)** losslessly. The foundation for running a model > RAM at the

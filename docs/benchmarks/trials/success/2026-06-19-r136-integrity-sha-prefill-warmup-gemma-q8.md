@@ -17,7 +17,7 @@ not kernel compute — and they are partly redundant and fully parallelizable.
 
 - Mode: fast-lowram runtime (q8, codec rtc-raw-v1)
 - REE kernel: none — integrity/IO change (SHA dedup + parallel verification), not an execution kernel
-- Model/artifact: `models/gemma-3-4b-it-q8.rllm` (~4.5 GB q8 + 1.34 GB bf16 tied embedding)
+- Model/artifact: `models/gemma-3-4b-it-q8.spsa` (~4.5 GB q8 + 1.34 GB bf16 tied embedding)
 - Architecture: Gemma 3 4B, Q8_0
 - Target device/profile: Apple Silicon, 8 GB RAM, CPU only
 - Expected bottleneck: SHA-256 integrity (verification), not kernels
@@ -28,9 +28,9 @@ not kernel compute — and they are partly redundant and fully parallelizable.
 ```bash
 # isolate the SHA cost from compute (diagnostic knob added this trial)
 RLLM_INTEGRITY=unchecked RLLM_Q8_KERNEL_PROFILE=1 ./target/release/gemma-test \
-  --model models/gemma-3-4b-it-q8.rllm --prompt "The capital of France is" --fast ...
+  --model models/gemma-3-4b-it-q8.spsa --prompt "The capital of France is" --fast ...
 # normal (VerifyOnce) with the two fixes:
-./target/release/gemma-test --model models/gemma-3-4b-it-q8.rllm \
+./target/release/gemma-test --model models/gemma-3-4b-it-q8.spsa \
   --prompt "The capital of France is" --fast --max-new-tokens 32 --ctx 256
 ```
 

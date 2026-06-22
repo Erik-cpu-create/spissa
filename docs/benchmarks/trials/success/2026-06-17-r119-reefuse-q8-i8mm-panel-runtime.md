@@ -17,7 +17,7 @@ model.
 
 - Mode: exact-lowram runtime
 - REE kernel lineage: `REEFUSE-Q8-I8MM-PANEL`
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Device: Apple A18 Pro, single-thread (`RLLM_THREADS=1`)
 - Bottleneck tag: CPU arithmetic / Q8 i8mm GEMM
 - Implementation (`accumulate_q8_0_chunk_panel_smmla`): engages when the CPU has

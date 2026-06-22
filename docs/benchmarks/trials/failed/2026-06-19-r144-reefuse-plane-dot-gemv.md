@@ -17,7 +17,7 @@ proof for the R143 decode-throughput GO.
 
 - Mode: experimental (compressed-resident fused GEMV, Phase C)
 - REE kernel: REEFUSE-PLANE-DOT (working name; Erik's final call before any paper use)
-- Model/artifact: `Llama-3.2-1B-Instruct-raw.rllm` tied bf16 embedding (vocab 128256 × hidden 2048, 525 MB)
+- Model/artifact: `Llama-3.2-1B-Instruct-raw.spsa` tied bf16 embedding (vocab 128256 × hidden 2048, 525 MB)
 - Architecture: LLaMA 3.2 1B bf16 LM head
 - Target device/profile: Apple A18 Pro (2 P + 4 E), macOS; release; single-core
 - Expected bottleneck: per-row decode compute vs DRAM bandwidth
@@ -123,5 +123,5 @@ Paper value:
   19% smaller resident, ~3× slower) — its own small spec; honest about the
   trade. Otherwise compressed-resident-for-speed is closed on this hardware.
 - The durable speed levers remain the q8 layers (decode) and prefill, not weight
-  compression. Storage-compression (smaller `.rllm` files, decode-once-at-load)
+  compression. Storage-compression (smaller `.spsa` files, decode-once-at-load)
   stays the practical use for the codecs.

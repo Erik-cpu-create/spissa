@@ -530,7 +530,7 @@ Expected: all commands PASS.
 Run:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.rllm' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r3-decode-hotpath-smollm2-preopt.md'
+cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.spsa' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r3-decode-hotpath-smollm2-preopt.md'
 ```
 
 Expected: command exits successfully, token match stays true, and the report includes `session phase timing`.
@@ -691,7 +691,7 @@ Expected: all commands PASS.
 Run:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.rllm' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r3-decode-hotpath-smollm2-postopt.md'
+cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.spsa' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r3-decode-hotpath-smollm2-postopt.md'
 ```
 
 Expected: token match stays true and the report includes updated decode tok/s and phase timing.

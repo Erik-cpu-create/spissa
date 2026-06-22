@@ -414,7 +414,7 @@ Expected: the required section structure.
 - [ ] **Step 2: Write the trial report**
 
 Create the report in the verdict-matching folder. Fill from Task 3's numbers:
-- **Scope → REE kernel:** `REEFUSE-PLANE-DOT (working name; Erik's final call)`. Mode: `experimental (compressed-resident fused GEMV, Phase C)`. Artifact: `Llama-3.2-1B-Instruct-raw.rllm` embedding (vocab 128256 × hidden 2048). Device: Apple A18 Pro. Bottleneck tag: IO/decode + CPU arithmetic.
+- **Scope → REE kernel:** `REEFUSE-PLANE-DOT (working name; Erik's final call)`. Mode: `experimental (compressed-resident fused GEMV, Phase C)`. Artifact: `Llama-3.2-1B-Instruct-raw.spsa` embedding (vocab 128256 × hidden 2048). Device: Apple A18 Pro. Bottleneck tag: IO/decode + CPU arithmetic.
 - **Hypothesis:** decode→bfdot from a resident 13-bit bit-plane buffer beats read-bf16→bfdot, lossless.
 - **Results:** the table — plain vs fused ms/token, resident MB (525 vs ~427, 19% less), speedup, exact-parity OK.
 - **Analysis:** is the 19% DRAM saving worth the per-row decode compute, single-core? Place vs R143 (decode-throughput GO) — this is the e2e-of-GEMV confirmation (or not). Note both paths used bfdot. Whatever the verdict: the lossless parity (fused == plain bit-for-bit) is the proof that compressed-resident is exact.

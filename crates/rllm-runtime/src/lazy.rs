@@ -57,7 +57,7 @@ pub struct LazyRllmModel {
 }
 
 impl LazyRllmModel {
-    /// Open a `.rllm` file without decoding tensor payloads.
+    /// Open a `.spsa` file without decoding tensor payloads.
     ///
     /// This reads only the container header, global metadata, tensor directory,
     /// and chunk directory. It is the entry point for low-RAM execution modes.
@@ -1330,7 +1330,7 @@ mod tests {
     }
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("rllm-lazy-{name}-{}.rllm", std::process::id()))
+        std::env::temp_dir().join(format!("rllm-lazy-{name}-{}.spsa", std::process::id()))
     }
 
     /// Dump the bf16 tied embedding of the raw Llama 1B model to /tmp for the
@@ -1341,7 +1341,7 @@ mod tests {
     fn dump_bf16_embedding_sample() {
         // Dump the bf16 tied embedding of the raw Llama 1B model to /tmp for the
         // rtc-codec feasibility measurement. Needs the local artifact.
-        let path = "../../models/Llama-3.2-1B-Instruct-raw.rllm";
+        let path = "../../models/Llama-3.2-1B-Instruct-raw.spsa";
         let mut m = LazyRllmModel::open(path).unwrap();
         let name = "model.embed_tokens.weight";
         let meta = m.tensor(name).unwrap().clone();
@@ -1362,8 +1362,8 @@ mod tests {
     #[test]
     #[ignore]
     fn q8_vs_bf16_quantization_error() {
-        let q8_path = "../../models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm";
-        let raw_path = "../../models/Llama-3.2-1B-Instruct-raw.rllm";
+        let q8_path = "../../models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa";
+        let raw_path = "../../models/Llama-3.2-1B-Instruct-raw.spsa";
         let mut q8 = LazyRllmModel::open(q8_path).expect("open q8");
         let mut raw = LazyRllmModel::open(raw_path).expect("open raw bf16");
 

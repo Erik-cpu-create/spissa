@@ -15,7 +15,7 @@ should improve decode speed while keeping memory and output unchanged.
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/SmolLM2-135M-Instruct-q8_transformer_keepio.rllm`
+- Model/artifact: `models/SmolLM2-135M-Instruct-q8_transformer_keepio.spsa`
 - Architecture: SmolLM2/Llama-compatible decoder
 - Target device/profile: local macOS CPU, release binary
 - Bottleneck tag: Q8 row locality | MLP down projection | argmax row scan
@@ -61,7 +61,7 @@ Command:
 set -u
 out=/tmp/rllm-smollm-q8-rowfast-all-matrix-20260616.txt
 : > "$out"
-model="models/SmolLM2-135M-Instruct-q8_transformer_keepio.rllm"
+model="models/SmolLM2-135M-Instruct-q8_transformer_keepio.spsa"
 prompts=(
   "Answer in one short sentence: what is 2 plus 2?"
   "Answer in one short sentence: what color is the sky on a clear day?"

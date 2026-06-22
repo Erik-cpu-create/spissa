@@ -1964,7 +1964,7 @@ pub unsafe fn r128_x4_ilp(
 /// R129 lab: pack 4 q8 weight rows into the interleaved layout the 4-output GEMV
 /// kernel consumes. Per K-block (32 weights): 8 segments × `[r0[seg*4..+4] |
 /// r1 | r2 | r3]` (16 bytes each) = 128 bytes, plus the 4 per-row fp16 scales.
-/// This is the layout that would be baked into the `.rllm` at pack time (R129).
+/// This is the layout that would be baked into the `.spsa` at pack time (R129).
 fn pack_w_interleaved_x4(q8_quad: &[u8], blocks_per_row: usize) -> (Vec<i8>, Vec<f32>) {
     let row_stride = blocks_per_row * 34;
     let mut packed = vec![0i8; blocks_per_row * 128];

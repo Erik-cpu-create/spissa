@@ -12,7 +12,7 @@ gap and identifies the next RLLM bottleneck before any new kernel work.
 
 ## Artifact
 
-- RLLM model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- RLLM model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Ollama model: `llama3.2:1b`
 - RLLM mode: exact-lowram Q8, `--rama-integrity unchecked`
 - Ollama mode: CPU-only, `num_gpu:0`
@@ -55,13 +55,13 @@ cargo build --release --bin llama-test
 RLLM R83 unchecked benchmark:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
 ```
 
 RLLM trace:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace target/r84-rllm-trace.json"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace target/r84-rllm-trace.json"
 jq '[.summary.duration_by_phase[] | {phase,event_count,total_ms}]' target/r84-rllm-trace.json
 jq '[.summary.duration_by_tensor_bucket[] | {bucket,event_count,total_ms}] | sort_by(.total_ms) | reverse' target/r84-rllm-trace.json
 ```

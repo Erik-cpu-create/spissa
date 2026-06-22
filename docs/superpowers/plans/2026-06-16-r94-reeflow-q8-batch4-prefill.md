@@ -33,7 +33,7 @@ Allowed:
 
 Not allowed:
 
-- changing `.rllm` format, Q8 format, tokenizer, chat template, model loader, or RAM budget logic
+- changing `.spsa` format, Q8 format, tokenizer, chat template, model loader, or RAM budget logic
 - adding permanent repack buffers or resident f32 caches
 - changing output sampling or answer correctness checks
 - changing default threading discipline for the benchmark
@@ -254,7 +254,7 @@ Expected: pass.
 Run:
 
 ```bash
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r94-pre-control.txt 2> target/r94-pre-control.time
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r94-pre-control.txt 2> target/r94-pre-control.time
 ```
 
 Expected:
@@ -458,7 +458,7 @@ Run:
 
 ```bash
 for i in 1 2 3; do
-  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r94-run${i}.txt" 2> "target/r94-run${i}.time"
+  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r94-run${i}.txt" 2> "target/r94-run${i}.time"
 done
 ```
 
@@ -473,7 +473,7 @@ Expected for every run:
 Run:
 
 ```bash
-RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r94-profile.txt 2> target/r94-profile.time
+RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r94-profile.txt 2> target/r94-profile.time
 ```
 
 Expected:
@@ -516,7 +516,7 @@ Add one row to `docs/benchmarks/trials/index.md` with:
 
 - trial: `2026-06-16-r94-reeflow-q8-batch4-prefill.md`
 - folder: `success` or `failed`
-- model: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- model: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - mode: `exact-lowram runtime, REEFLOW-Q8-BATCH4`
 - bottleneck tag: `CPU arithmetic / Q8 batch4 prefill`
 - baseline: R94 pre-control prefill

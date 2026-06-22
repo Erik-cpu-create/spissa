@@ -11,13 +11,13 @@ The measured answer after Phase 7.9B was clear: the ultra-low-RAM Huffman/tile-b
 This is still RAMA-native:
 
 ```text
-compressed or raw .rllm storage = long-term memory
+compressed or raw .spsa storage = long-term memory
 raw tile-block layout = consolidated fast pathway
 per-chunk/tile recall = bounded active working memory
 verify-once = process-local trust after first verified recall
 ```
 
-It is not a PowerInfer-style hot/cold neuron predictor. The optimization unit remains deterministic `.rllm` tensor chunks/tiles, not predicted active neurons.
+It is not a PowerInfer-style hot/cold neuron predictor. The optimization unit remains deterministic `.spsa` tensor chunks/tiles, not predicted active neurons.
 
 ## What changed
 
@@ -27,7 +27,7 @@ It is not a PowerInfer-style hot/cold neuron predictor. The optimization unit re
 
 ```bash
 rllm pack <input.safetensors> \
-  --out <output.rllm> \
+  --out <output.spsa> \
   --codec auto|raw|rle|huff \
   --tile-block-elements <n>
 ```
@@ -85,11 +85,11 @@ python3 scripts/phase76_release_rss_benchmark.py \
 
 ## Artifact
 
-Real local Pythia-70M was repacked as a raw/tile-block `.rllm` artifact:
+Real local Pythia-70M was repacked as a raw/tile-block `.spsa` artifact:
 
 ```bash
 target/release/rllm pack models/pythia-70m/model.safetensors \
-  --out models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
+  --out models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa \
   --codec raw \
   --tile-block-elements 65536 \
   --config models/pythia-70m/config.json \
@@ -99,7 +99,7 @@ target/release/rllm pack models/pythia-70m/model.safetensors \
 Measured artifact size:
 
 ```text
-models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm
+models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa
 160.60 MiB
 ```
 
@@ -117,7 +117,7 @@ Lossless verification passed:
 All benchmark rows used:
 
 ```text
-artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm
+artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa
 prompt: Hello
 ctx: 128,512,1024
 max-new-tokens: 1,4,8,16
@@ -255,7 +255,7 @@ Raw/tile-block artifact still preserved the tested HF parity:
 ```bash
 uv run --with torch --with transformers --with safetensors \
   scripts/phase77_compare_logits.py \
-  --rllm-artifact models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
+  --rllm-artifact models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa \
   --out-dir target/phase79c-logits \
   --token-ids 12092,13 \
   --ctx 128 \

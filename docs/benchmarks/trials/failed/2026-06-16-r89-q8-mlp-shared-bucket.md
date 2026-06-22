@@ -24,7 +24,7 @@ cargo build --release -p rllm-cli --bin llama-test
 
 for i in 1 2 3; do
   /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm \
+    --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa \
     --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" \
     > /tmp/r89-run${i}.txt 2> /tmp/r89-run${i}.time
 done

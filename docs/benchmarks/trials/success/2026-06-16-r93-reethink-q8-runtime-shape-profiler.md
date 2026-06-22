@@ -16,7 +16,7 @@ RLLM needs opt-in runtime attribution for the exact Q8 branches used by
 
 - Mode: exact-lowram diagnostic, single-thread CPU-only
 - REE kernel lineage: `REETHINK-Q8-SHAPE-PROFILER`
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: Q8_0 streaming linear, multiply-into, and argmax paths
 - Target device/profile: CPU-only, single-thread benchmark
 - Bottleneck tag: CPU arithmetic / runtime branch attribution
@@ -39,14 +39,14 @@ cargo build --release -p rllm-cli --bin llama-test
 Control:
 
 ```bash
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r93-control.txt 2> target/r93-control.time
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r93-control.txt 2> target/r93-control.time
 ```
 
 Profiled:
 
 ```bash
 for i in 1 2; do
-  RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r93-q8-profile-run${i}.txt" 2> "target/r93-q8-profile-run${i}.time"
+  RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r93-q8-profile-run${i}.txt" 2> "target/r93-q8-profile-run${i}.time"
 done
 ```
 

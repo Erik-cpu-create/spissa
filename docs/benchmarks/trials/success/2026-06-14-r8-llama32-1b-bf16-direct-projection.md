@@ -12,7 +12,7 @@ The raw BF16 batch-1 projection path should also improve the downloaded Llama 3.
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/Llama-3.2-1B-Instruct-raw.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: model shape and raw BF16 projection bandwidth
@@ -23,7 +23,7 @@ The raw BF16 batch-1 projection path should also improve the downloaded Llama 3.
 Commands:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token 'models/Llama-3.2-1B-Instruct-raw.rllm' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r8-llama32-1b-bf16-direct-projection.md'
+cargo run --release -p rllm-cli -- chat-session-token 'models/Llama-3.2-1B-Instruct-raw.spsa' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r8-llama32-1b-bf16-direct-projection.md'
 ```
 
 ## Results

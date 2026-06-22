@@ -17,7 +17,7 @@ per-row weight scales (the lab used a single scale).
 
 - Mode: exact-lowram runtime gate
 - REE kernel lineage: REEFUSE-Q8-I8MM-PANEL (output-octet)
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Device: Apple A18 Pro, single-thread (`RLLM_THREADS=1`)
 - Bottleneck tag: CPU arithmetic / Q8 i8mm GEMM (smmla latency)
 

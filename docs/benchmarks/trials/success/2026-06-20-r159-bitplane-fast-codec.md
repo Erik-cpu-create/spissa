@@ -3,7 +3,7 @@
 - Date: 2026-06-20
 - Codec: rtc-bitplane-v1 (`BitplaneCodec` wired into the container + NEON decode)
 - Model: Gemma 3 1B IT, `pack --codec bitplane`; speed/RAM/tokens via `gemma-test` + `/usr/bin/time -l`
-- Verdict: **GO** — bit-plane is a real, registered, lossless `.rllm` codec whose
+- Verdict: **GO** — bit-plane is a real, registered, lossless `.spsa` codec whose
   **NEON fixed-width decode makes lossless-compressed inference 4× faster than rANS**
   (1.08 vs 0.27 tok/s), lossless-verified. Honest ceiling: it still loses to bf16
   in-RAM (1.08 vs 1.7) because bf16 is zero-copy and any codec pays a decode cost.

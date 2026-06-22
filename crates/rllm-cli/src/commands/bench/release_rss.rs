@@ -14,8 +14,8 @@ use std::path::PathBuf;
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// Path to the .rllm artifact to benchmark.
-    #[arg(long, default_value = "models/pythia-70m-phase76-16mb.rllm")]
+    /// Path to the .spsa artifact to benchmark.
+    #[arg(long, default_value = "models/pythia-70m-phase76-16mb.spsa")]
     pub artifact: String,
 
     /// Prompt text sent to each run.

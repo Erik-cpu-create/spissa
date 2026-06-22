@@ -68,7 +68,7 @@ If the package/test filter does not match this repo layout, run the narrowest av
 Run the same one-turn Llama 3.2 1B sanity prompt used in R78, with trace enabled:
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-trace target/r79-q8-mlp-trace.json"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-trace target/r79-q8-mlp-trace.json"
 ```
 
 Expected quality check: answer should remain `No`.

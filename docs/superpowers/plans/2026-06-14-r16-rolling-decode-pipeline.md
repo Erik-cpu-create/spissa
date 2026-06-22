@@ -1110,7 +1110,7 @@ Run baseline:
 ```bash
 printf 'good morning\nexit\n' | \
   RLLM_THREADS=1 /usr/bin/time -l target/release/llama-test \
-    --model models/SmolLM2-135M-raw.rllm \
+    --model models/SmolLM2-135M-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1120,7 +1120,7 @@ Run rolling:
 ```bash
 printf 'good morning\nexit\n' | \
   RLLM_ROLLING=1 /usr/bin/time -l target/release/llama-test \
-    --model models/SmolLM2-135M-raw.rllm \
+    --model models/SmolLM2-135M-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1134,7 +1134,7 @@ Run baseline:
 ```bash
 printf 'good morning\nexit\n' | \
   RLLM_THREADS=1 /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1144,7 +1144,7 @@ Run rolling:
 ```bash
 printf 'good morning\nexit\n' | \
   RLLM_ROLLING=1 /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1172,7 +1172,7 @@ or full logits buffers.
 ## Scope
 
 - Mode: exact-lowram
-- Models/artifacts: `models/SmolLM2-135M-raw.rllm`, `models/Llama-3.2-1B-Instruct-raw.rllm`
+- Models/artifacts: `models/SmolLM2-135M-raw.spsa`, `models/Llama-3.2-1B-Instruct-raw.spsa`
 - Architecture: llama
 - Target device/profile: CPU-only, low RAM
 - Bottleneck tag: rolling decode pipeline

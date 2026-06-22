@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
-/// Writer for .rllm files
+/// Writer for .spsa files
 ///
 /// # Usage
 ///
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_writer_creates_file() {
-        let temp = std::env::temp_dir().join("test_writer.rllm");
+        let temp = std::env::temp_dir().join("test_writer.spsa");
         let metadata = GlobalMetadata::new_test();
         let writer = RllmWriter::new(&temp, metadata).unwrap();
         writer.finalize().unwrap();
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_writer_with_tensor() {
-        let temp = std::env::temp_dir().join("test_writer_tensor.rllm");
+        let temp = std::env::temp_dir().join("test_writer_tensor.spsa");
         let metadata = GlobalMetadata::new_test();
         let mut writer = RllmWriter::new(&temp, metadata).unwrap();
 
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn test_writer_persists_identity_range_checksums() {
-        let temp = std::env::temp_dir().join("test_writer_range_checksums.rllm");
+        let temp = std::env::temp_dir().join("test_writer_range_checksums.spsa");
         let metadata = GlobalMetadata::new_test();
         let mut writer = RllmWriter::new(&temp, metadata).unwrap();
         writer.add_tensor(TensorMeta {
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_writer_rejects_out_of_bounds_range_spec() {
-        let temp = std::env::temp_dir().join("test_writer_bad_range.rllm");
+        let temp = std::env::temp_dir().join("test_writer_bad_range.spsa");
         let metadata = GlobalMetadata::new_test();
         let mut writer = RllmWriter::new(&temp, metadata).unwrap();
         let data = vec![1u8; 8];

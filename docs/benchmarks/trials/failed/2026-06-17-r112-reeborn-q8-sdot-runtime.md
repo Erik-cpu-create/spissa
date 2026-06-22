@@ -17,7 +17,7 @@ loop — beats the tuned f32 path on real Llama 3.2 1B Q8 prefill.
 
 - Mode: exact-lowram runtime gate
 - REE kernel lineage: `REEBORN-Q8-SDOT`
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Threading: `RLLM_THREADS=1`; integrity `unchecked`; chat-template llama3
 - Bottleneck tag: CPU arithmetic / Q8 integer-SIMD dot
 - Implementation: per-32-block activation quant cached once per matmul

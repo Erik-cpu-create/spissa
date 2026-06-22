@@ -82,7 +82,7 @@ exponent unpack is serial; the residual read and bf16 reassembly are SIMD.
 ### 2. Compressed-resident layout
 
 `rtc-dfloat-v1` chunks store the compressed (exponent-bitstream + residual + per-
-tensor Huffman table) bytes in the `.rllm`. They are mmap'd and kept **compressed
+tensor Huffman table) bytes in the `.spsa`. They are mmap'd and kept **compressed
 in RAM** (no full decompress at load). Per-byte SHA-256 still verifies the stored
 compressed bytes (lossless integrity preserved). `pack --quantize none --codec
 dfloat` (or a dedicated flag) produces such a tensor.
@@ -153,7 +153,7 @@ implementation of this line.
 
 ## Feasibility result (measured)
 
-**Measured on:** `model.embed_tokens.weight` from `Llama-3.2-1B-Instruct-raw.rllm`
+**Measured on:** `model.embed_tokens.weight` from `Llama-3.2-1B-Instruct-raw.spsa`
 (262,668,288 bf16 weights = 525,336,576 bytes).
 
 | Metric | Value |
@@ -176,7 +176,7 @@ bandwidth.
 
 - R140a (codec + lossless on-disk storage) is a **GO** — the codec is correct,
   lossless, and achieves the target ratio. It is useful for producing smaller
-  `.rllm` files on disk.
+  `.spsa` files on disk.
 - R140b (compressed-resident + fused kernel) is a **NO-GO** at the current decode
   speed. The gap (0.02 GB/s vs ~5 GB/s needed) requires a SIMD/NEON LUT decode
   path (vectorized 8-weight-at-a-time LUT lookup + bf16 reassembly) before

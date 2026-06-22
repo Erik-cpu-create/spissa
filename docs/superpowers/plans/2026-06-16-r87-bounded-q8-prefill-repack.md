@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Reduce prefill CPU time on Llama 3.2 1B (`q8_transformer_keepio-rowchunks.rllm`) by adding a bounded, row-tiled Q8 repack path in the streaming matmul kernels without widening transient RAM.
+**Goal:** Reduce prefill CPU time on Llama 3.2 1B (`q8_transformer_keepio-rowchunks.spsa`) by adding a bounded, row-tiled Q8 repack path in the streaming matmul kernels without widening transient RAM.
 
 **Architecture:** Keep the Q8 bottleneck fix inside `crates/rllm-runtime/src/streaming/kernels.rs` and use explicit bounded scratch for dequantizing short Q8 row tiles (for both `accumulate_q8_0_chunk*` paths). No full-chunk or global Q8 dequantization. Reuse existing `--profile-phases` pipeline from `llama-test`.
 
@@ -226,9 +226,9 @@ cargo build --release -p rllm-cli --bin llama-test
 - [ ] Execute three runs (unchecked trust mode for speed signal, keep strict-mode baseline separately if needed):
 
 ```sh
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace /tmp/r87-rllm-trace-run1.json"
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace /tmp/r87-rllm-trace-run2.json"
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace /tmp/r87-rllm-trace-run3.json"
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace /tmp/r87-rllm-trace-run1.json"
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace /tmp/r87-rllm-trace-run2.json"
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked --rama-trace /tmp/r87-rllm-trace-run3.json"
 ```
 
 - [ ] Capture:

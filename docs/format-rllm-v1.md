@@ -2,7 +2,7 @@
 
 ## Overview
 
-The `.rllm` format is a single-file binary container for storing compressed LLM model tensors. It supports:
+The `.spsa` format is a single-file binary container for storing compressed LLM model tensors. It supports:
 
 - Lossless compression via chunked tensor storage
 - Random access to individual tensors and chunks
@@ -64,7 +64,7 @@ little-endian `u64` JSON byte length, followed by the JSON payload.
 }
 ```
 
-`tokenizer` is optional and additive. Existing `.rllm` files without tokenizer
+`tokenizer` is optional and additive. Existing `.spsa` files without tokenizer
 metadata remain valid. Phase 5E stores a runtime-ready `id_to_token` table for a
 narrow text-generation smoke path; full production BPE/normalizer fidelity is a
 future tokenizer-runtime concern.

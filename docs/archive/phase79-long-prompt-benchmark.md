@@ -7,7 +7,7 @@ Previous Phase 7.9C chat-speed numbers used the short prompt `Hello` while sweep
 ## Artifact and runtime
 
 ```text
-artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm
+artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa
 codec/layout: raw tile-block, --tile-block-elements 65536
 runtime integrity: verify-once
 memory budget: 100mb
@@ -82,7 +82,7 @@ Long fixed-token HF/PyTorch logits comparisons were run against the same raw/til
 ```bash
 uv run --with torch --with transformers --with safetensors \
   scripts/phase77_compare_logits.py \
-  --rllm-artifact models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
+  --rllm-artifact models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa \
   --out-dir target/phase79d-long-prompt-logits-128 \
   --token-ids <128 deterministic ids> \
   --ctx 2048 \
@@ -104,7 +104,7 @@ HF top1: 12092
 ```bash
 uv run --with torch --with transformers --with safetensors \
   scripts/phase77_compare_logits.py \
-  --rllm-artifact models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm \
+  --rllm-artifact models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa \
   --out-dir target/phase79d-long-prompt-logits-512 \
   --token-ids <512 deterministic ids> \
   --ctx 2048 \

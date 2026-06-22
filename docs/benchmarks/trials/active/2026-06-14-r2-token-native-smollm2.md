@@ -12,7 +12,7 @@ A persistent KV-cache session should reduce later-turn TTFT when compared agains
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/SmolLM2-135M-raw.rllm`
+- Model/artifact: `models/SmolLM2-135M-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: full-history replay and memory bandwidth
@@ -23,7 +23,7 @@ A persistent KV-cache session should reduce later-turn TTFT when compared agains
 Commands:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.rllm' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r2-token-native-smollm2.md'
+cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.spsa' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r2-token-native-smollm2.md'
 ```
 
 Runtime context:

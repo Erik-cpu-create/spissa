@@ -15,7 +15,7 @@ decode-shaped complete-row Q8 paths before promoting a runtime kernel lineage.
 
 - Mode: exact-lowram lab plus conditional runtime trial
 - REE kernel: `REEBORN-Q8-BATCH1-LAB`; runtime candidate `REEBORN-Q8-BATCH1` rejected
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: Q8_0 complete-row batch1 decode path
 - Target device/profile: CPU-only, single-thread benchmark
 - Expected bottleneck: Q8 MLP decode arithmetic
@@ -40,7 +40,7 @@ Runtime trial:
 ```bash
 cargo build --release -p rllm-cli --bin llama-test
 for i in 1 2 3; do
-  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r92-run${i}.txt" 2> "target/r92-run${i}.time"
+  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r92-run${i}.txt" 2> "target/r92-run${i}.time"
 done
 ```
 

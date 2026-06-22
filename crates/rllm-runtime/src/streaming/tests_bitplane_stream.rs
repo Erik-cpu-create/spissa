@@ -300,7 +300,7 @@
     #[ignore]
     fn write_gemma_lmhead_sidecar() {
         write_lmhead_sidecar(
-            "../../models/gemma-3-1b-it-rawcodec.rllm",
+            "../../models/gemma-3-1b-it-rawcodec.spsa",
             "model.embed_tokens.weight",
             256,
             "/tmp/gemma1b-lmhead.sidecar",
@@ -312,7 +312,7 @@
     #[test]
     #[ignore]
     fn r149a_llama_streaming_lmhead_lossless() {
-        let model = "../../models/Llama-3.2-1B-Instruct-raw.rllm";
+        let model = "../../models/Llama-3.2-1B-Instruct-raw.spsa";
         let tname = "model.embed_tokens.weight";
         let sidecar = "/tmp/llama1b-lmhead.sidecar";
         write_lmhead_sidecar(model, tname, 256, sidecar).unwrap();
@@ -335,7 +335,7 @@
     #[test]
     #[ignore]
     fn r149b_gemma_streaming_lmhead_lossless() {
-        let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+        let model = "../../models/gemma-3-1b-it-rawcodec.spsa";
         let tname = "model.embed_tokens.weight";
         let sidecar = "/tmp/gemma1b-lmhead.sidecar";
         write_lmhead_sidecar(model, tname, 256, sidecar).unwrap();
@@ -416,7 +416,7 @@
     fn r149c_real_lmhead_capacity_bound() {
         use std::io::Read; // for the sidecar header read; cold-read helpers own F_NOCACHE
 
-        let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+        let model = "../../models/gemma-3-1b-it-rawcodec.spsa";
         let tname = "model.embed_tokens.weight";
         let sidecar = "/tmp/gemma1b-lmhead.sidecar";
         let raw_path = "/tmp/gemma1b-lmhead-raw.bin";
@@ -565,7 +565,7 @@
     #[ignore]
     fn r150a_parallel_lmhead_capacity_bound() {
         use std::io::{Read, Seek, SeekFrom};
-        let model = "../../models/gemma-3-1b-it-rawcodec.rllm";
+        let model = "../../models/gemma-3-1b-it-rawcodec.spsa";
         let tname = "model.embed_tokens.weight";
         let sidecar = "/tmp/gemma1b-lmhead.sidecar";
         let raw_big = "/tmp/r150a_raw_big.bin";

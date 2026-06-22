@@ -12,7 +12,7 @@ We need an apples-to-apples, same prompt-token count comparison before deciding 
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm` vs `llama3.2:1b`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa` vs `llama3.2:1b`
 - Architecture: Q8 streaming prefill, CPU-only paths
 - Target device/profile: Mac (CPU)
 - Expected bottleneck: CPU arithmetic
@@ -29,7 +29,7 @@ cargo build --release -p rllm-cli --bin llama-test
 # RLLM: default threading
 for i in 1 2 3; do
   /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm \
+    --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa \
     --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" \
     > /tmp/r84-rllm-run${i}.txt 2> /tmp/r84-rllm-run${i}.time
 done
@@ -37,7 +37,7 @@ done
 # RLLM: single-thread mode (explicitly RLLM_THREADS=1)
 for i in 1 2 3; do
   RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm \
+    --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa \
     --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" \
     > /tmp/r88-rllm-st1-run${i}.txt 2> /tmp/r88-rllm-st1-run${i}.time
 done

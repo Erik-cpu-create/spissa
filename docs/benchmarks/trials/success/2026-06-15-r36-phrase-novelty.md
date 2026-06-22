@@ -21,7 +21,7 @@ widening.
 ## Scope
 
 - Mode: experimental-speed
-- Model/artifact: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa`
 - Architecture: llama
 - Target device/profile: CPU-only, low RAM
 - Runtime gate: `RLLM_EXPERIMENTAL_SPEED=1`
@@ -51,7 +51,7 @@ printf 'good morning\nexit\n' | \
   RLLM_AIP_LM_HEAD_REPEAT_MARGIN_ADAPTIVE=1 \
   RLLM_AIP_LM_HEAD_NOVELTY_WINDOW=4 \
   target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
     --ctx 2048 \
     --max-new-tokens 64 \
     --profile-phases
@@ -68,7 +68,7 @@ printf 'good morning\nexit\n' | \
   RLLM_AIP_LM_HEAD_NOVELTY_WINDOW=4 \
   RLLM_AIP_LM_HEAD_AGREEMENT=1 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.rllm \
+    --model models/Llama-3.2-1B-Instruct-r25-inputtiles-all-lmhead.spsa \
     --ctx 2048 \
     --max-new-tokens 64 \
     --profile-phases

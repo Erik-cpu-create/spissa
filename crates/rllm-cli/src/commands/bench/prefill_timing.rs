@@ -14,10 +14,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(ClapArgs)]
 pub struct Args {
-    /// Path to the .rllm artifact to benchmark.
+    /// Path to the .spsa artifact to benchmark.
     #[arg(
         long,
-        default_value = "models/pythia-70m-low-ram-fast-raw-tileblocks.rllm"
+        default_value = "models/pythia-70m-low-ram-fast-raw-tileblocks.spsa"
     )]
     pub artifact: String,
 

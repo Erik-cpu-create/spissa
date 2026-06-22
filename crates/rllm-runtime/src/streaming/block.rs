@@ -2,7 +2,7 @@
 // Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
 // distribution of this file, via any medium, is strictly prohibited.
 
-/// Low-RAM pre-norm transformer block skeleton over chunked `.rllm` weights.
+/// Low-RAM pre-norm transformer block skeleton over chunked `.spsa` weights.
 ///
 /// Computes the Phase 5 toy GPT-NeoX/Pythia-shaped block:
 /// `LN -> streaming attention -> residual -> LN -> streaming MLP -> residual`.

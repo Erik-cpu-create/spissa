@@ -16,7 +16,7 @@ tokens.
 ## Scope
 
 - Mode: experimental-speed
-- Model/artifact: `models/Llama-3.2-1B-Instruct-raw.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-raw.spsa`
 - Architecture: llama
 - Target device/profile: CPU-only, low RAM
 - Expected bottleneck: sparse MLP row-major weight traffic
@@ -36,28 +36,28 @@ cargo build --release -p rllm-cli --bin llama-test
 printf 'good morning\nexit\n' | \
   RLLM_AIP_COLUMN_CACHE=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\ngood morning\nexit\n' | \
   RLLM_AIP_COLUMN_CACHE=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 8
 
 printf 'good morning\nexit\n' | \
   RLLM_AIP_COLUMN_CACHE=1 RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=32 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 8
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=32 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 8
 ```

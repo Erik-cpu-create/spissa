@@ -16,7 +16,7 @@ decode, RAM) and decide whether the low-RAM thesis still holds.
 
 - Mode: exact-lowram (diagnostic / competitive baseline)
 - REE kernel: REEFUSE-Q8-I8MM-PANEL (R124 state)
-- Model/artifact: RLLM `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: RLLM `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
   vs llama.cpp GGUF `llama3.2:1b` Q8_0 (Ollama blob `74701a8c…`, same weights)
 - Architecture: LLaMA 3.2 1B Instruct, Q8_0
 - Target device/profile: Apple A18 Pro, single-thread, CPU-only
@@ -79,7 +79,7 @@ KV 128 MiB + compute 68 MiB, plus the mmap'd 1.3 GB → ~3.3 GB peak RSS.
   already SIMD `sdot`.
 - **Lossless paths to low-RAM + fast decode together** (literature-backed):
   (1) cache the batch1 activation quant (R127), (2) store weights pre-packed in
-  the `.rllm` at pack-time (1 copy, mmap → less RAM than llama.cpp AND no
+  the `.spsa` at pack-time (1 copy, mmap → less RAM than llama.cpp AND no
   per-token repack), (3) compute-fused lossless decompression (ZipServ-style;
   RLLM already owns the RTC codec). PowerInfer / LLM-in-a-flash reach speed via
   **activation sparsity**, which requires ReLU-sparsified models (lossy, a

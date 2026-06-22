@@ -608,7 +608,7 @@ Expected: the required section structure.
 - [ ] **Step 2: Write the trial report**
 
 Create the report in the verdict-matching folder. Fill from Task 3's measured numbers:
-- **Scope → REE kernel:** `REEPLANE (working name; Erik's final call)`. Mode: `experimental (compressed-resident codec, decode only)`. Artifact: `Llama-3.2-1B-Instruct-raw.rllm` embedding (262.7M bf16, palette 32, w=5). Device: Apple A18 Pro. Bottleneck tag: IO/decode.
+- **Scope → REE kernel:** `REEPLANE (working name; Erik's final call)`. Mode: `experimental (compressed-resident codec, decode only)`. Artifact: `Llama-3.2-1B-Instruct-raw.spsa` embedding (262.7M bf16, palette 32, w=5). Device: Apple A18 Pro. Bottleneck tag: IO/decode.
 - **Hypothesis:** a fixed-width palette index + NEON `tbl`-gather decode is fast enough (unlike Huffman) for compressed-resident, at ~13 bits/weight (19% RAM).
 - **Results:** the table — scalar bitplane vs NEON Gweight/s + the NEON speedup; bits/weight (~13); aggregate; verdict; bit-identical parity confirmed.
 - **Analysis:** compare aggregate to the 12 Gweight/s plain-bf16 rate; place the result in the R140-R142 frontier (Huffman 34%/0.18 Gw/s vs bit-plane 19%/<measured>). State the ratio-vs-decode-speed tradeoff conclusion. If GO/MARGINAL, note Phase C (fused decode→bfdot, no DRAM store) is the next gate; if NO-GO, the frontier is closed for lossless bf16 compressed-resident on this CPU.

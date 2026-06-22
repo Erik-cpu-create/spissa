@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the change inside existing runtime and benchmark boundaries. `llama-test --profile-phases` exposes prefill and decode timing from existing `RamaSessionTurnMetrics`; `streaming/kernels.rs` owns Q8 CPU accumulation kernels; benchmark evidence is recorded under `docs/benchmarks/trials/` and summarized in `docs/benchmarks/trials/index.md`.
 
-**Tech Stack:** Rust, Cargo tests, RLLM `.rllm` artifacts, `llama-test`, Q8_0 packed block kernels, Markdown benchmark trial reports.
+**Tech Stack:** Rust, Cargo tests, RLLM `.spsa` artifacts, `llama-test`, Q8_0 packed block kernels, Markdown benchmark trial reports.
 
 ---
 
@@ -237,7 +237,7 @@ without changing generated text, peak transient memory, or CPU-only semantics.
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: Llama 3.2 1B Instruct
 - Target device/profile: local CPU-only RLLM release build
 - Expected bottleneck: Q8 MLP projection prefill
@@ -252,7 +252,7 @@ cargo build --release -p rllm-cli --bin llama-test
 
 printf '%s\nquit\n' 'Answer yes or no: is fire cold?' \
   | target/release/llama-test \
-      --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm \
+      --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa \
       --chat-template llama3 \
       --max-new-tokens 4 \
       --profile-phases
@@ -298,7 +298,7 @@ Decide after the measured R78 result.
 Append one row to `docs/benchmarks/trials/index.md`:
 
 ```markdown
-| 2026-06-16 | 2026-06-16-r78-cpu-q8-prefill-kernel.md | active | Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm | exact-lowram | CPU arithmetic | R77 rowchunks answered 3/3 sanity prompts correctly but prefill stayed ~28-30s | running | planned | CPU-only low-RAM prefill bottleneck evidence |
+| 2026-06-16 | 2026-06-16-r78-cpu-q8-prefill-kernel.md | active | Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa | exact-lowram | CPU arithmetic | R77 rowchunks answered 3/3 sanity prompts correctly but prefill stayed ~28-30s | running | planned | CPU-only low-RAM prefill bottleneck evidence |
 ```
 
 - [ ] **Step 3: Commit active report scaffold**
@@ -332,7 +332,7 @@ Expected: `Finished release profile`.
 Run:
 
 ```bash
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases" \
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases" \
   2>&1 | tee /tmp/rllm-r78-baseline-profile-20260616.txt
 ```
 
@@ -547,7 +547,7 @@ Expected: `Finished release profile`.
 Run:
 
 ```bash
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases" \
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases" \
   2>&1 | tee /tmp/rllm-r78-trial-profile-20260616.txt
 ```
 

@@ -7,7 +7,7 @@ Phase 7.10E follows the Phase 7.10D evidence: after MLP prefill row reuse, long-
 Artifact:
 
 ```text
-models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm
+models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa
 ```
 
 Benchmark shape:
@@ -206,7 +206,7 @@ Phase 7.11 — Pythia-160M scale validation
 
 Suggested acceptance:
 
-- pack local/downloaded Pythia-160M into raw/tile-block `.rllm`
+- pack local/downloaded Pythia-160M into raw/tile-block `.spsa`
 - verify lossless
 - run short prompt and fixed token-ID generation
 - run 128/512/1024-token timing matrix if runtime is acceptable

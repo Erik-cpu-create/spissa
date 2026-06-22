@@ -39,10 +39,10 @@ $TC/llvm-strip target/aarch64-linux-android/release/rllm     # 5.3 -> 3.9 MB (op
 Push + run (via `adb shell`, or copy into Termux and run there):
 ```sh
 adb push target/aarch64-linux-android/release/rllm /data/local/tmp/
-adb push models/gemma-3-1b-it-q8-raw.rllm /data/local/tmp/
+adb push models/gemma-3-1b-it-q8-raw.spsa /data/local/tmp/
 adb shell
 cd /data/local/tmp && chmod +x rllm
-RLLM_INTEGRITY=unchecked ./rllm chat gemma-3-1b-it-q8-raw.rllm --fast
+RLLM_INTEGRITY=unchecked ./rllm chat gemma-3-1b-it-q8-raw.spsa --fast
 ```
 
 **Option B — build on the phone (Termux).** No dev machine needed, but heavier (Rust
@@ -86,21 +86,21 @@ Notes:
 
 ## 5. Copy a model
 
-Copy ONE `.rllm` file to the phone — the file format is platform-independent. Use a small
+Copy ONE `.spsa` file to the phone — the file format is platform-independent. Use a small
 model (a phone gives a process only a few GB of usable RAM):
 
 | model | size | notes |
 |-------|------|-------|
-| `gemma-3-1b-it-q8-raw.rllm` | 1.38 GB | fastest (q8, lossy); use `--fast` |
-| `gemma-3-1b-it-rans.rllm`   | 1.36 GB | lossless; slower (~3 tok/s) |
+| `gemma-3-1b-it-q8-raw.spsa` | 1.38 GB | fastest (q8, lossy); use `--fast` |
+| `gemma-3-1b-it-rans.spsa`   | 1.36 GB | lossless; slower (~3 tok/s) |
 
 Do **not** use the 4B (≈4.79 GB) — it won't fit most phones' usable RAM.
 
 ```sh
 # from your computer, before running in Termux:
-adb push gemma-3-1b-it-q8-raw.rllm /sdcard/
+adb push gemma-3-1b-it-q8-raw.spsa /sdcard/
 # then in Termux:
-mkdir -p ~/rllm/models && cp /sdcard/gemma-3-1b-it-q8-raw.rllm ~/rllm/models/
+mkdir -p ~/rllm/models && cp /sdcard/gemma-3-1b-it-q8-raw.spsa ~/rllm/models/
 ```
 
 ## 6. Run
@@ -108,9 +108,9 @@ mkdir -p ~/rllm/models && cp /sdcard/gemma-3-1b-it-q8-raw.rllm ~/rllm/models/
 ```sh
 cd ~/rllm
 # q8 (fast):
-RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-q8-raw.rllm --fast
+RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-q8-raw.spsa --fast
 # rANS (lossless):
-RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-rans.rllm
+RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-rans.spsa
 ```
 
 Type a message at `you> `, Enter to send. `/exit` to quit, `/reset` for a new conversation.

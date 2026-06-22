@@ -381,7 +381,7 @@ mod tests {
 
     fn write_empty_model(metadata: GlobalMetadata, name: &str) -> std::path::PathBuf {
         let path =
-            std::env::temp_dir().join(format!("rllm-llama-api-{name}-{}.rllm", std::process::id()));
+            std::env::temp_dir().join(format!("rllm-llama-api-{name}-{}.spsa", std::process::id()));
         let writer = RllmWriter::new(&path, metadata).unwrap();
         writer.finalize().unwrap();
         path
@@ -405,7 +405,7 @@ mod tests {
 
     fn write_model_with_final_norm_only(name: &str) -> std::path::PathBuf {
         let path =
-            std::env::temp_dir().join(format!("rllm-llama-api-{name}-{}.rllm", std::process::id()));
+            std::env::temp_dir().join(format!("rllm-llama-api-{name}-{}.spsa", std::process::id()));
         let mut writer = RllmWriter::new(&path, llama_metadata()).unwrap();
         add_f32_tensor(&mut writer, 0, "model.norm.weight", vec![2], &[1.0, 1.0]);
         writer.finalize().unwrap();

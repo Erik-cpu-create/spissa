@@ -423,7 +423,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Modify: `crates/rtc-codec/src/dfloat.rs` (add `#[ignore]` bench)
 
 **Interfaces:**
-- Consumes: `DfloatCodec::decode_fast` (Task 2), the existing `dump_bf16_embedding_sample` test (`crates/rllm-runtime/src/lazy.rs:1227`) which writes `/tmp/rllm-bf16-sample.bin` from `models/Llama-3.2-1B-Instruct-raw.rllm`.
+- Consumes: `DfloatCodec::decode_fast` (Task 2), the existing `dump_bf16_embedding_sample` test (`crates/rllm-runtime/src/lazy.rs:1227`) which writes `/tmp/rllm-bf16-sample.bin` from `models/Llama-3.2-1B-Instruct-raw.spsa`.
 - Produces: the measured single-core Gweight/s, the speedup vs naive, and the GO/MARGINAL/NO-GO verdict (printed; transcribed into the Task 4 trial report).
 
 - [ ] **Step 1: Add the `#[ignore]` feasibility bench**
@@ -492,7 +492,7 @@ fn dfloat_fast_decode_feasibility() {
 
 - [ ] **Step 2: Generate the real bf16 sample**
 
-Run (needs the local `models/Llama-3.2-1B-Instruct-raw.rllm`, 2.3 GB, already on disk):
+Run (needs the local `models/Llama-3.2-1B-Instruct-raw.spsa`, 2.3 GB, already on disk):
 
 ```bash
 cargo test -p rllm-runtime --release dump_bf16_embedding_sample -- --ignored --nocapture
@@ -538,7 +538,7 @@ Expected: see the required section structure (`# Trial: …`, `Date`/`Owner`/`St
 - [ ] **Step 2: Write the trial report**
 
 Create `docs/benchmarks/trials/<verdict-folder>/2026-06-19-r142-reedrip-fast-dfloat-decode.md` following that structure. Required content, filled from Task 3's measured numbers:
-- **Scope → REE kernel:** `REEDRIP (working name; Erik's final call before any paper use)`. Mode: `compressed-resident feasibility (codec decode only)`. Artifact: `Llama-3.2-1B-Instruct-raw.rllm` embedding (262.7M bf16). Device: Apple A18 Pro (2 P + 4 E). Bottleneck tag: `codec decode throughput vs memory bandwidth`.
+- **Scope → REE kernel:** `REEDRIP (working name; Erik's final call before any paper use)`. Mode: `compressed-resident feasibility (codec decode only)`. Artifact: `Llama-3.2-1B-Instruct-raw.spsa` embedding (262.7M bf16). Device: Apple A18 Pro (2 P + 4 E). Bottleneck tag: `codec decode throughput vs memory bandwidth`.
 - **Hypothesis:** a buffered 64-bit-window reader makes `rtc-dfloat-v1` decode fast enough that compressed-resident (read ~10.6 bits/weight, decode on the fly) beats reading 16-bit bf16 from RAM.
 - **Results:** the table — naive vs fast single-core Gweight/s + the speedup; fast GB/s + ms/decode; aggregate (×3.5); the GO/MARGINAL/NO-GO verdict; bit-identical parity confirmed (all `decode_fast` tests green).
 - **Analysis:** compare aggregate decode to the 12 Gweight/s plain-bf16 rate and the 18.1 ceiling; state honestly whether decode clears the bandwidth budget. If MARGINAL, note the RAM win (525→349 MB resident) stands regardless.

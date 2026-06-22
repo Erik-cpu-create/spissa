@@ -21,7 +21,7 @@ By consolidating the Q8 MLP dot-product and repacking work into a shared bucket 
 
 - [ ] Implement the shared bucket micro-kernel for Q8 MLP in `crates/rllm-runtime/src/streaming/`.
 - [ ] Validate implementation maintains baseline exactness (outputs `No`/`No.` as established in R88).
-- [ ] Measure prefill latency with the new micro-kernel on `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`.
+- [ ] Measure prefill latency with the new micro-kernel on `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`.
 - [ ] Compare `prefill_total` and overall token processing speed against the R88 baseline.
 - [ ] Add a dedicated trial doc in `docs/benchmarks/trials/active` and add a new row in `docs/benchmarks/trials/index.md`.
 - [ ] Upon completion of the trial, move the doc from `active/` to either `docs/benchmarks/trials/success/` or `docs/benchmarks/trials/failed/` based on the gate results.

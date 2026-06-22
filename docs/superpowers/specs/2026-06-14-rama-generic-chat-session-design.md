@@ -8,7 +8,7 @@ Owner: RLLM/RAMA
 
 Build a generic RAMA chat-session runtime that keeps per-layer KV-cache state
 alive across chat turns. The first target is the local LLaMA-family
-`SmolLM2-135M-raw.rllm` artifact, but the session orchestration must be generic
+`SmolLM2-135M-raw.spsa` artifact, but the session orchestration must be generic
 enough to support GPT-NeoX/Pythia first and later Gemma/Qwen without rewriting
 the chat loop.
 
@@ -183,7 +183,7 @@ Add an experimental benchmark binary or command that can run scripted two-turn
 sessions:
 
 ```text
-rllm-chat-session --model models/SmolLM2-135M-raw.rllm \
+rllm-chat-session --model models/SmolLM2-135M-raw.spsa \
   --turn "Hello" \
   --turn "Continue" \
   --max-new-tokens 64 \

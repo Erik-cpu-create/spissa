@@ -7,7 +7,7 @@ The profiler is intentionally opt-in and has runtime/RSS overhead because it kee
 ## Command
 
 ```bash
-target/release/rllm run models/pythia-70m-phase78d-tileblocks.rllm \
+target/release/rllm run models/pythia-70m-phase78d-tileblocks.spsa \
   --token-ids 12092 \
   --max-new-tokens 1 \
   --ctx 128 \
@@ -61,7 +61,7 @@ The output is pretty JSON:
 
 | Phase | Meaning |
 |---|---|
-| `chunk_read` | Read compressed chunk payload from `.rllm` container |
+| `chunk_read` | Read compressed chunk payload from `.spsa` container |
 | `chunk_compressed_checksum` | SHA-256 verify compressed payload |
 | `chunk_decode` | RTC codec decode into original tensor bytes |
 | `chunk_original_checksum` | SHA-256 verify decoded/original bytes |
@@ -74,13 +74,13 @@ The first slice deliberately starts at chunk recall granularity. It does not yet
 Artifact:
 
 ```text
-models/pythia-70m-phase78d-tileblocks.rllm
+models/pythia-70m-phase78d-tileblocks.spsa
 ```
 
 Command:
 
 ```bash
-/usr/bin/time -l target/release/rllm run models/pythia-70m-phase78d-tileblocks.rllm \
+/usr/bin/time -l target/release/rllm run models/pythia-70m-phase78d-tileblocks.spsa \
   --token-ids 12092 \
   --max-new-tokens 1 \
   --ctx 128 \

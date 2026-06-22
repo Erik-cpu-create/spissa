@@ -1,6 +1,6 @@
 # Phase 7.12B Generic Eight-Row Projection Reuse
 
-Phase 7.12B follows the Phase 7.12A policy work. The goal is to optimize the remaining measured Pythia-160M MLP/QKV projection bottlenecks without adding model-specific branches, changing the `.rllm` format, or using sparse/hot-cold activation routing.
+Phase 7.12B follows the Phase 7.12A policy work. The goal is to optimize the remaining measured Pythia-160M MLP/QKV projection bottlenecks without adding model-specific branches, changing the `.spsa` format, or using sparse/hot-cold activation routing.
 
 ## Scope
 
@@ -36,7 +36,7 @@ SIMD intrinsics
 Phase 7.11B showed Pythia-160M still spends most long-prompt prefill time in dense projections after the prefill policy is tuned. A current Phase 7.12A speed-policy baseline on the local Pythia-160M raw/tile-block artifact confirms the bottleneck:
 
 ```text
-artifact: models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.rllm
+artifact: models/pythia-160m-phase711a-low-ram-fast-raw-tileblocks.spsa
 input tokens: 512
 max new tokens: 16
 ctx: 2048

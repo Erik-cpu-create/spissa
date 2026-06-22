@@ -17,7 +17,7 @@ if not, attributes why.
 
 - Mode: exact-lowram diagnostic
 - REE kernel: none (attribution only)
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Device: Apple A18 Pro (6 cores: 2 perf + 4 eff), 8 GB
 - Bottleneck tag: scheduler / CPU parallelism
 

@@ -7,7 +7,7 @@ Phase 7.7 adds a fixed-token-ID external reference comparison for the local Pyth
 Artifact:
 
 ```text
-models/pythia-70m-phase76-16mb.rllm
+models/pythia-70m-phase76-16mb.spsa
 ```
 
 Reference model:
@@ -19,7 +19,7 @@ models/pythia-70m
 RLLM command surface:
 
 ```bash
-target/release/rllm run models/pythia-70m-phase76-16mb.rllm \
+target/release/rllm run models/pythia-70m-phase76-16mb.spsa \
   --token-ids 12092,13 \
   --max-new-tokens 1 \
   --ctx 128 \

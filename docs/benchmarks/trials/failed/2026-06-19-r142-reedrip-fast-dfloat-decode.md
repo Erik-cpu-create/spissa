@@ -18,7 +18,7 @@ from RAM. The cheap lever (buffered reader) was expected to lift R140a's
 
 - Mode: experimental (compressed-resident feasibility; codec decode only, no kernel/runtime wiring)
 - REE kernel: REEDRIP (working name; Erik's final call before any paper use)
-- Model/artifact: `Llama-3.2-1B-Instruct-raw.rllm` tied bf16 embedding (`model.embed_tokens.weight`)
+- Model/artifact: `Llama-3.2-1B-Instruct-raw.spsa` tied bf16 embedding (`model.embed_tokens.weight`)
 - Architecture: LLaMA 3.2 1B, bf16 embedding/LM head (hidden 2048, vocab 128256 → 262.7M weights, 525 MB)
 - Target device/profile: Apple A18 Pro (2 P + 4 E), macOS; release build
 - Expected bottleneck: per-bit Huffman bit extraction (div/mod per bit)

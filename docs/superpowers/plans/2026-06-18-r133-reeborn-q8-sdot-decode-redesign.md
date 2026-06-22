@@ -38,7 +38,7 @@ Keep the existing chunk path as the fallback for: compressed codecs, low-RAM bud
 - Trial doc `docs/benchmarks/trials/<status>/2026-06-18-r133-reeborn-q8-sdot-decode-redesign.md` + `index.md` row.
 
 ## Design investigations (resolve before coding)
-- [ ] **Contiguity:** are a tensor's rtc-raw-v1 q8 chunks contiguous in the mmap'd `.rllm`? If yes → one `&[u8]` slice for the whole tensor. If no → process maximal contiguous runs (still far fewer dispatches than per-chunk).
+- [ ] **Contiguity:** are a tensor's rtc-raw-v1 q8 chunks contiguous in the mmap'd `.spsa`? If yes → one `&[u8]` slice for the whole tensor. If no → process maximal contiguous runs (still far fewer dispatches than per-chunk).
 - [ ] **Persistent pool:** does RLLM have a reusable persistent worker pool (rolling/REEWEAVE)? If yes, route the row-split through it. If no, add ONE (avoid per-call spawn). Honor `RLLM_THREADS`.
 - [ ] **Integrity:** the fast-path skips per-chunk VerifyOnce — verify the tensor once on first access (or under strict mode fall back to chunk path). Keep the lossless integrity guarantee available.
 
@@ -52,7 +52,7 @@ Runtime (COOL machine, warm-iteration, best-of-N):
 ```bash
 cargo build --release -p rllm-cli
 # decode tok/s, fast-path vs current, same prompt, greedy:
-./target/release/gemma-test --model models/gemma-3-4b-it-q8.rllm --prompt "The capital of France is" --max-new-tokens 16 --ctx 256
+./target/release/gemma-test --model models/gemma-3-4b-it-q8.spsa --prompt "The capital of France is" --max-new-tokens 16 --ctx 256
 ```
 Accept if: decode tok/s materially up vs current (record actual), "Paris…" preserved, parity diff = quant-only (report max_abs_diff + argmax match vs f32 scalar), full suite green.
 

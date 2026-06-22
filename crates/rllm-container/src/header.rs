@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The file header for .rllm files
+/// The file header for .spsa files
 ///
 /// Layout (44 bytes):
 /// - magic: 4 bytes ("RLLM")

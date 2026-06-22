@@ -93,7 +93,7 @@ fn dequantize_quantized_chunk(
     Ok(weights)
 }
 
-/// Low-RAM PyTorch-style linear layer over a chunked `.rllm` weight tensor.
+/// Low-RAM PyTorch-style linear layer over a chunked `.spsa` weight tensor.
 ///
 /// Computes `input[batch,in] × weight[out,in]^T + bias[out]` while decoding
 /// only one compressed weight chunk at a time. The caller owns activation and

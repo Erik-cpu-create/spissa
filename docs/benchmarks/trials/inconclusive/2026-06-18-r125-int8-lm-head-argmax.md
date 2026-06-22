@@ -15,7 +15,7 @@ against the q8 weight, no per-weight f32 dequant) should cut it, like gate/up/do
 
 - Mode: exact-lowram runtime gate
 - REE kernel: REEBORN-Q8-SDOT (argmax variant)
-- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Architecture: LLaMA 3.2 1B, Q8_0
 - Target device/profile: Apple A18 Pro, single-thread
 - Bottleneck tag: CPU arithmetic / memory bandwidth

@@ -1196,7 +1196,7 @@ layers, `mlp_down`, attention, and LM-head exact.
 ## Scope
 
 - Mode: experimental-speed
-- Models/artifacts: `models/SmolLM2-135M-raw.rllm`, `models/Llama-3.2-1B-Instruct-raw.rllm`
+- Models/artifacts: `models/SmolLM2-135M-raw.spsa`, `models/Llama-3.2-1B-Instruct-raw.spsa`
 - Architecture: llama
 - Target device/profile: CPU-only, low RAM
 - Expected bottleneck: MLP projection arithmetic and memory access
@@ -1214,28 +1214,28 @@ cargo build --release -p rllm-cli --bin llama-test
 
 printf 'good morning\nexit\n' | \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=quality RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=quality RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/SmolLM2-135M-raw.rllm \
+    --model models/SmolLM2-135M-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1283,7 +1283,7 @@ trial using the success and failure criteria from the R18 spec.
 In `docs/benchmarks/trials/index.md`, add this row after R17:
 
 ```markdown
-| 2026-06-15 | 2026-06-15-r18-quality-aware-aip.md | active | SmolLM2-135M-raw.rllm, Llama-3.2-1B-Instruct-raw.rllm | experimental-speed | CPU arithmetic | R17 Llama 1B top-k 128 1.61 tok/s with repetition | not measured yet; quality-vs-speed AIP sweep queued | running | evidence row reserved for R18 |
+| 2026-06-15 | 2026-06-15-r18-quality-aware-aip.md | active | SmolLM2-135M-raw.spsa, Llama-3.2-1B-Instruct-raw.spsa | experimental-speed | CPU arithmetic | R17 Llama 1B top-k 128 1.61 tok/s with repetition | not measured yet; quality-vs-speed AIP sweep queued | running | evidence row reserved for R18 |
 ```
 
 - [ ] **Step 3: Verify docs diff**
@@ -1377,7 +1377,7 @@ Run:
 ```bash
 printf 'good morning\nexit\n' | \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1392,7 +1392,7 @@ Run:
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=quality RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1407,7 +1407,7 @@ Run:
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=speed RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/Llama-3.2-1B-Instruct-raw.rllm \
+    --model models/Llama-3.2-1B-Instruct-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```
@@ -1422,7 +1422,7 @@ Run:
 printf 'good morning\nexit\n' | \
   RLLM_EXPERIMENTAL_SPEED=1 RLLM_AIP_POLICY=quality RLLM_AIP_TOPK=128 \
   /usr/bin/time -l target/release/llama-test \
-    --model models/SmolLM2-135M-raw.rllm \
+    --model models/SmolLM2-135M-raw.spsa \
     --ctx 2048 \
     --max-new-tokens 16
 ```

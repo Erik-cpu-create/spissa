@@ -12,7 +12,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// Reader for .rllm files
+/// Reader for .spsa files
 ///
 /// Uses memory-mapped I/O for zero-copy chunk reads at runtime.
 /// The file is initially parsed via buffered I/O (for headers/metadata),
@@ -27,7 +27,7 @@ pub struct RllmReader {
 }
 
 impl RllmReader {
-    /// Open and parse a .rllm file
+    /// Open and parse a .spsa file
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let file = File::open(path.as_ref())?;
         let mut reader = BufReader::new(file);
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn test_reader_writer_roundtrip() {
-        let temp = std::env::temp_dir().join("test_roundtrip.rllm");
+        let temp = std::env::temp_dir().join("test_roundtrip.spsa");
 
         // Write
         let metadata = GlobalMetadata::new_test();
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_reader_chunk_data() {
-        let temp = std::env::temp_dir().join("test_chunk_data.rllm");
+        let temp = std::env::temp_dir().join("test_chunk_data.spsa");
 
         // Write
         let metadata = GlobalMetadata::new_test();
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_reader_chunk_range_data() {
-        let temp = std::env::temp_dir().join("test_chunk_range_data.rllm");
+        let temp = std::env::temp_dir().join("test_chunk_range_data.spsa");
 
         let metadata = GlobalMetadata::new_test();
         let mut writer = RllmWriter::new(&temp, metadata).unwrap();

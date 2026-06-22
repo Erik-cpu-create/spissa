@@ -13,7 +13,7 @@
 
 use rllm_runtime::LazyRllmModel;
 
-const MODEL: &str = "../../models/gemma-3-1b-it-rawcodec.rllm";
+const MODEL: &str = "../../models/gemma-3-1b-it-rawcodec.spsa";
 
 // rANS-compressed size of one bf16 tensor: interleaved exponent stream + raw residual
 // + freq table (512 B) + 4 lane-length words. Returns (raw_bytes, rans_bytes).

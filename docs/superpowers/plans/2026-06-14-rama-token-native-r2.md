@@ -192,7 +192,7 @@ In `crates/rllm-cli/src/main.rs`, add:
 ```rust
     /// Run a token-native full-replay vs persistent chat-session benchmark
     ChatSessionToken {
-        /// Path to .rllm file
+        /// Path to .spsa file
         file: String,
 
         /// Comma-separated token IDs for one user turn; pass this flag more than once
@@ -490,7 +490,7 @@ The report must include:
 Use a small deterministic run first:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token models/SmolLM2-135M-raw.rllm \
+cargo run --release -p rllm-cli -- chat-session-token models/SmolLM2-135M-raw.spsa \
   --turn-ids 1 \
   --turn-ids 2 \
   --max-new-tokens 16 \

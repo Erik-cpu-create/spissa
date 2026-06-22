@@ -2,7 +2,7 @@
 // Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
 // distribution of this file, via any medium, is strictly prohibited.
 
-/// Low-RAM attention sub-block over chunked `.rllm` QKV and output weights.
+/// Low-RAM attention sub-block over chunked `.spsa` QKV and output weights.
 ///
 /// This implements the non-rotary toy baseline used by Phase 5 tests:
 /// `tiled QKV linear -> split Q/K/V -> scaled dot-product attention ->

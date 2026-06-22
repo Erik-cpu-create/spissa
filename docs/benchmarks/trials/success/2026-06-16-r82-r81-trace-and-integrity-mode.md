@@ -10,7 +10,7 @@ After R80/R81 reduce Q8 MLP arithmetic, checksum verification may be a material 
 
 ## Artifact
 
-- Model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`
+- Model: `models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`
 - Mode: exact-lowram Q8 transformer keep-IO rowchunks
 - Prompt: `Answer yes or no: is fire cold?`
 - Chat template: `llama3`
@@ -30,7 +30,7 @@ Default `llama-test` behavior remains `verify-once`. The new mode is opt-in for 
 ## Trace Command
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-trace target/r82-r81-trace.json"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-trace target/r82-r81-trace.json"
 ```
 
 ## Trace Result
@@ -63,7 +63,7 @@ Checksum verification total was 7,675.09 ms, or 34.93% of traced time. That just
 ## Trusted Benchmark Command
 
 ```sh
-/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
+/usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked"
 ```
 
 ## Verification

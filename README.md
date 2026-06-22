@@ -4,11 +4,11 @@
 
 Brain-inspired compressed runtime for local LLMs, guided by RAMA: Rama Active Memory Architecture.
 
-Spissa is a from-scratch local LLM runtime built around **runtime-compressed model storage** — **lossless by default** (rANS / bit-plane), with optional lossy quantization (q8 / q4). It stores model tensors in a chunked compressed container (`.rllm`) and runs inference by decoding only the tensor blocks needed at runtime. One self-contained binary, no dependencies, runs on any device.
+Spissa is a from-scratch local LLM runtime built around **runtime-compressed model storage** — **lossless by default** (rANS / bit-plane), with optional lossy quantization (q8 / q4). It stores model tensors in a chunked compressed container (`.spsa`) and runs inference by decoding only the tensor blocks needed at runtime. One self-contained binary, no dependencies, runs on any device.
 
 > Run local LLMs from compressed weights without changing model weights.
 
-*(Spissa is Latin for "dense / packed" — the project was formerly named RLLM. The `spissa` CLI replaces the old `rllm` command; the `.rllm` container format is unchanged.)*
+*(Spissa is Latin for "dense / packed" — the project was formerly named RLLM. The `spissa` CLI replaces the old `rllm` command; the `.spsa` container format is unchanged.)*
 
 ## Architecture Direction
 
@@ -16,7 +16,7 @@ RLLM uses **RAMA**: **Rama Active Memory Architecture**.
 
 RAMA frames RLLM as a memory-first runtime:
 
-- compressed `.rllm` tensors are dormant long-term memory
+- compressed `.spsa` tensors are dormant long-term memory
 - chunk/layer/tile decode is selective recall
 - `MemoryBudget` is bounded working memory
 - KV-cache is short-term context memory
@@ -28,10 +28,10 @@ See [`docs/rllm-rama-architecture.md`](docs/rllm-rama-architecture.md) for the P
 
 ## What RLLM Does
 
-- Stores model tensors in a chunked compressed container format (`.rllm`)
+- Stores model tensors in a chunked compressed container format (`.spsa`)
 - Uses **RTC (RLLM Tensor Codec)** — in-house lossless tensor compression codecs
 - Verifies decoded weights are **bit-identical** to originals
-- Imports safetensors model files into `.rllm`
+- Imports safetensors model files into `.spsa`
 - Reports honest compression metrics — no magic claims
 
 ## What RLLM Does NOT Do
@@ -52,9 +52,9 @@ new text. Architecture (Gemma / Llama) is auto-detected from the packed metadata
 
 ```bash
 # canonical command — any packed model, any codec:
-./target/release/rllm chat models/gemma-3-1b-it-q8-raw.rllm --fast   # q8, fastest
-./target/release/rllm chat models/gemma-3-1b-it-rans.rllm            # rANS, LOSSLESS
-./target/release/rllm chat <model.rllm> --low-ram                    # stream embedding (>RAM regime)
+./target/release/rllm chat models/gemma-3-1b-it-q8-raw.spsa --fast   # q8, fastest
+./target/release/rllm chat models/gemma-3-1b-it-rans.spsa            # rANS, LOSSLESS
+./target/release/rllm chat <model.spsa> --low-ram                    # stream embedding (>RAM regime)
 
 # convenience wrappers (Gemma 4B / Llama 1B|3B):
 ./try-gemma.sh chat
@@ -91,8 +91,8 @@ is quantized, and per-byte SHA-256 integrity is still verified once per run
 
 | Model | Pack | Notes |
 |---|---|---|
-| Gemma 3 1B Instruct | `gemma-3-1b-it-{q8-raw,rans}.rllm` | q8 (fast) or rANS (lossless); best for phones |
-| Gemma 3 4B Instruct | `gemma-3-4b-it-q8.rllm` | tied bf16 embedding, sandwich-norm, dual-RoPE |
+| Gemma 3 1B Instruct | `gemma-3-1b-it-{q8-raw,rans}.spsa` | q8 (fast) or rANS (lossless); best for phones |
+| Gemma 3 4B Instruct | `gemma-3-4b-it-q8.spsa` | tied bf16 embedding, sandwich-norm, dual-RoPE |
 | Llama 3.2 1B / 3B Instruct | `Llama-3.2-{1B,3B}-Instruct-q8…rllm` | tied bf16 embedding |
 
 Each codec (`--codec raw` for q8, `--codec rans`/`bitplane` for lossless bf16) packs the
@@ -113,7 +113,7 @@ vs Ollama is the 2-performance-core hardware ceiling, not kernel quality.
 
 ### Devices (universal)
 
-RLLM is built to run on **all devices, not just Apple Silicon**. The `.rllm` file format
+RLLM is built to run on **all devices, not just Apple Silicon**. The `.spsa` file format
 is platform-independent (copy it as-is), and the kernels are `cfg`-gated with fallbacks:
 
 | Device | Status |
@@ -126,7 +126,7 @@ is platform-independent (copy it as-is), and the kernels are `cfg`-gated with fa
 The fast paths are portable ARM (NEON/i8mm), never an Apple-only library, so the same
 optimizations carry from a Mac to a phone. To run on **Android**, build natively in
 Termux — see [docs/android-termux.md](docs/android-termux.md). Use a 1B model on phones
-(`gemma-3-1b-it-q8-raw.rllm` 1.38 GB, or `…-rans.rllm` 1.36 GB lossless); the 4B is too
+(`gemma-3-1b-it-q8-raw.spsa` 1.38 GB, or `…-rans.spsa` 1.36 GB lossless); the 4B is too
 big for most phones' usable RAM.
 
 ### Packing your own model
@@ -134,7 +134,7 @@ big for most phones' usable RAM.
 ```bash
 # Download a HF checkpoint (safetensors + config.json + tokenizer.json), then:
 ./target/release/rllm pack <model.safetensors | *.index.json | model-dir> \
-  --out models/<name>-q8.rllm \
+  --out models/<name>-q8.spsa \
   --quantize q8_transformer_keep_io \
   --codec raw          # raw (rtc-raw-v1) is required for the zero-copy fast path
 ```
@@ -173,7 +173,7 @@ llama.cpp:
 RTC is RLLM's family of **lossless** tensor codecs. Each must satisfy
 `decode(encode(input)) == input` exactly — that is the contract that keeps the
 model bit-identical. The codec is chosen *per chunk* at pack time, which lets one
-`.rllm` trade storage size against runtime speed:
+`.spsa` trade storage size against runtime speed:
 
 - **`rtc-raw-v1`** — identity layout. No size win, but its bytes are the final
   weight bytes, so the runtime reads them **zero-copy straight from the mmap** —
@@ -185,7 +185,7 @@ model bit-identical. The codec is chosen *per chunk* at pack time, which lets on
   safetensors, bit-exact).
 - **`rtc-rans-v1`** — interleaved **rANS** codec on the bf16 exponent — lossless at the
   measured entropy floor (~10.5 bits/weight, ~34% smaller than raw bf16). Smallest
-  lossless `.rllm`; decode-once at load runs at bf16 speed (`pack --codec rans`).
+  lossless `.spsa`; decode-once at load runs at bf16 speed (`pack --codec rans`).
 - **`rtc-bitplane-v1`** — fixed-width **bit-plane** layout with branchless NEON
   `tbl`-gather decode — lossless, the fastest-decoding lossless codec (`pack --codec bitplane`).
 - planned: `rtc-delta-v1`, `rtc-entropy-v1`, AVX decode for x86.
@@ -202,7 +202,7 @@ Details: [docs/codec-rtc-v1.md](docs/codec-rtc-v1.md).
 Implemented:
 
 - Cargo workspace with five crates
-- `.rllm` v1 container reader/writer
+- `.spsa` v1 container reader/writer
 - Safetensors import
 - CLI commands: `pack`, `unpack`, `inspect`, `verify`, `run`, `chat` (interactive, codec-agnostic), `bench`, `doctor`
 - Stubbed future command: `import`
@@ -215,11 +215,11 @@ Implemented:
 - Per-chunk SHA-256 verification
 - Multi-tensor safetensors verification
 - Phase 5A runtime foundation:
-  - full-decode `.rllm` loader
+  - full-decode `.spsa` loader
   - fp16/bf16/f32/int runtime conversion to f32
   - basic tensor ops: embedding lookup, matmul, linear, layernorm, RMSNorm, GELU, softmax, attention, MLP, argmax/top-p sampling
 - Phase 5B low-memory runtime planning:
-  - metadata-only `.rllm` open path
+  - metadata-only `.spsa` open path
   - memory budget accounting
   - layer-stream/tile-stream dry-run planner
   - `rllm run --memory-budget --ctx --mode tile-stream`
@@ -232,7 +232,7 @@ Implemented:
   - RAMA architecture spec for memory-first, brain-inspired runtime direction
   - first executable cached generation loop: tiny multi-step token-ID generation with explicit prefill/decode-step paths and ContextEcho KV-cache state
   - multi-layer token-ID stack: per-layer ContextEcho KV caches, prefill/decode/generate over all configured streaming blocks, and logits checked against full-context recomputation
-  - GPT-NeoX/Pythia adapter that infers standard tensor names/shapes from `.rllm` metadata and decodes small norm/bias tensors into an owned prepared stack
+  - GPT-NeoX/Pythia adapter that infers standard tensor names/shapes from `.spsa` metadata and decodes small norm/bias tensors into an owned prepared stack
   - optional original `config.json` metadata persistence for GPT-NeoX/Pythia fields (`num_attention_heads`, rotary settings, layer norm eps, context length) plus runtime auto-prepare from that metadata
   - optional tokenizer vocabulary/config metadata persistence from `tokenizer.json`, plus tokenizer-backed text smoke generation via `rllm run --prompt ...`
   - Phase 6 RAMA layer-decode GPT-NeoX/Pythia path: keeps only names + final params resident, decodes per-layer norm/bias vectors just-in-time, budgets active layer params, and matches the prepared stack baseline
@@ -250,7 +250,7 @@ Implemented:
   - Phase 7.12A generic shape/budget-aware prefill policy: `rllm run` now defaults to auto low-RAM prefill selection from GPT-NeoX/Pythia shape and explicit transient budget, preserving Pythia-70M-like 32-token defaults while selecting 64 for Pythia-160M-like low-RAM runs; `--rama-prefill-policy speed` selects the speed-biased larger window when budget allows.
   - Phase 7.12B generic eight-row projection reuse: the shared tiled-linear hot loop now reuses each decoded weight row fragment across 8 prompt-token rows before falling back to the existing 4-row/scalar tails, improving the measured Pythia-160M 512-token speed-policy row from 13.21s to 12.34s wall time while keeping tracked transient memory unchanged at 3.79 MiB.
   - R57 edge attention locality cache for the Llama experimental-speed path: optional per-layer recent-index caches can reuse a tiny number of previous edge-attention input features for sparse Q/K/V. The retained `window=8, extra=1` preset preserved the 30 tok/s floor on Llama 3.2 1B Instruct and slightly improved cheap quality counters, while the wider `window=16, extra=4` probe was rejected.
-  - R58 Llama3 chat-template baseline: `llama-test --chat-template llama3` formats Llama 3.x Instruct prompts with BOS/header/EOT tokens and uses raw special-token stop fallbacks when older `.rllm` metadata lacks `eos_token_id`. Exact mode now has a coherent chat baseline before sparse AIP quality is judged.
+  - R58 Llama3 chat-template baseline: `llama-test --chat-template llama3` formats Llama 3.x Instruct prompts with BOS/header/EOT tokens and uses raw special-token stop fallbacks when older `.spsa` metadata lacks `eos_token_id`. Exact mode now has a coherent chat baseline before sparse AIP quality is judged.
   - q8 `--fast` runtime + interactive chat (see the [Chat](#chat) section). R134–R139 made q8 decode/prefill production-usable on CPU: `mlock`/`MADV_WILLNEED` residency, int8 `sdot`/`i8mm` decode, row-parallel prefill, NEON `i8mm` weight packing (prefill reaches llama.cpp/Ollama CPU parity on the same chip), parallel SHA-256 integrity prewarm, and a NEON bf16 LM-head. Gemma 3 4B and Llama 3.2 1B/3B run multi-turn chat with a resident KV cache (`GemmaChatSession` / the Llama token-native session), bit-identical byte-level UTF-8 decode (emoji/accents), and `./try-gemma.sh` / `./try-llama.sh` runners. Lossless preserved: weights read exactly, per-byte SHA-256 verified once per run; only the f32 activation is int8-quantized in `--fast`.
 
 
@@ -271,29 +271,29 @@ cargo build --release
 cargo test
 
 # Interactive chat — codec-agnostic (rANS/q8/bf16), auto-detects Gemma/Llama
-RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-rans.rllm           # lossless
-RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-q8-raw.rllm --fast  # q8, fastest
+RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-rans.spsa           # lossless
+RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-q8-raw.spsa --fast  # q8, fastest
 #   add --low-ram to stream the embedding (>RAM regime)
 # convenience wrappers (Gemma 4B / Llama 1B|3B):  ./try-gemma.sh chat   |   ./try-llama.sh chat
 
-# Pack a HF checkpoint into .rllm (choose a codec by the trade-off you want)
+# Pack a HF checkpoint into .spsa (choose a codec by the trade-off you want)
 ./target/release/rllm pack <model.safetensors | *.index.json | model-dir> \
-  --out models/<name>.rllm \
+  --out models/<name>.spsa \
   --config <config.json> --tokenizer <tokenizer.json> \
   --codec rans            # rans / bitplane = lossless bf16 ; raw = zero-copy (use with --quantize)
 #   --quantize q8_transformer_keep_io   # lossy q8 (pair with `--codec raw` for the fast path)
 
 # Inspect metadata + compression stats
-./target/release/rllm inspect models/<name>.rllm
+./target/release/rllm inspect models/<name>.spsa
 
 # Verify lossless round-trip vs the original safetensors
-./target/release/rllm verify <model.safetensors> models/<name>.rllm
+./target/release/rllm verify <model.safetensors> models/<name>.spsa
 
 # Measure quantization loss (q8/q4 vs lossless) on the real weights
-./target/release/quant-error models/<name>.rllm
+./target/release/quant-error models/<name>.spsa
 
 # Low-RAM streaming / memory planning (metadata only; no full decode)
-./target/release/rllm run models/<name>.rllm --memory-budget 100mb --ctx 1024 --mode tile-stream
+./target/release/rllm run models/<name>.spsa --memory-budget 100mb --ctx 1024 --mode tile-stream
 
 # System / CLI info
 ./target/release/rllm doctor
@@ -316,7 +316,7 @@ RLLM_INTEGRITY=unchecked ./target/release/rllm chat models/gemma-3-1b-it-q8-raw.
 rllm/
 ├── crates/
 │   ├── rllm-cli/        # CLI binary (`rllm`)
-│   ├── rllm-container/  # .rllm binary format parser/writer
+│   ├── rllm-container/  # .spsa binary format parser/writer
 │   ├── rllm-import/     # Safetensors import
 │   ├── rllm-runtime/    # Lazy/streaming runtime, session cache, tensor ops
 │   │   └── src/streaming/
@@ -340,14 +340,14 @@ rllm/
 | Crate | Purpose |
 |-------|---------|
 | `rllm-cli` | Command-line interface (`rllm` binary) |
-| `rllm-container` | `.rllm` file format: header, metadata, tensor/chunk directories |
+| `rllm-container` | `.spsa` file format: header, metadata, tensor/chunk directories |
 | `rllm-import` | External format import, currently safetensors |
 | `rllm-runtime` | Lazy/runtime loader, memory-budgeted planner, streaming kernels, session cache, tensor ops |
 | `rtc-codec` | Lossless tensor codecs: raw, RLE, Huffman |
 
 ## File Format
 
-The `.rllm` format is a single-file container with:
+The `.spsa` format is a single-file container with:
 
 - **Header** — `RLLM` magic + version + endian marker + directory offsets
 - **Compressed chunk data** — tensor chunks encoded with RTC codecs
@@ -385,7 +385,7 @@ Local verification with EleutherAI Pythia-70M safetensors:
 - 166,019,180 tensor bytes verified
 - Best local output with `raw + rle + huff`, `--chunk-size 32mb`:
   - original safetensors file: 166,029,852 bytes / 158.34 MiB
-  - `.rllm`: 126,456,271 bytes / 120.60 MiB
+  - `.spsa`: 126,456,271 bytes / 120.60 MiB
   - ratio: 76.16% of original file size
 - `rllm verify`: `[OK] LOSSLESS VERIFIED`
 

@@ -30,16 +30,16 @@
 **Status:** 🔜 Next
 
 **Deliverables:**
-- [ ] Write .rllm header to file
+- [ ] Write .spsa header to file
 - [ ] Write global metadata (JSON)
 - [ ] Write tensor directory
 - [ ] Write chunk directory
 - [ ] Write raw chunks (using rtc-raw-v1)
-- [ ] Read .rllm file back
+- [ ] Read .spsa file back
 - [ ] `rllm inspect` command (read and display metadata)
 
 **Acceptance Criteria:**
-- [ ] Can create .rllm file from sample tensors
+- [ ] Can create .spsa file from sample tensors
 - [ ] Can inspect file and list tensors/chunks
 - [ ] Can decode raw chunks back to original bytes
 - [ ] Round-trip: write → read → verify checksums match
@@ -90,7 +90,7 @@
 **Deliverables:**
 - [ ] Read safetensors metadata (JSON header)
 - [ ] Read tensor bytes from safetensors
-- [ ] Pack safetensors into .rllm
+- [ ] Pack safetensors into .spsa
 - [ ] Unpack back to safetensors-compatible layout
 - [ ] Verify hashes match
 
@@ -106,7 +106,7 @@
 **Status:** ✅ Phase 5A–5E runtime foundations complete through tokenizer-backed RAMA text smoke path
 
 **Deliverables:**
-- [x] Full-decode `.rllm` runtime loader
+- [x] Full-decode `.spsa` runtime loader
 - [x] Runtime tensor conversion to f32 (fp16, bf16, fp32, integers)
 - [x] Minimal tensor operations (matmul, add, etc.)
 - [x] Embedding lookup
@@ -117,7 +117,7 @@
 - [x] MLP (feed-forward network)
 - [x] Deterministic argmax sampling primitive
 - [x] Sampling (temperature, top-p)
-- [x] Metadata-only `.rllm` open path for low-RAM modes
+- [x] Metadata-only `.spsa` open path for low-RAM modes
 - [x] Memory budget accounting with over-budget detection
 - [x] Layer-stream/tile-stream dry-run memory planner
 - [x] CLI flags: `--memory-budget`, `--ctx`, `--mode full-decode|layer-stream|tile-stream`, `--dry-run`
@@ -130,7 +130,7 @@
 - [x] Streaming pre-norm transformer block skeleton that matches a full-decode block baseline
 - [x] Budgeted layernorm, attention output, and MLP output activations inside the streaming block
 - [x] Tiny one-block next-token smoke path (`embedding → block → final LN → lm_head → sample`)
-- [x] Streaming embedding lookup and LM head projection over chunked `.rllm` tensors
+- [x] Streaming embedding lookup and LM head projection over chunked `.spsa` tensors
 - [x] GPT-NeoX/Pythia-style rotary embeddings (`rotary_pct`, `rotary_emb_base`, position offset)
 - [x] KV-cache primitive with append/capacity validation and cached causal attention
 - [x] Streaming attention runtime options for rotary + KV-cache reuse
@@ -142,11 +142,11 @@
 - [x] Multi-layer token-ID stack with per-layer ContextEcho caches
 - [x] Prefill/decode/generate APIs over all configured streaming blocks
 - [x] Multi-layer cached generation matches full-context recomputation for each generated token
-- [x] GPT-NeoX/Pythia adapter that infers standard tensor names/shapes from `.rllm` metadata
+- [x] GPT-NeoX/Pythia adapter that infers standard tensor names/shapes from `.spsa` metadata
 - [x] Owned prepared generation stack with decoded norm/bias vectors and generated-token execution helper
-- [x] Optional original `config.json` field persistence in `.rllm` global metadata
+- [x] Optional original `config.json` field persistence in `.spsa` global metadata
 - [x] GPT-NeoX/Pythia auto-build path that derives `num_heads`, rotary config, layer norm eps, and context length from persisted metadata
-- [x] Optional tokenizer vocabulary/config metadata persistence in `.rllm` global metadata
+- [x] Optional tokenizer vocabulary/config metadata persistence in `.spsa` global metadata
 - [x] Tokenizer-backed GPT-NeoX/Pythia text boundary over the prepared token-ID stack
 - [x] CLI-facing text smoke path via `rllm run --prompt ... --max-new-tokens ...`
 - [x] Phase 6 RAMA layer-decode GPT-NeoX/Pythia path that stores layer names only, decodes per-layer norm/bias params just-in-time, budgets active layer params, and matches the prepared stack baseline
@@ -155,8 +155,8 @@
 - [x] Phase 7.7 fixed-token HF/PyTorch logits comparison against local Pythia-70M; top-1/top-10 match after GPT-NeoX parallel residual metadata + per-head QKV split fixes
 
 **Acceptance Criteria:**
-- [x] `rllm run <model.rllm>` can full-decode tensors into runtime memory
-- [x] `rllm run <model.rllm> --memory-budget 100mb --ctx 1024 --mode tile-stream` reports planned peak RAM without decoding all tensors
+- [x] `rllm run <model.spsa>` can full-decode tensors into runtime memory
+- [x] `rllm run <model.spsa> --memory-budget 100mb --ctx 1024 --mode tile-stream` reports planned peak RAM without decoding all tensors
 - [x] Streaming linear can decode a weight chunk, accumulate matmul, and release transient buffers while matching the full-decode baseline
 - [x] Streaming MLP can run `dense_h_to_4h → GELU → dense_4h_to_h` with chunked weights and release intermediate budget
 - [x] Streaming attention can run `query_key_value → split Q/K/V → scaled dot-product attention → dense` with chunked weights and release intermediate budget
@@ -174,9 +174,9 @@
 - [x] Multi-layer generation stack keeps one KV-cache per configured layer and validates every layer cache advances together
 - [x] Multi-layer prefill/decode/generate logits match full-context recompute across all layers
 - [x] GPT-NeoX adapter detects contiguous layers, validates weight shapes, decodes small params, and can generate through the prepared stack
-- [x] Existing `.rllm` metadata stays backward-compatible when `model_config` is absent
+- [x] Existing `.spsa` metadata stays backward-compatible when `model_config` is absent
 - [x] Pack path can persist sibling or explicit HuggingFace `config.json` fields for runtime adapters
-- [x] Existing `.rllm` metadata stays backward-compatible when tokenizer metadata is absent
+- [x] Existing `.spsa` metadata stays backward-compatible when tokenizer metadata is absent
 - [x] Pack path can persist sibling or explicit HuggingFace `tokenizer.json` vocabulary metadata
 - [x] Prepared GPT-NeoX text generation encodes prompt text, executes token-ID generation, and decodes generated/full text through the persisted tokenizer metadata
 - [x] Layer-decode GPT-NeoX/Pythia generation matches prepared-stack generated token IDs, full token sequence, logits, and context memory bytes
@@ -189,13 +189,13 @@
 - Continue Phase 7 from the Phase 7.12B projection-reuse foundation: generic eight-row tiled-linear accumulation improves the measured Pythia-160M projection bottleneck without model-specific code. Next either pursue another measured dense-projection slice or start Phase 8 LLaMA-family adapter work if architecture breadth becomes the priority.
 
 **Measured local Pythia-70M planning examples after Phase 7 fused tile scratch cap:**
-- 32MiB chunks (`pythia-70m-huff-32mb.rllm`): 120.60 MiB compressed, planned peak 75.48 MiB → within 100MiB budget
-- 16MiB chunks (`pythia-70m-huff-16mb.rllm`): 120.60 MiB compressed, planned peak 44.77 MiB → within 100MiB budget
-- 1MiB chunks (`pythia-70m-huff.rllm`): 120.82 MiB compressed, planned peak 16.04 MiB → within 100MiB budget
+- 32MiB chunks (`pythia-70m-huff-32mb.spsa`): 120.60 MiB compressed, planned peak 75.48 MiB → within 100MiB budget
+- 16MiB chunks (`pythia-70m-huff-16mb.spsa`): 120.60 MiB compressed, planned peak 44.77 MiB → within 100MiB budget
+- 1MiB chunks (`pythia-70m-huff.spsa`): 120.82 MiB compressed, planned peak 16.04 MiB → within 100MiB budget
 
 **Measured local Pythia-70M Phase 7.6 release benchmark matrix:**
-- Repacked artifact (`pythia-70m-phase76-16mb.rllm`, ignored local file): 120.46 MiB compressed, 16MiB chunks, persisted `gpt_neox` config + `hf-bpe` tokenizer metadata
-- Command (originally the now-removed `scripts/phase76_release_rss_benchmark.py`; reproduce with the native port): `target/release/rllm bench release-rss --artifact models/pythia-70m-phase76-16mb.rllm --tokens 1,4,8,16 --ctx 128,512,1024 --memory-budget 100mb`
+- Repacked artifact (`pythia-70m-phase76-16mb.spsa`, ignored local file): 120.46 MiB compressed, 16MiB chunks, persisted `gpt_neox` config + `hf-bpe` tokenizer metadata
+- Command (originally the now-removed `scripts/phase76_release_rss_benchmark.py`; reproduce with the native port): `target/release/rllm bench release-rss --artifact models/pythia-70m-phase76-16mb.spsa --tokens 1,4,8,16 --ctx 128,512,1024 --memory-budget 100mb`
 - Matrix: 12/12 runs succeeded for `ctx=128/512/1024` and `max-new-tokens=1/4/8/16`
 - Output behavior after Phase 7.7 HF-fidelity fixes: prompt token `[12092]`, first generated token `[13]`, generated text starts `Hello,`; 16-token run produces `Hello, I'm trying to get the name of the phone number in the phone number`
 - Runtime range: 4.47–83.41s total, ~4.47–5.29s/token in release
@@ -210,7 +210,7 @@
 **Status:** ✅ Partial — GPT-NeoX/Pythia RAMA layer-param decode path complete
 
 **Deliverables:**
-- [x] Runtime reads compressed .rllm through metadata-only `LazyRllmModel`
+- [x] Runtime reads compressed .spsa through metadata-only `LazyRllmModel`
 - [x] Decode only needed per-layer norm/bias params for the active layer
 - [x] Release per-layer params after layer completes
 - [x] Track active layer-param bytes in `MemoryBudget` while executing each layer
@@ -314,7 +314,7 @@
 - [ ] Compare logits with reference implementation
 
 **Acceptance Criteria:**
-- [ ] Can run a real small model from .rllm
+- [ ] Can run a real small model from .spsa
 - [ ] Can verify decoded weights
 - [ ] Logits match reference within tolerance
 - [ ] Token generation is deterministic
@@ -329,18 +329,18 @@
 - [ ] Additional codecs (delta, bitplane, entropy)
 - [ ] Multi-GPU sharding
 - [ ] Quantization-aware compression (lossy-optimize mode)
-- [ ] Model hub integration (download .rllm files)
+- [ ] Model hub integration (download .spsa files)
 
 ---
 
 ## Success Criteria
 
 ### v1 (MVP)
-1. Packs model tensors into .rllm
+1. Packs model tensors into .spsa
 2. Unpacks them exactly (bit-identical)
 3. Verifies lossless correctness
 4. Shows honest compression metrics
-5. Runs a tiny model from .rllm
+5. Runs a tiny model from .spsa
 6. Supports full-decode runtime
 
 ### v2 (Stronger)

@@ -37,7 +37,7 @@ python3 scripts/phase79d_long_prompt_benchmark.py \
 Artifact:
 
 ```text
-models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm
+models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa
 ```
 
 Runtime behavior:

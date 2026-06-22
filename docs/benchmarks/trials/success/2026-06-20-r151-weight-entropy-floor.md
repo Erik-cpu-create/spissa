@@ -2,7 +2,7 @@
 
 - Date: 2026-06-20
 - Type: measurement/analysis (informs codec design — not a kernel GO/NO-GO)
-- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.rllm`, raw bf16 everything)
+- Model: Gemma 3 1B IT (`gemma-3-1b-it-rawcodec.spsa`, raw bf16 everything)
 - Tensors: `embed_tokens.weight`, `layers.0.self_attn.q_proj.weight`,
   `layers.0.mlp.gate_proj.weight`, `layers.0.mlp.down_proj.weight`
 - Verdict: **floor ≈ 10.5 bits/weight**; lossless compression of LLM weights is

@@ -12,7 +12,7 @@ Streaming LM-head argmax should reduce the downloaded Llama 3.2 1B session memor
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/Llama-3.2-1B-Instruct-raw.rllm`
+- Model/artifact: `models/Llama-3.2-1B-Instruct-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: resident LM-head memory and model shape
@@ -23,7 +23,7 @@ Streaming LM-head argmax should reduce the downloaded Llama 3.2 1B session memor
 Commands:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token 'models/Llama-3.2-1B-Instruct-raw.rllm' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r9-lm-head-argmax-llama32-1b.md'
+cargo run --release -p rllm-cli -- chat-session-token 'models/Llama-3.2-1B-Instruct-raw.spsa' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r9-lm-head-argmax-llama32-1b.md'
 ```
 
 ## Results

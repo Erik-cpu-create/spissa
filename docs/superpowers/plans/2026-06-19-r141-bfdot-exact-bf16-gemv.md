@@ -530,12 +530,12 @@ Expected: builds clean.
 
 - [ ] **Step 2: Measure decode tok/s — f32 path (baseline)**
 
-Run: `RLLM_BF16_DOT=0 ./target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --fast --chat-template llama3 --max-new-tokens 64 --ctx 512 <<< $'What is the capital of Australia?\nquit'`
+Run: `RLLM_BF16_DOT=0 ./target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --fast --chat-template llama3 --max-new-tokens 64 --ctx 512 <<< $'What is the capital of Australia?\nquit'`
 Capture: decode tok/s, output text (for argmax sanity — should say Canberra).
 
 - [ ] **Step 3: Measure decode tok/s — bfdot path**
 
-Run: `./target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --fast --chat-template llama3 --max-new-tokens 64 --ctx 512 <<< $'What is the capital of Australia?\nquit'`
+Run: `./target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --fast --chat-template llama3 --max-new-tokens 64 --ctx 512 <<< $'What is the capital of Australia?\nquit'`
 Capture: decode tok/s, output text. Compare output to Step 2 (should be the same / coherent — argmax parity in practice).
 
 - [ ] **Step 4: Confirm the REE kernel name with Erik**
@@ -544,7 +544,7 @@ The working name is `REEFLOW-BF16-DOT`. Per [[ree-kernel-naming-rule]] the kerne
 
 - [ ] **Step 5: Write the trial report from the template**
 
-Start from `docs/benchmarks/templates/trial-report.md`. Create `docs/benchmarks/trials/success/2026-06-19-r141-reeflow-bf16-dot.md` (or `failed/`/`inconclusive/` per the Task 2 gate + Step 2/3 result). Required sections (mirror the R140/R133 reports): title `# Trial: R141 …`, the `Date`/`Owner: RLLM`/`Status`/`Folder` block, then `## Hypothesis`, `## Scope` (Mode: exact-weight bf16 runtime; REE kernel: REEFLOW-BF16-DOT; Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm`; Architecture: LLaMA 3.2 1B, tied bf16 embedding/LM-head; Target device: Apple A18 Pro; Bottleneck tag: CPU bf16 GEMV / f32-FMA → bfdot), `## Setup`, `## Results` (FEAT_BF16 yes/no; Task 2 ns/row + speedup; decode tok/s before→after from Steps 2-3; the bfdot-vs-f32 parity note; the remaining gap vs q8 `--fast` stated as a limitation), `## Analysis`, `## Decision`.
+Start from `docs/benchmarks/templates/trial-report.md`. Create `docs/benchmarks/trials/success/2026-06-19-r141-reeflow-bf16-dot.md` (or `failed/`/`inconclusive/` per the Task 2 gate + Step 2/3 result). Required sections (mirror the R140/R133 reports): title `# Trial: R141 …`, the `Date`/`Owner: RLLM`/`Status`/`Folder` block, then `## Hypothesis`, `## Scope` (Mode: exact-weight bf16 runtime; REE kernel: REEFLOW-BF16-DOT; Model/artifact: `Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa`; Architecture: LLaMA 3.2 1B, tied bf16 embedding/LM-head; Target device: Apple A18 Pro; Bottleneck tag: CPU bf16 GEMV / f32-FMA → bfdot), `## Setup`, `## Results` (FEAT_BF16 yes/no; Task 2 ns/row + speedup; decode tok/s before→after from Steps 2-3; the bfdot-vs-f32 parity note; the remaining gap vs q8 `--fast` stated as a limitation), `## Analysis`, `## Decision`.
 
 - [ ] **Step 6: Add the index row**
 

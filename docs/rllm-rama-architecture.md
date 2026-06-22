@@ -50,7 +50,7 @@ RLLM is a runtime-compressed local LLM system powered by RAMA, a memory-first ex
 RLLM is the product and system name. It owns:
 
 - the CLI identity (`rllm`)
-- the `.rllm` container format
+- the `.spsa` container format
 - the runtime-compressed local LLM value proposition
 - the workspace/crate-level project identity
 
@@ -178,7 +178,7 @@ Runtime compression must not change model weights unless explicitly labeled as l
 
 Practical meaning:
 
-- `.rllm` storage stays lossless by default.
+- `.spsa` storage stays lossless by default.
 - RTC codec round-trips must verify bit-identical bytes.
 - Runtime dtype conversion must be explicit and tested.
 
@@ -196,7 +196,7 @@ Practical meaning:
 RAMA models inference as movement across memory states:
 
 ```text
-Dormant Memory       -> compressed .rllm tensor chunks on disk
+Dormant Memory       -> compressed .spsa tensor chunks on disk
 Recall Path          -> chunk/layer/tile decode into temporary buffers
 Active Working Memory-> bounded activations, logits, scratch, and planner-visible buffers
 Context Memory       -> per-layer KV-cache / recent-token state
@@ -222,7 +222,7 @@ Store model knowledge compactly while inactive.
 
 Current implementation:
 
-- `.rllm` container
+- `.spsa` container
 - tensor metadata and chunk directory
 - RTC codecs: raw, RLE, Huffman
 - SHA-256 verification and lossless round-trip checks
@@ -333,7 +333,7 @@ Potential implementation:
 
 - collect chunk access telemetry
 - identify hot chunks and cold chunks
-- offline repack `.rllm` files for better streaming locality
+- offline repack `.spsa` files for better streaming locality
 - record recommended chunk size/layout profiles per model
 
 Boundary:
@@ -382,7 +382,7 @@ Current RLLM pieces map into RAMA as follows:
 
 | RAMA concept | Current RLLM implementation |
 |---|---|
-| Dormant Memory | `.rllm` container, chunk metadata, RTC codecs |
+| Dormant Memory | `.spsa` container, chunk metadata, RTC codecs |
 | Recall Path | `LazyRllmModel`, chunk decode, streaming primitives |
 | Active Working Memory | `MemoryBudget`, runtime planner, budgeted activations |
 | Context Memory | `KvCache`, cached attention, rotary offsets |
@@ -406,7 +406,7 @@ RAMA may define:
 
 RAMA must not own:
 
-- `.rllm` binary container semantics that belong in `rllm-container`
+- `.spsa` binary container semantics that belong in `rllm-container`
 - codec internals that belong in `rtc-codec`
 - safetensors parsing that belongs in `rllm-import`
 - broad CLI formatting that belongs in `rllm-cli`

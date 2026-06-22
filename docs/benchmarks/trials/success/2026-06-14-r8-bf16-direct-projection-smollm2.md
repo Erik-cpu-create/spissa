@@ -12,7 +12,7 @@ Extending the raw batch-1 projection path from FP16-only to BF16 should reduce p
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/SmolLM2-135M-raw.rllm`
+- Model/artifact: `models/SmolLM2-135M-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: BF16 projection decode and memory bandwidth
@@ -23,7 +23,7 @@ Extending the raw batch-1 projection path from FP16-only to BF16 should reduce p
 Commands:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.rllm' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r8-bf16-direct-projection-smollm2.md'
+cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.spsa' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r8-bf16-direct-projection-smollm2.md'
 ```
 
 ## Results

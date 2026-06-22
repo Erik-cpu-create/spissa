@@ -12,7 +12,7 @@ Row-blocking the raw BF16 LM-head argmax kernel should recover speed from R9 whi
 ## Scope
 
 - Mode: exact-lowram
-- Model/artifact: `models/SmolLM2-135M-raw.rllm`
+- Model/artifact: `models/SmolLM2-135M-raw.spsa`
 - Architecture: llama
 - Target device/profile: single CPU, low RAM
 - Expected bottleneck: scalar LM-head argmax row overhead
@@ -23,7 +23,7 @@ Row-blocking the raw BF16 LM-head argmax kernel should recover speed from R9 whi
 Commands:
 
 ```bash
-cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.rllm' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r10-rowblock-lm-head-argmax-smollm2.md'
+cargo run --release -p rllm-cli -- chat-session-token 'models/SmolLM2-135M-raw.spsa' --turn-ids 1 --turn-ids 2 --max-new-tokens 16 --ctx 2048 --out 'docs/benchmarks/trials/active/2026-06-14-r10-rowblock-lm-head-argmax-smollm2.md'
 ```
 
 ## Results

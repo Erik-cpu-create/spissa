@@ -10,7 +10,7 @@ This is an original RLLM/RAMA memory-first optimization. It does **not** use hot
 ## Artifact and runtime
 
 ```text
-artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.rllm
+artifact: models/pythia-70m-phase79c-low-ram-fast-raw-tileblocks.spsa
 codec/layout: raw tile-block, --tile-block-elements 65536
 runtime integrity: verify-once
 memory budget: 100mb

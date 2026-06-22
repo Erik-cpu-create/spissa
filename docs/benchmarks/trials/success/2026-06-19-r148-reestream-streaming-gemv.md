@@ -17,7 +17,7 @@ fully under the cold SSD, pushing the win toward the ~1.23× pure-byte ratio.
 
 - Mode: experimental (capacity-bound streaming GEMV, pipelined — the runtime kernel)
 - REE kernel: REESTREAM (working name; Erik's final call)
-- Model/artifact: `Llama-3.2-1B-Instruct-raw.rllm` bf16 embedding, block-framed (256 rows/block), replicated > RAM
+- Model/artifact: `Llama-3.2-1B-Instruct-raw.spsa` bf16 embedding, block-framed (256 rows/block), replicated > RAM
 - Target device/profile: Apple A18 Pro, macOS; release; cold SSD (F_NOCACHE, files > RAM)
 - Bottleneck tag: storage bandwidth
 

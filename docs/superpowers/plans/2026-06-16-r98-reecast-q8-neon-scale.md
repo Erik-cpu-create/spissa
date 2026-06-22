@@ -33,7 +33,7 @@ Allowed:
 
 Not allowed:
 
-- changing Q8 format, `.rllm` format, tokenizer, prompt, sampling, or RAM budget logic
+- changing Q8 format, `.spsa` format, tokenizer, prompt, sampling, or RAM budget logic
 - adding resident f32 caches
 - changing the R96 NEON accumulator semantics
 - touching batch1 decode paths
@@ -225,7 +225,7 @@ If lab passes, continue to Task 3.
 
 ```bash
 cargo build --release -p rllm-cli --bin llama-test
-RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r98-pre-control.txt 2> target/r98-pre-control.time
+RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r98-pre-control.txt 2> target/r98-pre-control.time
 ```
 
 - [x] **Step 2: Add runtime scale/dequant wrapper**
@@ -273,14 +273,14 @@ Expected: pass.
 ```bash
 cargo build --release -p rllm-cli --bin llama-test
 for i in 1 2 3; do
-  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r98-run${i}.txt" 2> "target/r98-run${i}.time"
+  RLLM_THREADS=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > "target/r98-run${i}.txt" 2> "target/r98-run${i}.time"
 done
 ```
 
 - [x] **Step 2: Run one profiled trial**
 
 ```bash
-RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r98-profile.txt 2> target/r98-profile.time
+RLLM_THREADS=1 RLLM_Q8_KERNEL_PROFILE=1 /usr/bin/time -l sh -c "printf '%s\nquit\n' 'Answer yes or no: is fire cold?' | target/release/llama-test --model models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa --chat-template llama3 --max-new-tokens 4 --profile-phases --rama-integrity unchecked" > target/r98-profile.txt 2> target/r98-profile.time
 ```
 
 - [x] **Step 3: Decide**

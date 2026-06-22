@@ -4,7 +4,7 @@
 
 //! RLLM runtime foundation.
 //!
-//! Phase 5 starts with full-decode loading: read a `.rllm` container,
+//! Phase 5 starts with full-decode loading: read a `.spsa` container,
 //! decode every tensor into memory, convert supported dtypes to `f32`, and
 //! expose small tensor operations needed by a toy transformer runtime.
 #![allow(clippy::too_many_arguments)]

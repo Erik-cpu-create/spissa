@@ -34,7 +34,7 @@ rate. Combined, decode should approach the hardware/kernel ceiling.
 
 - Mode: fast-lowram runtime (q8, near-exact int8 activation — quant-only diff, same family as llama.cpp q8 inference)
 - REE kernel: REEBORN-Q8-SDOT (int8-activation sdot/i8mm, R110/R127/R130/R132) — wired, not new
-- Model/artifact: `models/gemma-3-4b-it-q8.rllm` (q8_transformer_keep_io, codec rtc-raw-v1, ~4.5 GB)
+- Model/artifact: `models/gemma-3-4b-it-q8.spsa` (q8_transformer_keep_io, codec rtc-raw-v1, ~4.5 GB)
 - Architecture: Gemma 3 4B, Q8_0
 - Target device/profile: Apple Silicon, 8 GB RAM, CPU only
 - Expected bottleneck: was mis-attributed (R133 said memory-bound); actually scalar-kernel compute once resident
@@ -52,7 +52,7 @@ RLLM_MLOCK=1                       RLLM_Q8_KERNEL_PROFILE=1 ./target/release/gem
 RLLM_MLOCK=1 RLLM_Q8_ACTIVATION=1  RLLM_Q8_KERNEL_PROFILE=1 ./target/release/gemma-test ... # mlock + sdot
 
 # shipped as one flag:
-./target/release/gemma-test --model models/gemma-3-4b-it-q8.rllm \
+./target/release/gemma-test --model models/gemma-3-4b-it-q8.spsa \
   --prompt "The capital of France is" --fast --max-new-tokens 16 --ctx 256
 ```
 
