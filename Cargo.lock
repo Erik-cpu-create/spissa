@@ -716,64 +716,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rllm-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "env_logger",
- "inquire",
- "libc",
- "log",
- "rllm-container",
- "rllm-import",
- "rllm-runtime",
- "rtc-codec",
- "serde",
- "serde_json",
- "sha2",
- "ureq",
-]
-
-[[package]]
-name = "rllm-container"
-version = "0.1.0"
-dependencies = [
- "libc",
- "log",
- "memmap2",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "rllm-import"
-version = "0.1.0"
-dependencies = [
- "log",
- "rllm-container",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
-name = "rllm-runtime"
-version = "0.1.0"
-dependencies = [
- "log",
- "rllm-container",
- "rtc-codec",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
-]
-
-[[package]]
 name = "rtc-codec"
 version = "0.1.0"
 dependencies = [
@@ -926,6 +868,64 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "spissa-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "inquire",
+ "libc",
+ "log",
+ "rtc-codec",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spissa-container",
+ "spissa-import",
+ "spissa-runtime",
+ "ureq",
+]
+
+[[package]]
+name = "spissa-container"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "memmap2",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "spissa-import"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spissa-container",
+ "thiserror",
+]
+
+[[package]]
+name = "spissa-runtime"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "rtc-codec",
+ "serde",
+ "serde_json",
+ "sha2",
+ "spissa-container",
+ "thiserror",
+]
 
 [[package]]
 name = "stable_deref_trait"

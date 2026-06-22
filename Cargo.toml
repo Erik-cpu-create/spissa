@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/rllm-cli",
-    "crates/rllm-container",
+    "crates/spissa-cli",
+    "crates/spissa-container",
     "crates/rtc-codec",
-    "crates/rllm-import",
-    "crates/rllm-runtime",
+    "crates/spissa-import",
+    "crates/spissa-runtime",
 ]
 
 [workspace.package]
