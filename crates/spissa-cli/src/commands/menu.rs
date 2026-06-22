@@ -329,10 +329,16 @@ fn menu_pack(s: &Strings) -> Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("model");
     let default_out = format!("models/{base}.spsa");
-    let out = match Text::new(s.pack_output).with_default(&default_out).prompt() {
+    // `with_initial_value` pre-fills an EDITABLE buffer; `with_default` only applies on empty
+    // input — that quirk is why a typed name used to land as a bare file in the CWD.
+    let raw = match Text::new(s.pack_output)
+        .with_initial_value(&default_out)
+        .prompt()
+    {
         Ok(o) => o,
         Err(_) => return Ok(()),
     };
+    let out = normalize_pack_output(&raw, &default_out);
     super::pack::run(
         &dir, &out, "1mb", codec, None, None, false, false, false, 16, None, None, false, quant,
         false, // clean animated UX (not verbose)
@@ -426,6 +432,25 @@ fn pick_rllm(prompt: &str, s: &Strings) -> Option<String> {
     Select::new(prompt, models).prompt().ok()
 }
 
+/// Make the packed output path forgiving: empty → `default`; a bare name (no `/`) → placed
+/// under `models/`; the `.spsa` extension is always ensured. So typing `my-model` yields
+/// `models/my-model.spsa` instead of a bare `my-model` file in the working directory.
+fn normalize_pack_output(input: &str, default: &str) -> String {
+    let t = input.trim();
+    if t.is_empty() {
+        return default.to_string();
+    }
+    let mut out = if t.contains('/') || t.contains('\\') {
+        t.to_string()
+    } else {
+        format!("models/{t}")
+    };
+    if !out.ends_with(".spsa") {
+        out.push_str(".spsa");
+    }
+    out
+}
+
 // ---- model discovery under models/ ----
 
 fn discover_rllm(root: &str) -> Vec<String> {
@@ -493,5 +518,19 @@ mod tests {
         // A missing/blank field falls back to the default (English).
         let back: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(back.language, Lang::En);
+    }
+
+    #[test]
+    fn pack_output_is_normalized() {
+        let def = "models/qwen.spsa";
+        // empty → default
+        assert_eq!(normalize_pack_output("  ", def), def);
+        // bare name → under models/ + .spsa
+        assert_eq!(normalize_pack_output("my-model", def), "models/my-model.spsa");
+        // bare name already with ext
+        assert_eq!(normalize_pack_output("my-model.spsa", def), "models/my-model.spsa");
+        // explicit path is respected, ext ensured
+        assert_eq!(normalize_pack_output("out/x", def), "out/x.spsa");
+        assert_eq!(normalize_pack_output("models/text/x.spsa", def), "models/text/x.spsa");
     }
 }
