@@ -11,7 +11,9 @@ use crate::models::qwen::model::{
 use crate::ops::{embedding_lookup, rms_norm, sample_argmax, sample_top_p};
 use crate::rotary::KvCache;
 use crate::{
-    LazyRllmModel, MemoryBudget, Result, RuntimeError, StreamingSamplingConfig,
+    streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
+    StreamingLinearConfig, StreamingSamplingConfig, StreamingTileLinearConfig,
+    DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 use rllm_container::ModelConfigMetadata;
 
@@ -267,17 +269,6 @@ pub fn prepare_qwen_transformer_from_metadata(
     Ok(prepared)
 }
 
-/// `last_hidden · lm_headᵀ` over the (large, 248k) vocabulary. Scalar; the dominant
-/// decode cost — a candidate for the streaming/SIMD head path in a later perf phase.
-fn lm_head_logits(last: &[f32], lm_head: &[f32], vocab_size: usize, hidden: usize) -> Vec<f32> {
-    let mut logits = vec![0.0f32; vocab_size];
-    for (v, logit) in logits.iter_mut().enumerate() {
-        let row = &lm_head[v * hidden..(v + 1) * hidden];
-        *logit = last.iter().zip(row).map(|(a, b)| a * b).sum();
-    }
-    logits
-}
-
 /// Greedy/top-p generation. Calls `on_token(token_id) -> continue?` for each new token.
 pub fn qwen_generate_from_model(
     model: &mut LazyRllmModel,
@@ -289,15 +280,11 @@ pub fn qwen_generate_from_model(
     let cfg = prepared.config;
     let hidden = cfg.hidden_size;
 
-    // Pin the embedding (also the tied lm_head) once.
+    // Pin the embedding once for the input lookup. The tied lm_head reads the SAME
+    // weight through the streaming NEON kernel below (not a scalar f32 GEMV over the
+    // 248k-row table — that scalar path was the dominant decode cost, ~278ms/token).
     let embedding = model.decode_tensor(&prepared.embedding_weight, budget)?.data;
     let vocab_size = embedding.len() / hidden;
-    let lm_head = if prepared.lm_head_weight == prepared.embedding_weight {
-        None
-    } else {
-        Some(model.decode_tensor(&prepared.lm_head_weight, budget)?.data)
-    };
-    let lm_head_ref: &[f32] = lm_head.as_deref().unwrap_or(&embedding);
 
     // Per-layer mixing state.
     let mut caches: Vec<QwenLayerCache> = prepared
@@ -369,7 +356,22 @@ pub fn qwen_generate_from_model(
         )?;
 
         let last = &hidden_states[(seq_len - 1) * hidden..];
-        let logits = lm_head_logits(last, lm_head_ref, vocab_size, hidden);
+        let lm_cfg = StreamingTileLinearConfig {
+            linear: StreamingLinearConfig {
+                batch: 1,
+                in_features: hidden,
+                out_features: vocab_size,
+            },
+            tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
+        };
+        let logits = streaming_tile_linear_from_model(
+            model,
+            &prepared.lm_head_weight,
+            last,
+            None,
+            lm_cfg,
+            budget,
+        )?;
 
         let next = match cfg.sampling {
             StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
