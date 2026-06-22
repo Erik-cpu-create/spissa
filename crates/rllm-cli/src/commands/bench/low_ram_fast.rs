@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Low-ram-fast matrix: pack a raw tile-block artifact, optionally verify it,
 //! then run the release RSS matrix under a runtime integrity policy and emit a
 //! throughput/RSS summary. Native port of

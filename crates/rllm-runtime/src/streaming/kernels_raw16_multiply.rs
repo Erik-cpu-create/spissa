@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Multiply-into raw fp16 kernels + raw-16bit->f32 / fp16 weight-at helpers.
 // Split out of kernels_raw16.rs (R169); include!d into streaming/mod.rs.
 

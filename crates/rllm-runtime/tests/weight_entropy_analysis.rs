@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // R151 EXPERIMENT — Shannon-entropy floor of real bf16 weights.
 //
 // Before designing a lower-bit lossless codec we must know the THEORETICAL floor:

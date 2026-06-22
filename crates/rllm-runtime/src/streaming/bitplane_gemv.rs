@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Fused REEPLANE decode -> bfdot GEMV (R144, Phase C).
 //
 // Computes lm-head logits directly from resident rtc-bitplane-v1 planes: per

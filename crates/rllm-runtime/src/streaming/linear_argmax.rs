@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Streaming linear with fused argmax (no full-logit materialization) + candidate-row
 // kernels. Split out of linear.rs (R167); include!d into mod.rs.
 

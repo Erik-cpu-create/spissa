@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Core dense streaming linear projection: shared helpers + streaming_linear_from_model
 // + streaming_tile_linear_from_model. multiply-into + silu-gate-up -> linear_multiply.rs (R171).
 

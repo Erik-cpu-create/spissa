@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Spawn `rllm` subcommands as child processes, measure wall-clock time and
 //! peak resident set size (RSS), and parse the metrics RLLM prints on stdout.
 //!

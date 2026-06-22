@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Input-tiled sparse linear + SiLU-gate-up kernels + InputTileColumnRange / input-tile
 // column helpers. Split out of linear_sparse.rs (R170); include!d into streaming/mod.rs.
 

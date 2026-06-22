@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 use crate::{Result, RuntimeError, Tensor};
 use rllm_container::{ChunkMeta, ChunkRangeMeta, GlobalMetadata, RllmReader, TensorMeta};
 use rtc_codec::{BitplaneCodec, DecodeMeta, HuffmanCodec, RansCodec, RawCodec, RleCodec, TensorCodec};

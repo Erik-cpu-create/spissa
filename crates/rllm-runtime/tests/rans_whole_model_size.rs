@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // R156b — exact WHOLE-MODEL rANS compressed size on real weights.
 //
 // R156a proved rANS streaming is lossless on body projections too, so it applies to

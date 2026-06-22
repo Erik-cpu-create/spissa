@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
     #[test]
     fn sparse_lm_head_rescore_candidates_respects_confidence_gap() {
         let mut config = RamaExperimentalSpeedConfig {

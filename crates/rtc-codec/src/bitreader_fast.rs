@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Buffered bit-reader for fast canonical-Huffman decode.
 //!
 //! The original `BitReader` (in `dfloat.rs`) computes each bit with a byte

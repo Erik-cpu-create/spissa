@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Streaming multiply-into linear (target *= Linear(x,W)) + panel multiply-into +
 // the SiLU-gate-up fused MLP kernel. Split out of linear.rs (R171); include!d into mod.rs.
 

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Release RSS matrix: vary `--ctx` and `--max-new-tokens` for a text prompt
 //! and record per-cell throughput and peak RSS. Native port of the former
 //! `scripts/phase76_release_rss_benchmark.py`.

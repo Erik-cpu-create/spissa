@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 use crate::tensor::decode_to_f32;
 use crate::{
     apply_gpt_neox_rotary_inplace, q8_kernel_profile_enabled, record_q8_kernel_path,
