@@ -14,7 +14,7 @@ edition = "2021"
 # Proprietary — All Rights Reserved. See LICENSE. (Not an open-source license.)
 license = "LicenseRef-Proprietary"
 publish = false
-repository = "https://github.com/Erik-cpu-create/Runtime-compressed-Local-LLM"
+repository = "https://github.com/Erik-cpu-create/spissa"
 
 [workspace.dependencies]
 # Serialization
