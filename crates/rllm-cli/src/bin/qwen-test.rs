@@ -24,6 +24,12 @@ fn main() -> anyhow::Result<()> {
 
     eprintln!("[qwen-test] opening {model_path}");
     let mut model = LazyRllmModel::open(&model_path)?;
+    model.set_rama_integrity_mode(rllm_runtime::RamaIntegrityMode::Unchecked);
+    // Match the chat path's residency: prewarm decode-resident (RLLM_DECODE_RESIDENT=1).
+    let warmed = model.prewarm_decode_resident()?;
+    if warmed > 0 {
+        eprintln!("[qwen-test] prewarm: {warmed} chunks decoded resident");
+    }
     let tok_meta = model
         .metadata()
         .tokenizer
