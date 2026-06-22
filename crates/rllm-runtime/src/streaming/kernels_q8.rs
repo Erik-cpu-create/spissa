@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Q8 int8 low-level primitives: activation / i8mm availability, per-segment quantize,
 // int8 dot, activation & weight panel packing. matmul -> kernels_q8_matmul.rs,
 // helpers+f32-fallback -> kernels_q8_support.rs (R168 split). include!d into mod.rs.

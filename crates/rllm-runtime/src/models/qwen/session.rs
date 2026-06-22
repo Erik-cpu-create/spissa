@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Stateful Qwen3.5 chat session: persistent per-layer KV / Gated-DeltaNet state across
 //! turns so each turn only prefills the NEW tokens (no O(n²) re-prefill of the whole
 //! conversation). Also the single forward used by one-shot generation.

@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! rtc-huff-v1: byte-level Huffman codec
 //!
 //! This is a small in-house static Huffman codec for tensor chunks.

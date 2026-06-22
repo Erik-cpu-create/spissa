@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Qwen3.5 per-layer forward blocks.
 //!
 //! - `qwen_gated_attention_block` (REEGATE): GQA softmax attention with QK-RMSNorm,

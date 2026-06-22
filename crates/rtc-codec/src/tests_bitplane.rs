@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Unit tests for rtc-bitplane-v1, split from bitplane.rs to keep the production
 // module under the modular-code-guard line budget (test code is exempt).
 // Included via #[path] as a child module of bitplane, so `super::*` reaches

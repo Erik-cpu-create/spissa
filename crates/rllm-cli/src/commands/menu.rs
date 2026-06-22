@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! `rllm menu` — interactive arrow-key launcher with a text logo. A friendly layer
 //! over the flag-based subcommands (fetch / pack / chat / inspect): pick an action,
 //! pick a model/folder from `models/` (auto-discovered), and it dispatches. Power users

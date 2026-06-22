@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // De-risk the lossless-fast-on-edge frontier: does a THREADED + NEON fused bit-plane
 // GEMV (compressed-resident: read ~13 bits/weight, decode each row into L1, dot) beat
 // a THREADED + NEON bf16 GEMV (read 16 bits/weight) on a weak phone? The single-thread

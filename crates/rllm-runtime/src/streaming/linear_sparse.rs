@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // SparseColumnCache data structure + cache-management impl, plus basic and column-cached
 // sparse tile-linear / SiLU kernels. input-tiled -> linear_sparse_input.rs, cache-fill +
 // plain sparse silu -> linear_sparse_support.rs (R170 split). include!d into mod.rs.

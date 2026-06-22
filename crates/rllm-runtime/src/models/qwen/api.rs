@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Qwen3.5 text adapter: build a `PreparedQwenTransformer` from `.rllm` metadata and
 //! run greedy/top-p generation with heterogeneous per-layer dispatch.
 

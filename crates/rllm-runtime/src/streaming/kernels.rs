@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Generic f32 weight-chunk accumulation (shared base). Q8 kernels -> kernels_q8.rs,
 // raw 16-bit kernels -> kernels_raw16.rs (R166 split). All include!d into one module.
 

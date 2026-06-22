@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // R152 SCOUT — rANS exponent codec on REAL bf16 weights.
 //
 // R151 showed the lossless floor is ~10.5 bits/weight and that bit-plane wastes

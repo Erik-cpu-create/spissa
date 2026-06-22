@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Standalone smoke/bring-up harness for the Qwen3.5 text adapter.
 //!
 //! Usage: qwen-test [model.rllm] [prompt] [max_new_tokens]

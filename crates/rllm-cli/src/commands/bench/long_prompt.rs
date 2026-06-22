@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Long-prompt matrix: vary the actual `--token-ids` prompt length and the
 //! generation length, reporting end-to-end throughput plus the RAMA timing
 //! breakdown. Native port of `scripts/phase79d_long_prompt_benchmark.py`.

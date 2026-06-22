@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! `rllm fetch <repo>` — download a Hugging Face model into `models/<category>/<name>/`,
 //! auto-categorized by modality (text / vision / audio / embedding). Rust-native (ureq +
 //! rustls, no Python `hf` CLI), with skip-existing, byte-range resume, and a progress line.

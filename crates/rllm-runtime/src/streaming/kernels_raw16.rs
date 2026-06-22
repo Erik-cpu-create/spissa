@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Dense fused raw bf16/fp16/16-bit matmul (rle + chunk/batch1/row-blocked) + SiLU-gate-up
 // + 16-bit dot-segment helpers. sparse -> kernels_raw16_sparse.rs, multiply-into ->
 // kernels_raw16_multiply.rs (R169 split). include!d into mod.rs.

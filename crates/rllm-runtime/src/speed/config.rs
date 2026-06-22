@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 pub const RLLM_EXPERIMENTAL_SPEED_ENV: &str = "RLLM_EXPERIMENTAL_SPEED";
 pub const RLLM_AIP_POLICY_ENV: &str = "RLLM_AIP_POLICY";
 pub const RLLM_AIP_TOPK_ENV: &str = "RLLM_AIP_TOPK";

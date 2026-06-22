@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 //! Qwen3.5-2B (qwen3_5 / Qwen3-Next-style) text-only model types.
 //!
 //! Hybrid decoder: a `LLLF` schedule of 18 Gated-DeltaNet linear-attention layers

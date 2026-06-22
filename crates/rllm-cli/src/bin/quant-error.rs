@@ -1,3 +1,7 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
 // Measure the REAL quantization loss of q8_0 on actual model weights.
 // For each bf16 weight tensor: quantize -> dequantize, compare to the exact bf16 value.
 // Reports RMS relative error (the standard "how lossy %"), max error, SNR, cosine sim.
