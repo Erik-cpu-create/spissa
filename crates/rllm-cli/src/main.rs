@@ -324,6 +324,28 @@ enum Commands {
         out: String,
     },
 
+    /// Download a HF model into `models/<category>/<name>/`, auto-categorized by modality
+    Fetch {
+        /// Hugging Face repo id, e.g. "Qwen/Qwen3.5-2B"
+        repo: String,
+
+        /// Override the auto-detected category folder (e.g. "vision", "text", "audio").
+        #[arg(long)]
+        category: Option<String>,
+
+        /// Override the destination folder name (default: the model name).
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Git revision (branch / tag / commit) to download.
+        #[arg(long, default_value = "main")]
+        revision: String,
+
+        /// Base models directory.
+        #[arg(long, default_value = "models")]
+        models_dir: String,
+    },
+
     /// Check system dependencies and configuration
     Doctor,
 }
@@ -475,6 +497,19 @@ fn main() -> Result<()> {
             ctx,
             out,
         } => commands::chat_session_token::run(&file, &turns, max_new_tokens, ctx, &out),
+        Commands::Fetch {
+            repo,
+            category,
+            name,
+            revision,
+            models_dir,
+        } => commands::fetch::run(
+            &repo,
+            category.as_deref(),
+            name.as_deref(),
+            &revision,
+            &models_dir,
+        ),
         Commands::Doctor => commands::doctor::run(),
     }
 }
