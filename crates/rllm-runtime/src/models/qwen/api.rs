@@ -1,20 +1,13 @@
 //! Qwen3.5 text adapter: build a `PreparedQwenTransformer` from `.rllm` metadata and
 //! run greedy/top-p generation with heterogeneous per-layer dispatch.
 
-use crate::models::qwen::generate::{
-    qwen_gated_attention_block, qwen_gated_deltanet_block, validate_prepared,
-};
+use crate::models::qwen::generate::validate_prepared;
 use crate::models::qwen::model::{
-    GatedDeltaNetState, PreparedQwenTransformer, QwenBuildConfig, QwenLayerCache, QwenLayerKind,
-    QwenLayerParams, QwenLayerTensors,
+    PreparedQwenTransformer, QwenBuildConfig, QwenLayerKind, QwenLayerParams, QwenLayerTensors,
 };
-use crate::ops::{embedding_lookup, rms_norm, sample_argmax, sample_top_p};
-use crate::rotary::KvCache;
-use crate::{
-    streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
-    StreamingLinearConfig, StreamingSamplingConfig, StreamingTileLinearConfig,
-    DEFAULT_STREAMING_TILE_ELEMENTS,
-};
+use crate::models::qwen::session::QwenSession;
+use crate::ops::embedding_lookup;
+use crate::{LazyRllmModel, MemoryBudget, Result, RuntimeError, StreamingSamplingConfig};
 use rllm_container::ModelConfigMetadata;
 
 #[derive(Debug, Clone, Copy)]
@@ -273,7 +266,7 @@ pub fn prepare_qwen_transformer_from_metadata(
 /// converting bf16→f32, instead of decoding the whole 248k×2048 table to f32 (~1 GB)
 /// just to index a few rows per step. Falls back to a full decode for a non-raw
 /// (compressed) embedding tensor.
-fn gather_embedding_rows(
+pub(crate) fn gather_embedding_rows(
     model: &mut LazyRllmModel,
     name: &str,
     hidden: usize,
@@ -317,118 +310,11 @@ pub fn qwen_generate_from_model(
     budget: &mut MemoryBudget,
     on_token: &mut dyn FnMut(usize) -> bool,
 ) -> Result<Vec<usize>> {
-    let cfg = prepared.config;
-    let hidden = cfg.hidden_size;
-
-    // Vocab from metadata — the input lookup gathers rows straight from the bf16 mmap
-    // (see `gather_embedding_rows`) and the tied lm_head streams the same weight through
-    // the NEON kernel, so we never materialize the whole 248k×2048 table as f32 (~1 GB).
-    let vocab_size = model.tensor(&prepared.embedding_weight)?.shape.first().copied().unwrap_or(0)
-        as usize;
-
-    // Per-layer mixing state.
-    let mut caches: Vec<QwenLayerCache> = prepared
-        .layer_params
-        .iter()
-        .map(|p| match p.kind() {
-            QwenLayerKind::FullAttention => Ok(QwenLayerCache::Attn(KvCache::new(
-                cfg.num_kv_heads,
-                cfg.head_dim,
-                cfg.max_seq_len,
-            )?)),
-            QwenLayerKind::LinearAttention => Ok(QwenLayerCache::Linear(GatedDeltaNetState::new(
-                cfg.linear_num_heads,
-                cfg.linear_key_dim,
-                cfg.linear_value_dim,
-                cfg.conv_kernel,
-                cfg.linear_conv_channels(),
-            ))),
-        })
-        .collect::<Result<_>>()?;
-
-    let mut token_ids = prompt_token_ids.to_vec();
-    let mut generated: Vec<usize> = Vec::new();
-
-    for step in 0..cfg.max_new_tokens {
-        let current: &[usize] = if step == 0 {
-            prompt_token_ids
-        } else {
-            &generated[generated.len() - 1..]
-        };
-        let seq_len = current.len();
-        let position_offset = token_ids.len() - seq_len;
-
-        let mut hidden_states =
-            gather_embedding_rows(model, &prepared.embedding_weight, hidden, current, budget)?;
-
-        for (i, tensors) in prepared.layers.iter().enumerate() {
-            let params = &prepared.layer_params[i];
-            hidden_states = match &mut caches[i] {
-                QwenLayerCache::Attn(cache) => qwen_gated_attention_block(
-                    model,
-                    &hidden_states,
-                    tensors,
-                    params,
-                    &cfg,
-                    seq_len,
-                    position_offset,
-                    budget,
-                    cache,
-                )?,
-                QwenLayerCache::Linear(state) => qwen_gated_deltanet_block(
-                    model,
-                    &hidden_states,
-                    tensors,
-                    params,
-                    &cfg,
-                    seq_len,
-                    budget,
-                    state,
-                )?,
-            };
-        }
-
-        hidden_states = rms_norm(
-            &hidden_states,
-            &prepared.final_norm,
-            seq_len,
-            hidden,
-            cfg.rms_norm_eps,
-        )?;
-
-        let last = &hidden_states[(seq_len - 1) * hidden..];
-        let lm_cfg = StreamingTileLinearConfig {
-            linear: StreamingLinearConfig {
-                batch: 1,
-                in_features: hidden,
-                out_features: vocab_size,
-            },
-            tile_elements: DEFAULT_STREAMING_TILE_ELEMENTS,
-        };
-        let logits = streaming_tile_linear_from_model(
-            model,
-            &prepared.lm_head_weight,
-            last,
-            None,
-            lm_cfg,
-            budget,
-        )?;
-
-        let next = match cfg.sampling {
-            StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
-            StreamingSamplingConfig::TopP {
-                temperature,
-                top_p,
-                seed,
-            } => sample_top_p(&logits, temperature, top_p, seed)?,
-        };
-
-        token_ids.push(next);
-        generated.push(next);
-        if !on_token(next) {
-            break;
-        }
-    }
-
-    Ok(generated)
+    // One-shot generation = a fresh session generating once. `prepared` is cloned so the
+    // session can own it (callers that want a persistent multi-turn session build a
+    // `QwenSession` directly).
+    let max_new = prepared.config.max_new_tokens;
+    let sampling = prepared.config.sampling;
+    let mut session = QwenSession::new(model, prepared.clone())?;
+    session.generate(model, prompt_token_ids, max_new, sampling, &[], budget, on_token)
 }
