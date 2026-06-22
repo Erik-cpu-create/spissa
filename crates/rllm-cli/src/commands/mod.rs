@@ -4,6 +4,7 @@ pub mod chat;
 pub mod chat_session;
 pub mod chat_session_token;
 pub mod doctor;
+pub mod fetch;
 pub mod import;
 pub mod inspect;
 pub mod pack;

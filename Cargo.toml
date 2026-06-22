@@ -40,3 +40,6 @@ memmap2 = "0.9"
 
 # Low-level OS bindings (child rusage / peak RSS measurement)
 libc = "0.2"
+
+# HTTP client for the HF model downloader (rustls, no system OpenSSL — universal)
+ureq = "2"
