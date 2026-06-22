@@ -7,7 +7,7 @@ use crate::models::qwen::generate::{qwen_gated_attention_block, qwen_gated_delta
 use crate::models::qwen::model::{
     GatedDeltaNetState, PreparedQwenTransformer, QwenLayerCache, QwenLayerKind,
 };
-use crate::ops::{rms_norm, sample_argmax, sample_top_p};
+use crate::ops::{apply_repeat_penalty, rms_norm, sample_argmax, sample_top_k_top_p};
 use crate::rotary::KvCache;
 use crate::{
     streaming_tile_linear_from_model, LazyRllmModel, MemoryBudget, Result, RuntimeError,
@@ -99,33 +99,90 @@ pub(crate) fn qwen_forward(
     streaming_tile_linear_from_model(model, &prepared.lm_head_weight, last, None, lm_cfg, budget)
 }
 
-pub(crate) fn sample_next(logits: &[f32], sampling: StreamingSamplingConfig) -> Result<usize> {
-    match sampling {
-        StreamingSamplingConfig::Argmax => sample_argmax(logits),
-        StreamingSamplingConfig::TopP {
-            temperature,
-            top_p,
-            seed,
-        } => sample_top_p(logits, temperature, top_p, seed),
-    }
+/// Full chat sampling pipeline: repeat penalty over a recent token window, then temperature
+/// + top-k + top-p (or greedy when `temperature <= 0`). Superset of the runtime's
+/// `StreamingSamplingConfig` (which the one-shot generation path bridges in via
+/// [`SamplingParams::from_streaming`]).
+#[derive(Clone, Copy, Debug)]
+pub struct SamplingParams {
+    pub temperature: f32,
+    /// Keep only the `top_k` highest-probability tokens (`0` = no cap).
+    pub top_k: usize,
+    /// Nucleus cutoff in `(0, 1]` (`1.0` keeps the full tail). Used when `temperature > 0`.
+    pub top_p: f32,
+    /// >1.0 down-weights tokens in the recent window; `1.0` disables.
+    pub repeat_penalty: f32,
+    /// How many trailing tokens the repeat penalty looks back over.
+    pub repeat_last_n: usize,
+    /// Base RNG seed; the step index is mixed in per token for an independent draw.
+    pub seed: u64,
 }
 
-/// Per-step seed advance for stochastic sampling: `sample_top_p` derives its draw from a
-/// single seed, so reusing one seed every decode step would always pick the same quantile
-/// of the nucleus. Mix the step index in so each token draws independently while staying
-/// reproducible for a fixed base seed. Argmax is returned unchanged (deterministic).
-fn sampling_for_step(sampling: StreamingSamplingConfig, step: usize) -> StreamingSamplingConfig {
-    match sampling {
-        StreamingSamplingConfig::TopP {
-            temperature,
-            top_p,
-            seed,
-        } => StreamingSamplingConfig::TopP {
-            temperature,
-            top_p,
-            seed: seed.wrapping_add(step as u64),
-        },
-        other => other,
+impl SamplingParams {
+    pub fn greedy() -> Self {
+        Self {
+            temperature: 0.0,
+            top_k: 0,
+            top_p: 1.0,
+            repeat_penalty: 1.0,
+            repeat_last_n: 0,
+            seed: 0,
+        }
+    }
+
+    /// Bridge the runtime `StreamingSamplingConfig` (one-shot generation) into chat params
+    /// (no top-k / repeat penalty).
+    pub fn from_streaming(cfg: StreamingSamplingConfig) -> Self {
+        match cfg {
+            StreamingSamplingConfig::Argmax => Self::greedy(),
+            StreamingSamplingConfig::TopP {
+                temperature,
+                top_p,
+                seed,
+            } => Self {
+                temperature,
+                top_k: 0,
+                top_p,
+                repeat_penalty: 1.0,
+                repeat_last_n: 0,
+                seed,
+            },
+        }
+    }
+
+    /// Project back to the runtime enum for the gemma/llama chat paths, which sample inside
+    /// the runtime and don't (yet) take top-k / repeat penalty.
+    pub fn to_streaming(self) -> StreamingSamplingConfig {
+        if self.temperature <= 0.0 {
+            StreamingSamplingConfig::Argmax
+        } else {
+            StreamingSamplingConfig::TopP {
+                temperature: self.temperature,
+                top_p: self.top_p,
+                seed: self.seed,
+            }
+        }
+    }
+
+    /// Pick the next token. Repeat penalty (applied even in greedy mode, since greedy decode
+    /// is the worst loop offender) mutates `logits` in place over the last `repeat_last_n` of
+    /// `recent`; `step` advances the RNG so each token draws an independent nucleus quantile.
+    fn sample(&self, logits: &mut [f32], recent: &[usize], step: usize) -> Result<usize> {
+        if self.repeat_penalty != 1.0 && self.repeat_last_n > 0 {
+            let start = recent.len().saturating_sub(self.repeat_last_n);
+            apply_repeat_penalty(logits, &recent[start..], self.repeat_penalty);
+        }
+        if self.temperature <= 0.0 {
+            sample_argmax(logits)
+        } else {
+            sample_top_k_top_p(
+                logits,
+                self.temperature,
+                self.top_k,
+                self.top_p,
+                self.seed.wrapping_add(step as u64),
+            )
+        }
     }
 }
 
@@ -182,18 +239,20 @@ impl QwenSession {
         model: &mut LazyRllmModel,
         prompt: &[usize],
         max_new: usize,
-        sampling: StreamingSamplingConfig,
+        params: SamplingParams,
         stop: &[usize],
         budget: &mut MemoryBudget,
         on_token: &mut dyn FnMut(usize) -> bool,
     ) -> Result<Vec<usize>> {
         let mut generated = Vec::new();
         let mut feed: Vec<usize> = prompt.to_vec();
+        // Repeat-penalty window: this turn's prompt followed by the reply so far.
+        let mut recent: Vec<usize> = prompt.to_vec();
         for step in 0..max_new {
             if feed.is_empty() {
                 break;
             }
-            let logits = qwen_forward(
+            let mut logits = qwen_forward(
                 model,
                 &self.prepared,
                 &mut self.caches,
@@ -203,11 +262,12 @@ impl QwenSession {
                 budget,
             )?;
             self.pos += feed.len();
-            let next = sample_next(&logits, sampling_for_step(sampling, step))?;
+            let next = params.sample(&mut logits, &recent, step)?;
             if stop.contains(&next) {
                 break;
             }
             generated.push(next);
+            recent.push(next);
             if !on_token(next) {
                 break;
             }

@@ -288,6 +288,19 @@ enum Commands {
         #[arg(long = "top-p", default_value_t = 0.95)]
         top_p: f32,
 
+        /// Top-k cap: keep only the K highest-probability tokens (0 = no cap). Qwen-only.
+        #[arg(long = "top-k", default_value_t = 0)]
+        top_k: usize,
+
+        /// Repeat penalty: >1.0 down-weights recently-used tokens to curb loops
+        /// (1.0 = off; try 1.1). Qwen chat only.
+        #[arg(long = "repeat-penalty", default_value_t = 1.0)]
+        repeat_penalty: f32,
+
+        /// How many trailing tokens the repeat penalty looks back over.
+        #[arg(long = "repeat-last-n", default_value_t = 64)]
+        repeat_last_n: usize,
+
         /// RNG seed for sampling (reproducible given the same prompt + seed).
         #[arg(long, default_value_t = 0)]
         seed: u64,
@@ -492,6 +505,9 @@ fn main() -> Result<()> {
             system,
             temp,
             top_p,
+            top_k,
+            repeat_penalty,
+            repeat_last_n,
             seed,
         } => commands::chat::run(
             &file,
@@ -501,9 +517,14 @@ fn main() -> Result<()> {
             fast,
             &chat_template,
             system.as_deref(),
-            temp,
-            top_p,
-            seed,
+            commands::chat::SamplingArgs {
+                temp,
+                top_p,
+                top_k,
+                repeat_penalty,
+                repeat_last_n,
+                seed,
+            },
         ),
         Commands::ChatSession {
             file,

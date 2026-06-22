@@ -24,12 +24,42 @@ use rllm_runtime::{
         prepare_llama_rama_layer_decode_transformer_from_metadata, LlamaRamaGenerationConfig,
         LlamaRamaSessionAdapter,
     },
-    models::qwen::{prepare_qwen_transformer_from_metadata, QwenGenerationConfig, QwenSession},
+    models::qwen::{
+        prepare_qwen_transformer_from_metadata, QwenGenerationConfig, QwenSession, SamplingParams,
+    },
     LazyRllmModel, MemoryBudget, RamaChatSession, RamaIntegrityMode, RllmTokenizer,
     StreamingSamplingConfig,
 };
 
 use crate::chat_template::{render_interactive_user_turn, stop_token_ids, ChatTemplateKind};
+
+/// Raw sampling flags from the CLI, mapped into a `SamplingParams` once the model opens.
+#[derive(Clone, Copy)]
+pub struct SamplingArgs {
+    pub temp: f32,
+    pub top_p: f32,
+    pub top_k: usize,
+    pub repeat_penalty: f32,
+    pub repeat_last_n: usize,
+    pub seed: u64,
+}
+
+impl SamplingArgs {
+    fn to_params(self) -> SamplingParams {
+        SamplingParams {
+            temperature: self.temp,
+            top_k: self.top_k,
+            top_p: self.top_p,
+            repeat_penalty: self.repeat_penalty,
+            repeat_last_n: self.repeat_last_n,
+            seed: self.seed,
+        }
+    }
+    /// top-k / repeat-penalty are only wired into the Qwen chat path so far.
+    fn has_qwen_only(self) -> bool {
+        self.top_k > 0 || self.repeat_penalty != 1.0
+    }
+}
 
 /// Entry point for `rllm chat`.
 #[allow(clippy::too_many_arguments)]
@@ -41,23 +71,12 @@ pub fn run(
     fast: bool,
     chat_template: &str,
     system_prompt: Option<&str>,
-    temp: f32,
-    top_p: f32,
-    seed: u64,
+    sampling_args: SamplingArgs,
 ) -> Result<()> {
     if ctx == 0 || max_new_tokens == 0 {
         anyhow::bail!("--ctx and --max-new-tokens must be greater than zero");
     }
-    // temp <= 0 → deterministic greedy; temp > 0 → top-p nucleus sampling.
-    let sampling = if temp <= 0.0 {
-        StreamingSamplingConfig::Argmax
-    } else {
-        StreamingSamplingConfig::TopP {
-            temperature: temp,
-            top_p,
-            seed,
-        }
-    };
+    let params = sampling_args.to_params();
     // Mode levers — set before the model opens and the kernels read them.
     if low_ram {
         std::env::set_var("RLLM_STREAM_EMBEDDING", "1");
@@ -92,17 +111,23 @@ pub fn run(
         model.metadata().model_name,
         if low_ram { "low-ram (stream-embedding)" } else { "decode-once" },
     );
+    if sampling_args.has_qwen_only() && !matches!(architecture.as_str(), "qwen3" | "qwen") {
+        eprintln!(
+            "[chat] note: --top-k / --repeat-penalty are wired for Qwen chat only; \
+             ignored for arch={architecture} (temp/top-p still apply)"
+        );
+    }
     match architecture.as_str() {
-        "gemma3" | "gemma" => gemma_chat(&mut model, ctx, max_new_tokens, sampling),
+        "gemma3" | "gemma" => gemma_chat(&mut model, ctx, max_new_tokens, params.to_streaming()),
         "llama" => llama_chat(
             &mut model,
             ctx,
             max_new_tokens,
             chat_template,
             system_prompt,
-            sampling,
+            params.to_streaming(),
         ),
-        "qwen3" | "qwen" => qwen_chat(&mut model, ctx, max_new_tokens, sampling),
+        "qwen3" | "qwen" => qwen_chat(&mut model, ctx, max_new_tokens, params, system_prompt),
         other => {
             anyhow::bail!(
                 "rllm chat: unsupported architecture {other:?} (supported: gemma3, llama, qwen3)"
@@ -119,7 +144,8 @@ fn qwen_chat(
     model: &mut LazyRllmModel,
     ctx: usize,
     max_new_tokens: usize,
-    sampling: StreamingSamplingConfig,
+    params: SamplingParams,
+    system_prompt: Option<&str>,
 ) -> Result<()> {
     let tok_meta = model
         .metadata()
@@ -146,19 +172,29 @@ fn qwen_chat(
             max_new_tokens,
             max_seq_len: Some(ctx),
             causal: true,
-            sampling,
+            sampling: params.to_streaming(),
         },
     )?;
     let mut budget = MemoryBudget::unbounded();
     let mut session = QwenSession::new(model, prepared)?;
 
-    let mode = match sampling {
-        StreamingSamplingConfig::Argmax => "greedy".to_string(),
-        StreamingSamplingConfig::TopP {
-            temperature, top_p, ..
-        } => format!("sampling temp={temperature} top_p={top_p}"),
+    let mode = if params.temperature <= 0.0 {
+        "greedy".to_string()
+    } else {
+        format!(
+            "temp={} top_p={} top_k={}",
+            params.temperature, params.top_p, params.top_k
+        )
     };
-    println!("Qwen3.5 chat (KV-session, {mode}). Commands: /reset, /exit.\n");
+    let rep = if params.repeat_penalty != 1.0 {
+        format!(", repeat_penalty={}", params.repeat_penalty)
+    } else {
+        String::new()
+    };
+    if let Some(sys) = system_prompt {
+        println!("[system prompt set: {sys:?}]");
+    }
+    println!("Qwen3.5 chat (KV-session, {mode}{rep}). Commands: /reset, /exit.\n");
     let stdin = io::stdin();
     let mut handle = stdin.lock();
     loop {
@@ -184,10 +220,15 @@ fn qwen_chat(
         }
 
         // Only the NEW turn's tokens. The leading `<|im_end|>\n` (turns after the first)
-        // closes the previous assistant reply, which the session leaves uncommitted.
+        // closes the previous assistant reply, which the session leaves uncommitted. The
+        // optional system block is emitted once, before the first user turn.
         let is_first = session.context_len() == 0;
         let turn = if is_first {
-            format!("<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n")
+            let sys = match system_prompt {
+                Some(s) => format!("<|im_start|>system\n{s}<|im_end|>\n"),
+                None => String::new(),
+            };
+            format!("{sys}<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n")
         } else {
             format!("<|im_end|>\n<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n")
         };
@@ -205,7 +246,7 @@ fn qwen_chat(
             model,
             &ids,
             max_new_tokens,
-            sampling,
+            params,
             &stop,
             &mut budget,
             &tokenizer,
@@ -224,7 +265,7 @@ fn stream_qwen_turn(
     model: &mut LazyRllmModel,
     ids: &[usize],
     max_new_tokens: usize,
-    sampling: StreamingSamplingConfig,
+    params: SamplingParams,
     stop: &[usize],
     budget: &mut MemoryBudget,
     tokenizer: &RllmTokenizer,
@@ -238,7 +279,7 @@ fn stream_qwen_turn(
         model,
         ids,
         max_new_tokens,
-        sampling,
+        params,
         stop,
         budget,
         &mut |tok| {
