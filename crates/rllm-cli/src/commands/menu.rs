@@ -13,12 +13,17 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-const LOGO: &str = r"  ██████╗ ██╗     ██╗     ███╗   ███╗
-  ██╔══██╗██║     ██║     ████╗ ████║
-  ██████╔╝██║     ██║     ██╔████╔██║
-  ██╔══██╗██║     ██║     ██║╚██╔╝██║
-  ██║  ██║███████╗███████╗██║ ╚═╝ ██║
-  ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝     ╚═╝";
+// Succulent rosette — leaves radiating densely into a tight core (`spissa` = dense/packed).
+const LOGO: &str = r"          \    \    |    /    /
+        \    \    \  |  /    /    /
+      \    \    \   \|/   /    /    /
+    ──────────────( ❋ )──────────────
+      /    /    /   /|\   \    \    \
+        /    /    /  |  \    \    \
+          /    /     |     \    \
+                   |||
+                ___|||___
+               |_________|";
 
 const FETCH: &str = "📥  Fetch model dari Hugging Face";
 const PACK: &str = "📦  Pack model → .rllm";
@@ -28,9 +33,10 @@ const EXIT: &str = "🚪  Keluar";
 
 fn print_logo() {
     print!("\x1b[2J\x1b[H"); // clear screen + cursor home
-    println!("\x1b[96m{LOGO}\x1b[0m"); // bright cyan
+    println!("\x1b[92m{LOGO}\x1b[0m"); // bright green (succulent)
+    println!("\x1b[1;92m                  s p i s s a\x1b[0m");
     println!(
-        "\x1b[2m  runtime-compressed local llm · v{}\x1b[0m\n",
+        "\x1b[2m             compressed · local · yours · v{}\x1b[0m\n",
         env!("CARGO_PKG_VERSION")
     );
 }

@@ -466,7 +466,7 @@ fn write_report(
     let mut body = String::new();
     body.push_str("# Trial: R2 Token-Native Chat Session\n\n");
     body.push_str("Date: 2026-06-14\n");
-    body.push_str("Owner: RLLM\n");
+    body.push_str("Owner: spissa\n");
     body.push_str("Status: running\n");
     body.push_str("Folder: active\n\n");
     body.push_str("## Hypothesis\n\n");

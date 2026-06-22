@@ -19,7 +19,7 @@ pub fn run(file: &str) -> Result<()> {
     let header = reader.header();
     let metadata = reader.metadata();
 
-    println!("RLLM File: {}", file);
+    println!("spissa file: {}", file);
     println!("Format version: {}", header.version);
     println!("Model name: {}", metadata.model_name);
     println!("Architecture: {}", metadata.architecture);

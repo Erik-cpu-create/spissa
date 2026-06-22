@@ -1,10 +1,14 @@
-# Runtime-compressed Local LLM (RLLM)
+# Spissa — Runtime-compressed Local LLM
+
+> **compressed · local · yours**
 
 Brain-inspired compressed runtime for local LLMs, guided by RAMA: Rama Active Memory Architecture.
 
-RLLM is an experimental local LLM runtime built around **lossless compressed model storage**. It stores model tensors in a chunked compressed container (`.rllm`) and aims to run inference by decoding only the tensor blocks needed at runtime.
+Spissa is a from-scratch local LLM runtime built around **runtime-compressed model storage** — **lossless by default** (rANS / bit-plane), with optional lossy quantization (q8 / q4). It stores model tensors in a chunked compressed container (`.rllm`) and runs inference by decoding only the tensor blocks needed at runtime. One self-contained binary, no dependencies, runs on any device.
 
 > Run local LLMs from compressed weights without changing model weights.
+
+*(Spissa is Latin for "dense / packed" — the project was formerly named RLLM. The `spissa` CLI replaces the old `rllm` command; the `.rllm` container format is unchanged.)*
 
 ## Architecture Direction
 
