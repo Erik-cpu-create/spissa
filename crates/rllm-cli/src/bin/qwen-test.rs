@@ -77,6 +77,10 @@ fn main() -> anyhow::Result<()> {
         prepared.config.conv_kernel,
     );
 
+    if std::env::var("QWEN_PROFILE").is_ok() {
+        rllm_runtime::models::qwen::generate::profile::enable();
+        rllm_runtime::models::qwen::generate::profile::reset();
+    }
     let mut budget = MemoryBudget::unbounded();
     let t0 = std::time::Instant::now();
     let mut first_token_at: Option<f64> = None;
@@ -112,5 +116,11 @@ fn main() -> anyhow::Result<()> {
         count as f64 / dt.max(1e-9),
         first_token_at.unwrap_or(dt)
     );
+    if std::env::var("QWEN_PROFILE").is_ok() {
+        eprintln!(
+            "[qwen-test] profile (cumulative): {}",
+            rllm_runtime::models::qwen::generate::profile::report()
+        );
+    }
     Ok(())
 }
