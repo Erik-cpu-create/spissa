@@ -23,6 +23,59 @@ use crate::{
     DEFAULT_STREAMING_TILE_ELEMENTS,
 };
 
+/// Env-gated forward profiler: when enabled, accumulates wall-time into per-region
+/// counters so we can attribute prefill cost to the Gated-DeltaNet scan vs the projection
+/// / FFN GEMMs vs full attention. Zero overhead when disabled (`tic` returns `None`, so no
+/// `Instant::now` is taken on the hot path). Used by the `qwen-test` harness (`QWEN_PROFILE`).
+pub mod profile {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Instant;
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    pub static SCAN_NS: AtomicU64 = AtomicU64::new(0);
+    pub static PROJ_NS: AtomicU64 = AtomicU64::new(0);
+    pub static FFN_NS: AtomicU64 = AtomicU64::new(0);
+    pub static ATTN_NS: AtomicU64 = AtomicU64::new(0);
+
+    pub fn enable() {
+        ENABLED.store(true, Ordering::Relaxed);
+    }
+    #[inline]
+    pub fn enabled() -> bool {
+        ENABLED.load(Ordering::Relaxed)
+    }
+    pub fn reset() {
+        for c in [&SCAN_NS, &PROJ_NS, &FFN_NS, &ATTN_NS] {
+            c.store(0, Ordering::Relaxed);
+        }
+    }
+    /// Take a timestamp only when profiling is on, so disabled builds pay nothing.
+    #[inline]
+    pub fn tic() -> Option<Instant> {
+        if enabled() {
+            Some(Instant::now())
+        } else {
+            None
+        }
+    }
+    #[inline]
+    pub fn toc(counter: &AtomicU64, started: Option<Instant>) {
+        if let Some(t) = started {
+            counter.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+    pub fn report() -> String {
+        let ms = |c: &AtomicU64| c.load(Ordering::Relaxed) as f64 / 1e6;
+        format!(
+            "deltanet-scan={:.0}ms proj-gemm={:.0}ms ffn-gemm={:.0}ms full-attn={:.0}ms",
+            ms(&SCAN_NS),
+            ms(&PROJ_NS),
+            ms(&FFN_NS),
+            ms(&ATTN_NS)
+        )
+    }
+}
+
 // ----- small scalar math (f32) -----
 
 #[inline]
@@ -138,16 +191,17 @@ fn delta_rule_head_step(
     for val in s.iter_mut() {
         *val *= g; // decay
     }
+    // The per-row `if kval == 0.0 { continue }` skips are removed throughout: q/k are
+    // l2-normed (dense, ~never exactly zero), so the branch never fired but blocked LLVM
+    // from auto-vectorizing these contiguous SAXPY rows into NEON. `s += k*0` / `+= s*0`
+    // is a no-op (adding +0.0), so dropping the guard is numerically identical.
     // kv_mem[v] = sum_k s[k,v] * k[k]
     let mut kv_mem = vec![0.0f32; v_dim];
     for kk in 0..k_dim {
         let kval = k[kk];
-        if kval == 0.0 {
-            continue;
-        }
-        let base = kk * v_dim;
+        let row = &s[kk * v_dim..kk * v_dim + v_dim];
         for vv in 0..v_dim {
-            kv_mem[vv] += s[base + vv] * kval;
+            kv_mem[vv] += row[vv] * kval;
         }
     }
     // delta[v] = (v[v] - kv_mem[v]) * beta ; s[k,v] += k[k] * delta[v]
@@ -157,12 +211,9 @@ fn delta_rule_head_step(
     }
     for kk in 0..k_dim {
         let kval = k[kk];
-        if kval == 0.0 {
-            continue;
-        }
-        let base = kk * v_dim;
+        let row = &mut s[kk * v_dim..kk * v_dim + v_dim];
         for vv in 0..v_dim {
-            s[base + vv] += kval * delta[vv];
+            row[vv] += kval * delta[vv];
         }
     }
     // o[v] = sum_k s[k,v] * q[k]
@@ -171,12 +222,9 @@ fn delta_rule_head_step(
     }
     for kk in 0..k_dim {
         let qval = q[kk];
-        if qval == 0.0 {
-            continue;
-        }
-        let base = kk * v_dim;
+        let row = &s[kk * v_dim..kk * v_dim + v_dim];
         for vv in 0..v_dim {
-            o[vv] += s[base + vv] * qval;
+            o[vv] += row[vv] * qval;
         }
     }
 }
@@ -201,6 +249,7 @@ pub fn qwen_gated_attention_block(
     let q_out = nh * hd;
     let kv_out = nkv * hd;
 
+    let _at = profile::tic();
     let mut residual = input.to_vec();
     let x = rms_norm(
         input,
@@ -283,6 +332,7 @@ pub fn qwen_gated_attention_block(
         budget,
     )?;
     add_inplace(&mut residual, &ffn)?;
+    profile::toc(&profile::ATTN_NS, _at);
     Ok(residual)
 }
 
@@ -345,14 +395,17 @@ pub fn qwen_gated_deltanet_block(
     let x = rms_norm(input, &params.input_layernorm, seq_len, hidden, eps)?;
 
     // Projections (whole sequence at once).
+    let _pt = profile::tic();
     let qkv = project(model, &tensors.in_proj_qkv, &x, seq_len, hidden, channels, budget)?;
     let a = project(model, &tensors.in_proj_a, &x, seq_len, hidden, heads, budget)?;
     let b = project(model, &tensors.in_proj_b, &x, seq_len, hidden, heads, budget)?;
     let z = project(model, &tensors.in_proj_z, &x, seq_len, hidden, heads * vd, budget)?;
+    profile::toc(&profile::PROJ_NS, _pt);
 
     let mut out_heads = vec![0.0f32; seq_len * heads * vd];
     let mut o = vec![0.0f32; vd];
 
+    let _st = profile::tic();
     for t in 0..seq_len {
         let qkv_t = &qkv[t * channels..(t + 1) * channels];
         let conv_out = conv_silu_step(params, state, qkv_t, channels, kernel);
@@ -385,7 +438,9 @@ pub fn qwen_gated_deltanet_block(
             }
         }
     }
+    profile::toc(&profile::SCAN_NS, _st);
 
+    let _ot = profile::tic();
     let out = project(
         model,
         &tensors.out_proj,
@@ -395,6 +450,7 @@ pub fn qwen_gated_deltanet_block(
         hidden,
         budget,
     )?;
+    profile::toc(&profile::PROJ_NS, _ot);
     add_inplace(&mut residual, &out)?;
 
     let mlp_in = rms_norm(
@@ -404,6 +460,7 @@ pub fn qwen_gated_deltanet_block(
         hidden,
         eps,
     )?;
+    let _ft = profile::tic();
     let ffn = qwen_swiglu_ffn(
         model,
         tensors,
@@ -413,6 +470,7 @@ pub fn qwen_gated_deltanet_block(
         cfg.intermediate_size,
         budget,
     )?;
+    profile::toc(&profile::FFN_NS, _ft);
     add_inplace(&mut residual, &ffn)?;
     Ok(residual)
 }
