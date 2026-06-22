@@ -24,9 +24,7 @@ use rllm_runtime::{
         prepare_llama_rama_layer_decode_transformer_from_metadata, LlamaRamaGenerationConfig,
         LlamaRamaSessionAdapter,
     },
-    models::qwen::{
-        prepare_qwen_transformer_from_metadata, qwen_generate_from_model, QwenGenerationConfig,
-    },
+    models::qwen::{prepare_qwen_transformer_from_metadata, QwenGenerationConfig, QwenSession},
     LazyRllmModel, MemoryBudget, RamaChatSession, RamaIntegrityMode, RllmTokenizer,
     StreamingSamplingConfig,
 };
@@ -93,10 +91,10 @@ pub fn run(
     }
 }
 
-/// Qwen3.5 chat REPL (ChatML, greedy). Qwen3.5 is a reasoning model, so replies open
-/// with a `<think>…</think>` block before the answer. The whole conversation is
-/// re-prefilled each turn (no cross-turn KV session yet — that's a later phase), which
-/// is simple and correct; long chats get progressively slower.
+/// Qwen3.5 chat REPL (ChatML) over a persistent KV / Gated-DeltaNet session: each turn
+/// only prefills the NEW user message onto the existing context (no O(n²) re-prefill of
+/// the whole conversation). Qwen3.5 is a reasoning model, so replies open with a
+/// `<think>…</think>` block before the answer.
 fn qwen_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> Result<()> {
     let tok_meta = model
         .metadata()
@@ -104,6 +102,7 @@ fn qwen_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> Re
         .clone()
         .context("model has no packed tokenizer metadata")?;
     let tokenizer = RllmTokenizer::from_metadata(&tok_meta)?;
+    let bos = tok_meta.bos_token_id;
     let mut stop: Vec<usize> = Vec::new();
     if let Some(e) = tok_meta.eos_token_id {
         stop.push(e as usize);
@@ -125,12 +124,13 @@ fn qwen_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> Re
             sampling: StreamingSamplingConfig::Argmax,
         },
     )?;
+    let sampling = StreamingSamplingConfig::Argmax;
     let mut budget = MemoryBudget::unbounded();
+    let mut session = QwenSession::new(model, prepared)?;
 
-    println!("Qwen3.5 chat (greedy, re-prefill per turn). Commands: /reset, /exit.\n");
+    println!("Qwen3.5 chat (KV-session, greedy). Commands: /reset, /exit.\n");
     let stdin = io::stdin();
     let mut handle = stdin.lock();
-    let mut convo = String::new();
     loop {
         print!("you> ");
         io::stdout().flush().ok();
@@ -146,47 +146,61 @@ fn qwen_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> Re
         match msg {
             "/exit" | "/quit" | "exit" | "quit" => break,
             "/reset" => {
-                convo.clear();
+                session.reset()?;
                 println!("[new conversation]");
                 continue;
             }
             _ => {}
         }
 
-        convo.push_str(&format!(
-            "<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n"
-        ));
-        let ids = tokenizer.encode(&convo)?;
-        print!("bot> ");
-        io::stdout().flush().ok();
-
-        let started = Instant::now();
-        let mut generated: Vec<usize> = Vec::new();
-        let mut shown = String::new();
-        qwen_generate_from_model(model, &prepared, &ids, &mut budget, &mut |tok| {
-            if stop.contains(&tok) {
-                return false;
-            }
-            generated.push(tok);
-            if let Ok(full) = tokenizer.decode(&generated) {
-                if full.starts_with(&shown) && full.len() > shown.len() {
-                    print!("{}", &full[shown.len()..]);
-                    io::stdout().flush().ok();
-                    shown = full;
+        // Only the NEW turn's tokens. The leading `<|im_end|>\n` (turns after the first)
+        // closes the previous assistant reply, which the session leaves uncommitted.
+        let is_first = session.context_len() == 0;
+        let turn = if is_first {
+            format!("<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n")
+        } else {
+            format!("<|im_end|>\n<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n")
+        };
+        let mut ids = tokenizer.encode(&turn)?;
+        if !is_first {
+            if let Some(b) = bos {
+                if ids.first() == Some(&(b as usize)) {
+                    ids.remove(0);
                 }
             }
-            true
-        })?;
+        }
+
+        print!("bot> ");
+        io::stdout().flush().ok();
+        let started = Instant::now();
+        let mut shown = String::new();
+        let mut acc: Vec<usize> = Vec::new();
+        let generated = session.generate(
+            model,
+            &ids,
+            max_new_tokens,
+            sampling,
+            &stop,
+            &mut budget,
+            &mut |tok| {
+                acc.push(tok);
+                if let Ok(full) = tokenizer.decode(&acc) {
+                    if full.starts_with(&shown) && full.len() > shown.len() {
+                        print!("{}", &full[shown.len()..]);
+                        io::stdout().flush().ok();
+                        shown = full;
+                    }
+                }
+                true
+            },
+        )?;
         let dt = started.elapsed().as_secs_f64();
         println!(
-            "\n[{} tokens, {:.2} tok/s]",
+            "\n[{} tokens, {:.2} tok/s, ctx {}]",
             generated.len(),
-            generated.len() as f64 / dt.max(1e-9)
+            generated.len() as f64 / dt.max(1e-9),
+            session.context_len()
         );
-        if let Ok(reply) = tokenizer.decode(&generated) {
-            convo.push_str(&reply);
-            convo.push_str("<|im_end|>\n");
-        }
     }
     println!("bye!");
     Ok(())

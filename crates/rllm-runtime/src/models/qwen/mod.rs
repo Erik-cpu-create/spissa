@@ -4,8 +4,10 @@
 pub mod api;
 pub mod generate;
 pub mod model;
+pub mod session;
 
 pub use api::{
     prepare_qwen_transformer_from_metadata, qwen_generate_from_model, QwenGenerationConfig,
 };
 pub use model::{PreparedQwenTransformer, QwenBuildConfig, QwenLayerKind};
+pub use session::QwenSession;
