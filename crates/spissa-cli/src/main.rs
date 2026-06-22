@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 
 mod chat_template;
 mod commands;
+mod progress;
 
 #[derive(Parser)]
 #[command(name = "spissa")]
@@ -415,6 +416,7 @@ fn main() -> Result<()> {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
 
+    let verbose = cli.verbose;
     match cli.command {
         Commands::Pack {
             input,
@@ -446,6 +448,7 @@ fn main() -> Result<()> {
             tokenizer.as_deref(),
             no_tokenizer,
             quantize.as_deref(),
+            verbose,
         ),
         Commands::Inspect { file } => commands::inspect::run(&file),
         Commands::Verify {

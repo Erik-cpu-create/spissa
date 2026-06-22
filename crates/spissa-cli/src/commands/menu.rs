@@ -143,6 +143,7 @@ fn menu_pack() -> Result<()> {
     };
     super::pack::run(
         &dir, &out, "1mb", codec, None, None, false, false, false, 16, None, None, false, quant,
+        false, // clean animated UX (not verbose)
     )
 }
 

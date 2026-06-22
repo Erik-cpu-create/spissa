@@ -3,7 +3,9 @@
 // distribution of this file, via any medium, is strictly prohibited.
 
 use crate::commands::common::parse_size;
+use crate::progress::{bar, print_pack_result, Spinner};
 use anyhow::{Context, Result};
+use std::time::Instant;
 use spissa_container::{ChunkRangeSpec, DType, GlobalMetadata, SpissaWriter, TensorMeta};
 use spissa_import::{
     read_model_config_metadata, read_tokenizer_metadata, SafetensorsReader,
@@ -282,7 +284,9 @@ pub fn run(
     tokenizer: Option<&str>,
     no_tokenizer: bool,
     quantize: Option<&str>,
+    verbose: bool,
 ) -> Result<()> {
+    let started = Instant::now();
     let chunk_size_bytes = parse_size(chunk_size)?;
     let codec_policy = PackCodecPolicy::parse(codec_policy)?;
     let quantize_policy = PackQuantizePolicy::parse(quantize)?;
@@ -302,7 +306,14 @@ pub fn run(
         anyhow::bail!("Input path does not exist: {}", input);
     }
 
-    println!("Reading safetensors from: {}", input);
+    // `verbose` (global -v) keeps the old line-by-line log; otherwise a single live spinner
+    // owns the terminal and we finish with the result box.
+    let mut spinner = if verbose {
+        println!("Reading safetensors from: {}", input);
+        None
+    } else {
+        Some(Spinner::start("Reading model …"))
+    };
 
     // Open the source (single file, a `*.index.json`, or a directory holding a
     // sharded `model.safetensors.index.json`).
@@ -332,12 +343,14 @@ pub fn run(
     // Map raw checkpoint names to `.spsa` names (filters vision + strips the
     // `language_model.` prefix for multimodal Gemma; identity otherwise).
     let tensors = map_tensor_names(&raw_names, &architecture);
-    println!(
-        "Found {} tensors ({} packed for architecture '{}')",
-        raw_names.len(),
-        tensors.len(),
-        architecture
-    );
+    if verbose {
+        println!(
+            "Found {} tensors ({} packed for architecture '{}')",
+            raw_names.len(),
+            tensors.len(),
+            architecture
+        );
+    }
     let default_context_length = model_config
         .as_ref()
         .and_then(|config| config.max_position_embeddings)
@@ -386,13 +399,24 @@ pub fn run(
     let mut next_tensor_id = 0u64;
 
     // Process each tensor
+    let total_tensors = tensors.len();
     for (tensor_idx, (tensor_name, src_name)) in tensors.iter().enumerate() {
-        println!(
-            "Processing tensor: {} ({}/{})",
-            tensor_name,
-            tensor_idx + 1,
-            tensors.len()
-        );
+        if verbose {
+            println!(
+                "Processing tensor: {} ({}/{})",
+                tensor_name,
+                tensor_idx + 1,
+                total_tensors
+            );
+        } else if let Some(sp) = &spinner {
+            let frac = tensor_idx as f64 / total_tensors.max(1) as f64;
+            sp.set(format!(
+                "Packing  {}  {}/{} tensors",
+                bar(frac, 22),
+                tensor_idx + 1,
+                total_tensors
+            ));
+        }
 
         // Read from the source (original) name; store under the `.spsa` (mapped)
         // name so quant matchers + the runtime see standard `model.layers.*`.
@@ -408,7 +432,9 @@ pub fn run(
             quantize_policy.quantized_dtype_for_tensor(tensor_name, &meta.shape, meta.dtype);
 
         if let Some(target_dtype) = quantized_dtype {
-            println!("  Quantizing {} to {:?}...", tensor_name, target_dtype);
+            if verbose {
+                println!("  Quantizing {} to {:?}...", tensor_name, target_dtype);
+            }
             let quantized = match target_dtype {
                 spissa_container::DType::Q4_0 => {
                     quantize_to_q4_0(&tensor_data, meta.dtype, &meta.shape)?
@@ -524,45 +550,70 @@ pub fn run(
         }
     }
 
-    println!("\nEncoded {} chunks total", chunk_count);
-    println!("Codec policy: {}", codec_policy.metadata_label());
-    if range_checksum_size_bytes.is_some() {
-        println!("Range checksums emitted: {}", range_checksum_count);
-        if range_checksum_skipped_chunks > 0 {
+    if let Some(sp) = &spinner {
+        sp.set("Finalizing container …");
+    }
+
+    if verbose {
+        println!("\nEncoded {} chunks total", chunk_count);
+        println!("Codec policy: {}", codec_policy.metadata_label());
+        if range_checksum_size_bytes.is_some() {
+            println!("Range checksums emitted: {}", range_checksum_count);
+            if range_checksum_skipped_chunks > 0 {
+                println!(
+                    "Range checksums skipped for {} non-identity compressed chunks",
+                    range_checksum_skipped_chunks
+                );
+            }
+        }
+        if let Some(tile_elements) = tile_block_elements {
             println!(
-                "Range checksums skipped for {} non-identity compressed chunks",
-                range_checksum_skipped_chunks
+                "Tile-block packing: {} tensor(s), {} element(s) per chunk/block",
+                tile_block_aligned_tensors, tile_elements
             );
         }
-    }
-    if let Some(tile_elements) = tile_block_elements {
-        println!(
-            "Tile-block packing: {} tensor(s), {} element(s) per chunk/block",
-            tile_block_aligned_tensors, tile_elements
-        );
-    }
-    if quantize_policy.allows_input_tile_sidecars()
-        && (llama_mlp_input_tiles || llama_attention_input_tiles || llama_lm_head_input_tiles)
-    {
-        println!(
-            "Input-tile sidecars: {} tensor(s), {} chunk(s), {} feature range(s), {} feature(s) per chunk",
-            input_tile_sidecar_tensors,
-            input_tile_sidecar_chunks,
-            input_tile_sidecar_ranges,
-            input_tile_features
-        );
-    }
-    println!("Original size: {} bytes", total_original);
-    println!("Compressed size: {} bytes", total_compressed);
-
-    if total_original > 0 {
-        let ratio = total_compressed as f64 / total_original as f64 * 100.0;
-        println!("Compression ratio: {:.1}%", ratio);
+        if quantize_policy.allows_input_tile_sidecars()
+            && (llama_mlp_input_tiles || llama_attention_input_tiles || llama_lm_head_input_tiles)
+        {
+            println!(
+                "Input-tile sidecars: {} tensor(s), {} chunk(s), {} feature range(s), {} feature(s) per chunk",
+                input_tile_sidecar_tensors,
+                input_tile_sidecar_chunks,
+                input_tile_sidecar_ranges,
+                input_tile_features
+            );
+        }
+        println!("Original size: {} bytes", total_original);
+        println!("Compressed size: {} bytes", total_compressed);
+        if total_original > 0 {
+            let ratio = total_compressed as f64 / total_original as f64 * 100.0;
+            println!("Compression ratio: {:.1}%", ratio);
+        }
     }
 
     writer.finalize()?;
 
-    println!("Written to: {}", output);
+    if verbose {
+        println!("Written to: {}", output);
+    } else {
+        if let Some(sp) = spinner.take() {
+            sp.clear();
+        }
+        let filename = std::path::Path::new(output)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(output);
+        print_pack_result(
+            filename,
+            &codec_policy.metadata_label(),
+            total_tensors,
+            chunk_count,
+            total_original,
+            total_compressed as u64,
+            output,
+            started.elapsed().as_secs_f64(),
+        );
+    }
 
     Ok(())
 }
