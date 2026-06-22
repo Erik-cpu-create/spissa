@@ -24,6 +24,9 @@ use rllm_runtime::{
         prepare_llama_rama_layer_decode_transformer_from_metadata, LlamaRamaGenerationConfig,
         LlamaRamaSessionAdapter,
     },
+    models::qwen::{
+        prepare_qwen_transformer_from_metadata, qwen_generate_from_model, QwenGenerationConfig,
+    },
     LazyRllmModel, MemoryBudget, RamaChatSession, RamaIntegrityMode, RllmTokenizer,
     StreamingSamplingConfig,
 };
@@ -81,10 +84,112 @@ pub fn run(
     match architecture.as_str() {
         "gemma3" | "gemma" => gemma_chat(&mut model, ctx, max_new_tokens),
         "llama" => llama_chat(&mut model, ctx, max_new_tokens, chat_template, system_prompt),
+        "qwen3" | "qwen" => qwen_chat(&mut model, ctx, max_new_tokens),
         other => {
-            anyhow::bail!("rllm chat: unsupported architecture {other:?} (supported: gemma3, llama)")
+            anyhow::bail!(
+                "rllm chat: unsupported architecture {other:?} (supported: gemma3, llama, qwen3)"
+            )
         }
     }
+}
+
+/// Qwen3.5 chat REPL (ChatML, greedy). Qwen3.5 is a reasoning model, so replies open
+/// with a `<think>…</think>` block before the answer. The whole conversation is
+/// re-prefilled each turn (no cross-turn KV session yet — that's a later phase), which
+/// is simple and correct; long chats get progressively slower.
+fn qwen_chat(model: &mut LazyRllmModel, ctx: usize, max_new_tokens: usize) -> Result<()> {
+    let tok_meta = model
+        .metadata()
+        .tokenizer
+        .clone()
+        .context("model has no packed tokenizer metadata")?;
+    let tokenizer = RllmTokenizer::from_metadata(&tok_meta)?;
+    let mut stop: Vec<usize> = Vec::new();
+    if let Some(e) = tok_meta.eos_token_id {
+        stop.push(e as usize);
+    }
+    for t in ["<|im_end|>", "<|endoftext|>"] {
+        if let Some(id) = tokenizer.token_id_for_raw_token(t) {
+            if !stop.contains(&id) {
+                stop.push(id);
+            }
+        }
+    }
+
+    let prepared = prepare_qwen_transformer_from_metadata(
+        model,
+        QwenGenerationConfig {
+            max_new_tokens,
+            max_seq_len: Some(ctx),
+            causal: true,
+            sampling: StreamingSamplingConfig::Argmax,
+        },
+    )?;
+    let mut budget = MemoryBudget::unbounded();
+
+    println!("Qwen3.5 chat (greedy, re-prefill per turn). Commands: /reset, /exit.\n");
+    let stdin = io::stdin();
+    let mut handle = stdin.lock();
+    let mut convo = String::new();
+    loop {
+        print!("you> ");
+        io::stdout().flush().ok();
+        let mut line = String::new();
+        if handle.read_line(&mut line)? == 0 {
+            println!();
+            break;
+        }
+        let msg = line.trim();
+        if msg.is_empty() {
+            continue;
+        }
+        match msg {
+            "/exit" | "/quit" | "exit" | "quit" => break,
+            "/reset" => {
+                convo.clear();
+                println!("[new conversation]");
+                continue;
+            }
+            _ => {}
+        }
+
+        convo.push_str(&format!(
+            "<|im_start|>user\n{msg}<|im_end|>\n<|im_start|>assistant\n"
+        ));
+        let ids = tokenizer.encode(&convo)?;
+        print!("bot> ");
+        io::stdout().flush().ok();
+
+        let started = Instant::now();
+        let mut generated: Vec<usize> = Vec::new();
+        let mut shown = String::new();
+        qwen_generate_from_model(model, &prepared, &ids, &mut budget, &mut |tok| {
+            if stop.contains(&tok) {
+                return false;
+            }
+            generated.push(tok);
+            if let Ok(full) = tokenizer.decode(&generated) {
+                if full.starts_with(&shown) && full.len() > shown.len() {
+                    print!("{}", &full[shown.len()..]);
+                    io::stdout().flush().ok();
+                    shown = full;
+                }
+            }
+            true
+        })?;
+        let dt = started.elapsed().as_secs_f64();
+        println!(
+            "\n[{} tokens, {:.2} tok/s]",
+            generated.len(),
+            generated.len() as f64 / dt.max(1e-9)
+        );
+        if let Ok(reply) = tokenizer.decode(&generated) {
+            convo.push_str(&reply);
+            convo.push_str("<|im_end|>\n");
+        }
+    }
+    println!("bye!");
+    Ok(())
 }
 
 /// Print the streaming reply suffix: re-decode the whole reply each token (so

@@ -49,3 +49,9 @@ __pycache__/
 
 # Logs
 *.log
+
+# Qwen3.5 parity dev tooling (reference venv + transient activation dumps)
+/.qwenref/
+qwen_*_dump.txt
+qwen_rust_dump.txt
+qwen_l0_rust.txt

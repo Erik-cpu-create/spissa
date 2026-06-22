@@ -73,12 +73,41 @@ struct HuggingFaceModelConfig {
     /// Multimodal checkpoints (e.g. Gemma 3 4B = `Gemma3ForConditionalGeneration`)
     /// nest the language-model architecture params under `text_config`.
     text_config: Option<Box<HuggingFaceModelConfig>>,
+    // --- Qwen3.5 / Qwen3-Next hybrid linear-attention fields ---
+    /// Per-layer operator schedule, e.g. `["linear_attention", …, "full_attention"]`.
+    layer_types: Option<Vec<String>>,
+    /// Period of the full-attention interleave (Qwen3.5: every 4th layer is full attn).
+    full_attention_interval: Option<u64>,
+    /// Gated-DeltaNet (linear attention) head dims / counts and depthwise short-conv kernel.
+    linear_key_head_dim: Option<u64>,
+    linear_value_head_dim: Option<u64>,
+    linear_num_key_heads: Option<u64>,
+    linear_num_value_heads: Option<u64>,
+    linear_conv_kernel_dim: Option<u64>,
+    /// Gated full-attention emits a per-head output gate from `q_proj` (doubles its width).
+    attn_output_gate: Option<bool>,
+    /// Fraction of `head_dim` that RoPE rotates (Qwen3.5: 0.25 → 64 of 256). May be flat
+    /// or nested under `rope_parameters`.
+    partial_rotary_factor: Option<f32>,
+    /// Qwen nests rope params (theta, partial rotary, mrope sections) under `rope_parameters`.
+    rope_parameters: Option<RopeParameters>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct RopeScalingConfig {
     factor: Option<f32>,
     rope_type: Option<String>,
+}
+
+/// Qwen3.5 `rope_parameters` block: rope theta, partial-rotary fraction, and the
+/// multimodal-RoPE section split (which collapses to ordinary RoPE for text-only).
+#[derive(Debug, Clone, Deserialize)]
+struct RopeParameters {
+    rope_theta: Option<f32>,
+    partial_rotary_factor: Option<f32>,
+    mrope_section: Option<Vec<u64>>,
+    #[allow(dead_code)]
+    mrope_interleaved: Option<bool>,
 }
 
 pub fn read_model_config_metadata(path: impl AsRef<Path>) -> Result<ModelConfigMetadata> {
@@ -113,7 +142,9 @@ pub fn model_config_metadata_from_json_str(json: &str) -> Result<ModelConfigMeta
         vocab_size: dims.vocab_size,
         rms_norm_eps: dims.rms_norm_eps,
         num_key_value_heads: dims.num_key_value_heads,
-        rope_theta: dims.rope_theta,
+        rope_theta: dims
+            .rope_theta
+            .or_else(|| dims.rope_parameters.as_ref().and_then(|r| r.rope_theta)),
         tie_word_embeddings: dims.tie_word_embeddings.or(config.tie_word_embeddings),
         head_dim: dims.head_dim,
         query_pre_attn_scalar: dims.query_pre_attn_scalar,
@@ -134,6 +165,22 @@ pub fn model_config_metadata_from_json_str(json: &str) -> Result<ModelConfigMeta
                     .unwrap_or(false)
             })
             .and_then(|scaling| scaling.factor),
+        // --- Qwen3.5 / Qwen3-Next hybrid linear-attention fields ---
+        layer_types: dims.layer_types.clone(),
+        full_attention_interval: dims.full_attention_interval,
+        linear_key_head_dim: dims.linear_key_head_dim,
+        linear_value_head_dim: dims.linear_value_head_dim,
+        linear_num_key_heads: dims.linear_num_key_heads,
+        linear_num_value_heads: dims.linear_num_value_heads,
+        linear_conv_kernel_dim: dims.linear_conv_kernel_dim,
+        attn_output_gate: dims.attn_output_gate,
+        partial_rotary_factor: dims
+            .partial_rotary_factor
+            .or_else(|| dims.rope_parameters.as_ref().and_then(|r| r.partial_rotary_factor)),
+        mrope_section: dims
+            .rope_parameters
+            .as_ref()
+            .and_then(|r| r.mrope_section.clone()),
     })
 }
 
@@ -150,6 +197,12 @@ fn normalize_architecture_type(value: &str) -> String {
         "gemma2".to_string()
     } else if normalized.contains("gemma") {
         "gemma".to_string()
+    } else if normalized.contains("qwen3") {
+        // "qwen3_5", "qwen3_next", "qwen3_5forconditionalgeneration" → the hybrid
+        // Gated-DeltaNet + gated-attention adapter.
+        "qwen3".to_string()
+    } else if normalized.contains("qwen") {
+        "qwen".to_string()
     } else {
         normalized
     }
