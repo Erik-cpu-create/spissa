@@ -44,7 +44,7 @@ impl SpissaHeader {
     /// Create a new header with default values
     pub fn new() -> Self {
         Self {
-            magic: *crate::RLLM_MAGIC,
+            magic: *crate::SPSA_MAGIC,
             version: crate::RLLM_VERSION,
             endian: 0, // little-endian
             reserved: [0; 3],
@@ -57,7 +57,7 @@ impl SpissaHeader {
 
     /// Validate the header
     pub fn validate(&self) -> crate::error::Result<()> {
-        if &self.magic != crate::RLLM_MAGIC {
+        if &self.magic != crate::SPSA_MAGIC {
             return Err(crate::error::ContainerError::InvalidMagic);
         }
         if self.version != crate::RLLM_VERSION {
@@ -130,7 +130,7 @@ mod tests {
         let bytes = header.to_bytes();
         let decoded = SpissaHeader::from_bytes(&bytes);
 
-        assert_eq!(decoded.magic, *crate::RLLM_MAGIC);
+        assert_eq!(decoded.magic, *crate::SPSA_MAGIC);
         assert_eq!(decoded.version, crate::RLLM_VERSION);
         assert_eq!(decoded.endian, 0);
         assert_eq!(decoded.metadata_offset, 1024);

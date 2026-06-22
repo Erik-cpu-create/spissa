@@ -363,7 +363,7 @@ mod tests {
         let mut file = File::open(&temp).unwrap();
         let mut buf = [0u8; 4];
         file.read_exact(&mut buf).unwrap();
-        assert_eq!(&buf, b"RLLM");
+        assert_eq!(&buf, b"SPSA");
 
         std::fs::remove_file(&temp).ok();
     }

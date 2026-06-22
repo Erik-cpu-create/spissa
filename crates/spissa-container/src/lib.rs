@@ -19,8 +19,9 @@ pub use metadata::*;
 pub use reader::*;
 pub use writer::*;
 
-/// Magic bytes for .spsa files: "RLLM"
-pub const RLLM_MAGIC: &[u8; 4] = b"RLLM";
+/// Magic bytes for `.spsa` files: "SPSA". (Pre-rebrand files used "RLLM"; existing models
+/// were patched in place — first 4 bytes only — so no legacy magic is accepted on read.)
+pub const SPSA_MAGIC: &[u8; 4] = b"SPSA";
 
 /// Current format version
 pub const RLLM_VERSION: u32 = 1;
