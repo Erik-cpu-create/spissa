@@ -365,6 +365,19 @@ pub fn select_top_indices_by_value(values: &[f32], limit: usize) -> Vec<usize> {
 /// Uses a tiny in-house xorshift PRNG so tests and prompts can be reproduced
 /// without adding a random-number dependency.
 pub fn sample_top_p(logits: &[f32], temperature: f32, top_p: f32, seed: u64) -> Result<usize> {
+    sample_top_k_top_p(logits, temperature, 0, top_p, seed)
+}
+
+/// Sample with temperature, then top-k truncation, then top-p (nucleus) — the standard
+/// filter chain. `top_k == 0` disables the k-cap; `top_p >= 1.0` keeps the full tail.
+/// Falls back to greedy argmax when `temperature <= 0`.
+pub fn sample_top_k_top_p(
+    logits: &[f32],
+    temperature: f32,
+    top_k: usize,
+    top_p: f32,
+    seed: u64,
+) -> Result<usize> {
     if logits.is_empty() {
         return Err(RuntimeError::InvalidTensorData(
             "cannot sample from empty logits".to_string(),
@@ -384,6 +397,12 @@ pub fn sample_top_p(logits: &[f32], temperature: f32, top_p: f32, seed: u64) -> 
     let mut indexed: Vec<(usize, f32)> = probs.into_iter().enumerate().collect();
     indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+    // top-k: keep only the k highest-probability tokens before the nucleus cut.
+    if top_k > 0 && top_k < indexed.len() {
+        indexed.truncate(top_k);
+    }
+
+    // top-p: smallest prefix of the (already truncated) set whose cumulative prob >= top_p.
     let mut nucleus = Vec::new();
     let mut cumulative = 0.0f32;
     for item in indexed {
@@ -394,6 +413,7 @@ pub fn sample_top_p(logits: &[f32], temperature: f32, top_p: f32, seed: u64) -> 
         }
     }
 
+    // Draw uniformly within the kept mass (`total` renormalizes the truncated nucleus).
     let total = nucleus.iter().map(|(_, p)| *p).sum::<f32>();
     let mut threshold = seeded_unit_f32(seed) * total;
     for (idx, prob) in nucleus {
@@ -404,6 +424,20 @@ pub fn sample_top_p(logits: &[f32], temperature: f32, top_p: f32, seed: u64) -> 
     }
 
     sample_argmax(logits)
+}
+
+/// Penalize recently-emitted tokens (llama.cpp convention): a logit `> 0` is divided by
+/// `penalty`, one `<= 0` is multiplied, so already-seen tokens get pushed down regardless
+/// of sign. `penalty == 1.0` is a no-op. `recent` is the token window to penalize.
+pub fn apply_repeat_penalty(logits: &mut [f32], recent: &[usize], penalty: f32) {
+    if penalty == 1.0 {
+        return;
+    }
+    for &tok in recent {
+        if let Some(l) = logits.get_mut(tok) {
+            *l = if *l > 0.0 { *l / penalty } else { *l * penalty };
+        }
+    }
 }
 
 fn seeded_unit_f32(seed: u64) -> f32 {
@@ -566,5 +600,28 @@ mod tests {
         let second = sample_top_p(&logits, 0.8, 0.95, 1234).unwrap();
         assert_eq!(first, second);
         assert!(first < logits.len());
+    }
+
+    #[test]
+    fn sample_top_k_one_collapses_to_argmax() {
+        // top_k = 1 keeps only the highest-prob token, so any seed returns the argmax.
+        let logits = [0.1, 0.2, 2.0, 1.0];
+        for seed in [0u64, 1, 42, 9999] {
+            assert_eq!(sample_top_k_top_p(&logits, 1.0, 1, 1.0, seed).unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn apply_repeat_penalty_pushes_seen_tokens_down() {
+        // Positive logit divided, negative logit multiplied; both move toward less likely.
+        let mut logits = [2.0f32, -2.0, 0.5];
+        apply_repeat_penalty(&mut logits, &[0, 1], 2.0);
+        assert!((logits[0] - 1.0).abs() < 1e-6); // 2.0 / 2.0
+        assert!((logits[1] - -4.0).abs() < 1e-6); // -2.0 * 2.0
+        assert!((logits[2] - 0.5).abs() < 1e-6); // untouched
+        // penalty == 1.0 is a no-op.
+        let mut same = [2.0f32, -2.0, 0.5];
+        apply_repeat_penalty(&mut same, &[0, 1, 2], 1.0);
+        assert_eq!(same, [2.0, -2.0, 0.5]);
     }
 }

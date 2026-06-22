@@ -145,7 +145,23 @@ fn menu_chat() -> Result<()> {
         .with_default(true)
         .prompt()
         .unwrap_or(true);
-    super::chat::run(&model, 2048, 256, false, fast, "llama3", None, 0.0, 0.95, 0)
+    super::chat::run(
+        &model,
+        2048,
+        256,
+        false,
+        fast,
+        "llama3",
+        None,
+        super::chat::SamplingArgs {
+            temp: 0.0,
+            top_p: 0.95,
+            top_k: 0,
+            repeat_penalty: 1.0,
+            repeat_last_n: 64,
+            seed: 0,
+        },
+    )
 }
 
 fn menu_inspect() -> Result<()> {

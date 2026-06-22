@@ -5,7 +5,7 @@ use crate::models::qwen::generate::validate_prepared;
 use crate::models::qwen::model::{
     PreparedQwenTransformer, QwenBuildConfig, QwenLayerKind, QwenLayerParams, QwenLayerTensors,
 };
-use crate::models::qwen::session::QwenSession;
+use crate::models::qwen::session::{QwenSession, SamplingParams};
 use crate::ops::embedding_lookup;
 use crate::{LazyRllmModel, MemoryBudget, Result, RuntimeError, StreamingSamplingConfig};
 use rllm_container::ModelConfigMetadata;
@@ -314,7 +314,7 @@ pub fn qwen_generate_from_model(
     // session can own it (callers that want a persistent multi-turn session build a
     // `QwenSession` directly).
     let max_new = prepared.config.max_new_tokens;
-    let sampling = prepared.config.sampling;
+    let params = SamplingParams::from_streaming(prepared.config.sampling);
     let mut session = QwenSession::new(model, prepared.clone())?;
-    session.generate(model, prompt_token_ids, max_new, sampling, &[], budget, on_token)
+    session.generate(model, prompt_token_ids, max_new, params, &[], budget, on_token)
 }
