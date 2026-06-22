@@ -145,7 +145,7 @@ fn menu_chat() -> Result<()> {
         .with_default(true)
         .prompt()
         .unwrap_or(true);
-    super::chat::run(&model, 2048, 256, false, fast, "llama3", None)
+    super::chat::run(&model, 2048, 256, false, fast, "llama3", None, 0.0, 0.95, 0)
 }
 
 fn menu_inspect() -> Result<()> {
