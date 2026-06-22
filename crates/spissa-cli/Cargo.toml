@@ -1,0 +1,31 @@
+[package]
+name = "spissa-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI for Spissa - Runtime-compressed Local LLM"
+default-run = "spissa"
+
+[[bin]]
+name = "spissa"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { workspace = true }
+inquire = { workspace = true }
+
+# Internal crates
+spissa-container = { path = "../spissa-container" }
+rtc-codec = { path = "../rtc-codec" }
+spissa-import = { path = "../spissa-import" }
+spissa-runtime = { path = "../spissa-runtime" }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

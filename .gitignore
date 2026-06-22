@@ -41,8 +41,11 @@ __pycache__/
 *.so
 *.dylib
 *.pdb
-# Stray scratch executables at repo root (e.g. `rustc test_lut.rs`)
+# Stray scratch executables / large test artifacts at repo root
 /test_lut
+/test
+/gemma3-testnew
+/extreme_rans_probe.py
 
 # Cargo mutants
 **/mutants.out*/

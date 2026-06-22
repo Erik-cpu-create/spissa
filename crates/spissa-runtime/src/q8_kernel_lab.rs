@@ -1,0 +1,2731 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
+use serde::Serialize;
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
+use std::time::Instant;
+
+pub const REE_KERNEL_NAME: &str = "REEDOT-LAB";
+
+#[derive(Debug, Clone, Copy)]
+pub struct Q8KernelBenchConfig {
+    pub batch: usize,
+    pub in_features: usize,
+    pub blocks_per_row: usize,
+    pub out_features: usize,
+    pub iters: usize,
+}
+
+impl Default for Q8KernelBenchConfig {
+    fn default() -> Self {
+        Self {
+            batch: 55,
+            in_features: 2048,
+            blocks_per_row: 64,
+            out_features: 8192,
+            iters: 2000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Q8KernelBenchResult {
+    pub variant: String,
+    pub elapsed_ns: u128,
+    pub checksum: f32,
+    pub max_abs_diff: f32,
+    pub speedup_vs_baseline: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Q8KernelBenchReport {
+    pub ree_kernel: String,
+    pub batch: usize,
+    pub in_features: usize,
+    pub out_features: usize,
+    pub iters: usize,
+    pub results: Vec<Q8KernelBenchResult>,
+}
+
+pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
+    assert!(config.batch > 0);
+    assert!(config.iters > 0);
+    assert_eq!(config.in_features % 32, 0);
+    assert_eq!(config.blocks_per_row, config.in_features / 32);
+
+    let input = deterministic_input(config.batch, config.in_features);
+    let q8 = deterministic_q8_blocks(config.blocks_per_row);
+    let scale = 0.125f32;
+    #[cfg(target_arch = "aarch64")]
+    let prescaled_sidecar = prescaled_sidecar_blocks(&q8, scale);
+
+    let (baseline_ns, baseline_output) = time_variant(config.iters, config.batch, || {
+        baseline_i8_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
+    });
+    let baseline_checksum = checksum(&baseline_output);
+
+    let mut results = Vec::new();
+    results.push(Q8KernelBenchResult {
+        variant: "baseline_i8_dot32_batch4".to_string(),
+        elapsed_ns: baseline_ns,
+        checksum: baseline_checksum,
+        max_abs_diff: 0.0,
+        speedup_vs_baseline: 1.0,
+    });
+
+    for (variant, elapsed_ns, output) in [
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                scaled_f32_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
+            });
+            ("scaled_f32_dot32_batch4", elapsed_ns, output)
+        },
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                scaled_f32_dot32_batch4_runtime(
+                    &q8,
+                    scale,
+                    &input,
+                    config.batch,
+                    config.in_features,
+                )
+            });
+            ("scaled_f32_dot32_batch4_runtime", elapsed_ns, output)
+        },
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                reelane_f32_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
+            });
+            ("reelane_f32_dot32_batch4", elapsed_ns, output)
+        },
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                reflow_i8_scaled_batch4(&q8, scale, &input, config.batch, config.in_features)
+            });
+            ("reeflow_i8_scaled_batch4", elapsed_ns, output)
+        },
+        {
+            let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+                unrolled_i8_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
+            });
+            ("unrolled_i8_dot32_batch4", elapsed_ns, output)
+        },
+    ] {
+        results.push(Q8KernelBenchResult {
+            variant: variant.to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+    }
+
+    // REEDOT-LAB native int8 dot (vdotq_s32) vs the f32 baseline. Activations are
+    // pre-quantized to int8 once (amortized across out_features in real GEMM), so
+    // only the int8 dot is timed. max_abs_diff surfaces the activation-quant error.
+    {
+        let (input_i8, input_scales) = quantize_rows_i8(&input, config.batch, config.in_features);
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reedot_i8_vdot(
+                &q8,
+                scale,
+                &input_i8,
+                &input_scales,
+                config.batch,
+                config.in_features,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reedot_i8_vdot".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reevec_neon_f32_dot32_batch4(&q8, scale, &input, config.batch, config.in_features)
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reevec_neon_f32_dot32_batch4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reecast_neon_scale_batch4(&q8, scale, &input, config.batch, config.in_features)
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reecast_neon_scale_batch4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reewide_neon_f32_dot32_batch8(&q8, scale, &input, config.batch, config.in_features)
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reewide_neon_f32_dot32_batch8".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reeduo_neon_block64_batch4(&q8, scale, &input, config.batch, config.in_features)
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reeduo_neon_block64_batch4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reeside_prescaled_f32_batch4(
+                &prescaled_sidecar,
+                &input,
+                config.batch,
+                config.in_features,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reeside_prescaled_f32_batch4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch, || {
+            reetail_neon_tail3_batch4(&q8, scale, &input, config.batch, config.in_features)
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reetail_neon_tail3_batch4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&baseline_output, &output),
+            speedup_vs_baseline: baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        let q8_pair = deterministic_q8_row_pair_blocks(config.blocks_per_row);
+        let (output2_baseline_ns, output2_baseline) =
+            time_variant(config.iters, config.batch * 2, || {
+                baseline_i8_dot32_output2_batch4(
+                    &q8_pair,
+                    scale,
+                    &input,
+                    config.batch,
+                    config.in_features,
+                    config.blocks_per_row,
+                )
+            });
+        results.push(Q8KernelBenchResult {
+            variant: "baseline_i8_dot32_output2_batch4".to_string(),
+            elapsed_ns: output2_baseline_ns,
+            checksum: checksum(&output2_baseline),
+            max_abs_diff: 0.0,
+            speedup_vs_baseline: 1.0,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 2, || {
+            reebundle_neon_output2_batch4(
+                &q8_pair,
+                scale,
+                &input,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reebundle_neon_output2_batch4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&output2_baseline, &output),
+            speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 2, || {
+            reefuse_smmla_output2(
+                &q8_pair,
+                scale,
+                &input,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_output2".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&output2_baseline, &output),
+            speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 2, || unsafe {
+            reefuse_smmla_output2_inline(
+                &q8_pair,
+                scale,
+                &input,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_output2_inline".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&output2_baseline, &output),
+            speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        // Packed-panel: pack act + weight outside the timed loop (same convention
+        // as reedot/quantize_rows_i8 — at runtime, weight pre-packs at prep time
+        // and act packs once per matmul, amortized across out_features).
+        let (act_i8, act_scales) = quantize_rows_i8(&input, config.batch, config.in_features);
+        let weight_panel = pack_weight_panel_pair_lab(&q8_pair, config.blocks_per_row);
+        let act_panel = pack_act_panel_pair_lab(&act_i8, config.batch, config.in_features);
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 2, || unsafe {
+            reefuse_smmla_panel_output2(
+                &weight_panel,
+                &q8_pair,
+                &act_panel,
+                &act_i8,
+                &act_scales,
+                scale,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output2".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&output2_baseline, &output),
+            speedup_vs_baseline: output2_baseline_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        // ILP test (R123): output4 produces 4 output rows with 2 independent
+        // smmla accumulator chains. Honest comparison = the SAME 4 rows via the
+        // current output2 panel run twice. Both pack outside the timed loop.
+        let q8_quad = deterministic_q8_row_quad_blocks(config.blocks_per_row);
+        let quad_pair_bytes = config.blocks_per_row * 2 * 34;
+        let weight_panel0 = pack_weight_panel_pair_lab(&q8_quad[..quad_pair_bytes], config.blocks_per_row);
+        let weight_panel1 = pack_weight_panel_pair_lab(&q8_quad[quad_pair_bytes..], config.blocks_per_row);
+
+        // Reference 4-row output = baseline on each pair, interleaved [t][w0..w3].
+        let ref_p0 = baseline_i8_dot32_output2_batch4(
+            &q8_quad[..quad_pair_bytes], scale, &input, config.batch, config.in_features, config.blocks_per_row,
+        );
+        let ref_p1 = baseline_i8_dot32_output2_batch4(
+            &q8_quad[quad_pair_bytes..], scale, &input, config.batch, config.in_features, config.blocks_per_row,
+        );
+        let mut ref4 = vec![0f32; config.batch * 4];
+        for t in 0..config.batch {
+            ref4[t * 4] = ref_p0[t * 2];
+            ref4[t * 4 + 1] = ref_p0[t * 2 + 1];
+            ref4[t * 4 + 2] = ref_p1[t * 2];
+            ref4[t * 4 + 3] = ref_p1[t * 2 + 1];
+        }
+
+        // Honest 4-row baseline: the current panel kernel run twice.
+        let (output2x2_ns, _o) = time_variant(config.iters, config.batch * 4, || unsafe {
+            let a = reefuse_smmla_panel_output2(
+                &weight_panel0, &q8_quad[..quad_pair_bytes], &act_panel, &act_i8, &act_scales,
+                scale, config.batch, config.in_features, config.blocks_per_row,
+            );
+            let b = reefuse_smmla_panel_output2(
+                &weight_panel1, &q8_quad[quad_pair_bytes..], &act_panel, &act_i8, &act_scales,
+                scale, config.batch, config.in_features, config.blocks_per_row,
+            );
+            [a, b].concat()
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output2_x2(4rows)".to_string(),
+            elapsed_ns: output2x2_ns,
+            checksum: 0.0,
+            max_abs_diff: 0.0,
+            speedup_vs_baseline: 1.0,
+        });
+
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 4, || unsafe {
+            reefuse_smmla_panel_output4(
+                &weight_panel0, &weight_panel1, &q8_quad, &act_panel, &act_i8, &act_scales,
+                scale, config.batch, config.in_features, config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output4".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&ref4, &output),
+            speedup_vs_baseline: output2x2_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+
+        // output8: 4 independent accumulator chains. Honest 8-row baseline = the
+        // current output2 panel run four times.
+        let q8_oct = deterministic_q8_row_oct_blocks(config.blocks_per_row);
+        let pb = config.blocks_per_row * 2 * 34;
+        let wp: Vec<Vec<i8>> = (0..4)
+            .map(|i| pack_weight_panel_pair_lab(&q8_oct[i * pb..(i + 1) * pb], config.blocks_per_row))
+            .collect();
+        // Reference 8-row output via baseline on each pair, interleaved.
+        let mut ref8 = vec![0f32; config.batch * 8];
+        for i in 0..4 {
+            let rp = baseline_i8_dot32_output2_batch4(
+                &q8_oct[i * pb..(i + 1) * pb], scale, &input, config.batch, config.in_features, config.blocks_per_row,
+            );
+            for t in 0..config.batch {
+                ref8[t * 8 + i * 2] = rp[t * 2];
+                ref8[t * 8 + i * 2 + 1] = rp[t * 2 + 1];
+            }
+        }
+        let (output2x4_ns, _o) = time_variant(config.iters, config.batch * 8, || unsafe {
+            let mut v = Vec::new();
+            for i in 0..4 {
+                v.push(reefuse_smmla_panel_output2(
+                    &wp[i], &q8_oct[i * pb..(i + 1) * pb], &act_panel, &act_i8, &act_scales,
+                    scale, config.batch, config.in_features, config.blocks_per_row,
+                ));
+            }
+            v.concat()
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output2_x4(8rows)".to_string(),
+            elapsed_ns: output2x4_ns,
+            checksum: 0.0,
+            max_abs_diff: 0.0,
+            speedup_vs_baseline: 1.0,
+        });
+        let (elapsed_ns, output) = time_variant(config.iters, config.batch * 8, || unsafe {
+            reefuse_smmla_panel_output8(
+                &wp[0], &wp[1], &wp[2], &wp[3], &q8_oct, &act_panel, &act_i8, &act_scales,
+                scale, config.batch, config.in_features, config.blocks_per_row,
+            )
+        });
+        results.push(Q8KernelBenchResult {
+            variant: "reefuse_smmla_panel_output8".to_string(),
+            elapsed_ns,
+            checksum: checksum(&output),
+            max_abs_diff: max_abs_diff(&ref8, &output),
+            speedup_vs_baseline: output2x4_ns as f64 / elapsed_ns.max(1) as f64,
+        });
+    }
+
+    if config.batch == 1 {
+        let (baseline_batch1_ns, baseline_batch1_output) = time_variant(config.iters, 1, || {
+            baseline_i8_dot32_batch1_row(&q8, scale, &input, config.in_features)
+        });
+
+        results.push(Q8KernelBenchResult {
+            variant: "baseline_i8_dot32_batch1_row".to_string(),
+            elapsed_ns: baseline_batch1_ns,
+            checksum: checksum(&baseline_batch1_output),
+            max_abs_diff: 0.0,
+            speedup_vs_baseline: 1.0,
+        });
+
+        let (scaled_batch1_ns, scaled_batch1_output) = time_variant(config.iters, 1, || {
+            scaled_f32_dot32_batch1_row(&q8, scale, &input, config.in_features)
+        });
+
+        results.push(Q8KernelBenchResult {
+            variant: "scaled_f32_dot32_batch1_row".to_string(),
+            elapsed_ns: scaled_batch1_ns,
+            checksum: checksum(&scaled_batch1_output),
+            max_abs_diff: max_abs_diff(&baseline_batch1_output, &scaled_batch1_output),
+            speedup_vs_baseline: baseline_batch1_ns as f64 / scaled_batch1_ns.max(1) as f64,
+        });
+
+        // R128b: 4-row int8 sdot — per-row-per-block baseline (R128a structure)
+        // vs single-asm 4-row ILP (independent chains + shared activation load).
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            let blocks = config.blocks_per_row;
+            let q8_quad = deterministic_q8_row_quad_blocks(blocks);
+            // Per-32-block int8 quantization of the activation (runtime convention).
+            let mut a_i8 = vec![0i8; config.in_features];
+            let mut a_scales = vec![0f32; blocks];
+            for b in 0..blocks {
+                let seg = &input[b * 32..b * 32 + 32];
+                let amax = seg.iter().fold(0f32, |m, &v| m.max(v.abs()));
+                let (sc, inv) = if amax > 0.0 {
+                    (amax / 127.0, 127.0 / amax)
+                } else {
+                    (0.0, 0.0)
+                };
+                a_scales[b] = sc;
+                for k in 0..32 {
+                    a_i8[b * 32 + k] = (seg[k] * inv).round().clamp(-127.0, 127.0) as i8;
+                }
+            }
+            let (base_ns, base_out) = time_variant(config.iters, 4, || unsafe {
+                r128_x4_baseline(&q8_quad, scale, &a_i8, &a_scales, blocks)
+            });
+            results.push(Q8KernelBenchResult {
+                variant: "r128_x4_baseline_sdot".to_string(),
+                elapsed_ns: base_ns,
+                checksum: checksum(&base_out),
+                max_abs_diff: 0.0,
+                speedup_vs_baseline: 1.0,
+            });
+            let (ilp_ns, ilp_out) = time_variant(config.iters, 4, || unsafe {
+                r128_x4_ilp(&q8_quad, scale, &a_i8, &a_scales, blocks)
+            });
+            results.push(Q8KernelBenchResult {
+                variant: "r128_x4_ilp_sdot".to_string(),
+                elapsed_ns: ilp_ns,
+                checksum: checksum(&ilp_out),
+                max_abs_diff: max_abs_diff(&base_out, &ilp_out),
+                speedup_vs_baseline: base_ns as f64 / ilp_ns.max(1) as f64,
+            });
+
+            // R129: 4-output interleaved GEMV (no per-block addv, 4 outputs/sdot).
+            let (w_packed, w_scales_packed) = pack_w_interleaved_x4(&q8_quad, blocks);
+            let (r129_ns, r129_out) = time_variant(config.iters, 4, || unsafe {
+                r129_x4_interleaved(&w_packed, &w_scales_packed, &a_i8, &a_scales, blocks)
+            });
+            results.push(Q8KernelBenchResult {
+                variant: "r129_x4_interleaved".to_string(),
+                elapsed_ns: r129_ns,
+                checksum: checksum(&r129_out),
+                max_abs_diff: max_abs_diff(&base_out, &r129_out),
+                speedup_vs_baseline: base_ns as f64 / r129_ns.max(1) as f64,
+            });
+            let (r129b_ns, r129b_out) = time_variant(config.iters, 4, || unsafe {
+                r129_x4_interleaved_2t(&w_packed, &w_scales_packed, &a_i8, &a_scales, blocks)
+            });
+            results.push(Q8KernelBenchResult {
+                variant: "r129_x4_interleaved_2t".to_string(),
+                elapsed_ns: r129b_ns,
+                checksum: checksum(&r129b_out),
+                max_abs_diff: max_abs_diff(&base_out, &r129b_out),
+                speedup_vs_baseline: base_ns as f64 / r129b_ns.max(1) as f64,
+            });
+        }
+    }
+
+    Q8KernelBenchReport {
+        ree_kernel: REE_KERNEL_NAME.to_string(),
+        batch: config.batch,
+        in_features: config.in_features,
+        out_features: config.out_features,
+        iters: config.iters,
+        results,
+    }
+}
+
+/// Quantize each activation row to int8 with a per-row absmax scale. In a real
+/// prefill GEMM this runs once and is reused across every output feature, so the
+/// REEFUSE-Q8-I8MM-LAB: int8 matrix-multiply over one 32-element weight block for
+/// a 2x2 tile (2 token rows x 2 output rows) using ARM `smmla` (i8mm). Each `smmla`
+/// multiplies a 2x8 int8 by a 2x8 int8 into a 2x2 int32 accumulator
+/// (`Vd[i][j] += An[i]·Bm[j]`); four substeps cover the 32-element block. The four
+/// input pointers each address the block start and are post-incremented by 8.
+/// Returns `[t0·w0, t0·w1, t1·w0, t1·w1]` accumulated over the 32 elements.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+unsafe fn smmla_block32(
+    mut a0: *const i8,
+    mut a1: *const i8,
+    mut w0: *const i8,
+    mut w1: *const i8,
+) -> [i32; 4] {
+    use std::arch::asm;
+    let mut out = [0i32; 4];
+    asm!(
+        "movi v4.4s, #0",
+        "ld1 {{v0.d}}[0], [{a0}], #8",
+        "ld1 {{v0.d}}[1], [{a1}], #8",
+        "ld1 {{v1.d}}[0], [{w0}], #8",
+        "ld1 {{v1.d}}[1], [{w1}], #8",
+        "smmla v4.4s, v0.16b, v1.16b",
+        "ld1 {{v0.d}}[0], [{a0}], #8",
+        "ld1 {{v0.d}}[1], [{a1}], #8",
+        "ld1 {{v1.d}}[0], [{w0}], #8",
+        "ld1 {{v1.d}}[1], [{w1}], #8",
+        "smmla v4.4s, v0.16b, v1.16b",
+        "ld1 {{v0.d}}[0], [{a0}], #8",
+        "ld1 {{v0.d}}[1], [{a1}], #8",
+        "ld1 {{v1.d}}[0], [{w0}], #8",
+        "ld1 {{v1.d}}[1], [{w1}], #8",
+        "smmla v4.4s, v0.16b, v1.16b",
+        "ld1 {{v0.d}}[0], [{a0}], #8",
+        "ld1 {{v0.d}}[1], [{a1}], #8",
+        "ld1 {{v1.d}}[0], [{w0}], #8",
+        "ld1 {{v1.d}}[1], [{w1}], #8",
+        "smmla v4.4s, v0.16b, v1.16b",
+        "st1 {{v4.4s}}, [{out}]",
+        a0 = inout(reg) a0,
+        a1 = inout(reg) a1,
+        w0 = inout(reg) w0,
+        w1 = inout(reg) w1,
+        out = in(reg) out.as_mut_ptr(),
+        out("v0") _, out("v1") _, out("v4") _,
+    );
+    let _ = (a0, a1, w0, w1);
+    out
+}
+
+/// REEFUSE-Q8-I8MM-LAB output2: 2 output rows x batch via `smmla`, activations
+/// pre-quantized to int8 once (per-row scale), int32 accumulated per 32-block then
+/// scaled. Scalar fallback covers the odd token tail and non-i8mm CPUs.
+#[cfg(target_arch = "aarch64")]
+pub fn reefuse_smmla_output2(
+    q8_pair: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let (act_i8, act_scales) = quantize_rows_i8(input, batch, in_features);
+    let mut output = vec![0.0f32; batch * 2];
+    let row1_base = blocks_per_row * 34;
+    let use_i8mm = std::arch::is_aarch64_feature_detected!("i8mm");
+    let mut t = 0usize;
+    while t + 2 <= batch && use_i8mm {
+        let s_t = scale * act_scales[t];
+        let s_t1 = scale * act_scales[t + 1];
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let w0 = q8_pair[b * 34 + 2..].as_ptr() as *const i8;
+            let w1 = q8_pair[row1_base + b * 34 + 2..].as_ptr() as *const i8;
+            let a0 = act_i8[t * in_features + in_feat..].as_ptr();
+            let a1 = act_i8[(t + 1) * in_features + in_feat..].as_ptr();
+            let tile = unsafe { smmla_block32(a0, a1, w0, w1) };
+            output[t * 2] += s_t * tile[0] as f32;
+            output[t * 2 + 1] += s_t * tile[1] as f32;
+            output[(t + 1) * 2] += s_t1 * tile[2] as f32;
+            output[(t + 1) * 2 + 1] += s_t1 * tile[3] as f32;
+        }
+        t += 2;
+    }
+    // Scalar int8 tail (odd token or non-i8mm CPU).
+    while t < batch {
+        let s_t = scale * act_scales[t];
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let qs0 = &q8_pair[b * 34 + 2..b * 34 + 34];
+            let qs1 = &q8_pair[row1_base + b * 34 + 2..row1_base + b * 34 + 34];
+            let mut d0 = 0i32;
+            let mut d1 = 0i32;
+            for k in 0..32 {
+                let a = act_i8[t * in_features + in_feat + k] as i32;
+                d0 += (qs0[k] as i8 as i32) * a;
+                d1 += (qs1[k] as i8 as i32) * a;
+            }
+            output[t * 2] += s_t * d0 as f32;
+            output[t * 2 + 1] += s_t * d1 as f32;
+        }
+        t += 1;
+    }
+    output
+}
+
+/// REEFUSE-Q8-I8MM-LAB inline: the R116 kernel restructured to remove the
+/// per-block overhead. The whole K loop lives in ONE `target_feature` function;
+/// the `smmla` asm is emitted inline per block (no function call), its 2x2 int32
+/// tile is read directly into a `vreg` operand (no memory round-trip), and the
+/// per-block scale + f32 accumulation use NEON intrinsics with the output tile
+/// kept register-resident across the block loop.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+pub unsafe fn reefuse_smmla_output2_inline(
+    q8_pair: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let (act_i8, act_scales) = quantize_rows_i8(input, batch, in_features);
+    let mut output = vec![0.0f32; batch * 2];
+    let row1_base = blocks_per_row * 34;
+    let mut t = 0usize;
+    while t + 2 <= batch {
+        let s_t = scale * act_scales[t];
+        let s_t1 = scale * act_scales[t + 1];
+        let scale_vec = vld1q_f32([s_t, s_t, s_t1, s_t1].as_ptr());
+        let mut acc_f = vdupq_n_f32(0.0);
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let mut a0 = act_i8.as_ptr().add(t * in_features + in_feat);
+            let mut a1 = act_i8.as_ptr().add((t + 1) * in_features + in_feat);
+            let mut w0 = q8_pair.as_ptr().add(b * 34 + 2) as *const i8;
+            let mut w1 = q8_pair.as_ptr().add(row1_base + b * 34 + 2) as *const i8;
+            let tile: int32x4_t;
+            std::arch::asm!(
+                "movi {acc:v}.4s, #0",
+                "ld1 {{v0.d}}[0], [{a0}], #8",
+                "ld1 {{v0.d}}[1], [{a1}], #8",
+                "ld1 {{v1.d}}[0], [{w0}], #8",
+                "ld1 {{v1.d}}[1], [{w1}], #8",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.d}}[0], [{a0}], #8",
+                "ld1 {{v0.d}}[1], [{a1}], #8",
+                "ld1 {{v1.d}}[0], [{w0}], #8",
+                "ld1 {{v1.d}}[1], [{w1}], #8",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.d}}[0], [{a0}], #8",
+                "ld1 {{v0.d}}[1], [{a1}], #8",
+                "ld1 {{v1.d}}[0], [{w0}], #8",
+                "ld1 {{v1.d}}[1], [{w1}], #8",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.d}}[0], [{a0}], #8",
+                "ld1 {{v0.d}}[1], [{a1}], #8",
+                "ld1 {{v1.d}}[0], [{w0}], #8",
+                "ld1 {{v1.d}}[1], [{w1}], #8",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                acc = out(vreg) tile,
+                a0 = inout(reg) a0,
+                a1 = inout(reg) a1,
+                w0 = inout(reg) w0,
+                w1 = inout(reg) w1,
+                out("v0") _,
+                out("v1") _,
+            );
+            let _ = (a0, a1, w0, w1);
+            acc_f = vfmaq_f32(acc_f, vcvtq_f32_s32(tile), scale_vec);
+        }
+        output[t * 2] = vgetq_lane_f32(acc_f, 0);
+        output[t * 2 + 1] = vgetq_lane_f32(acc_f, 1);
+        output[(t + 1) * 2] = vgetq_lane_f32(acc_f, 2);
+        output[(t + 1) * 2 + 1] = vgetq_lane_f32(acc_f, 3);
+        t += 2;
+    }
+    while t < batch {
+        let s_t = scale * act_scales[t];
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let qs0 = &q8_pair[b * 34 + 2..b * 34 + 34];
+            let qs1 = &q8_pair[row1_base + b * 34 + 2..row1_base + b * 34 + 34];
+            let mut d0 = 0i32;
+            let mut d1 = 0i32;
+            for k in 0..32 {
+                let a = act_i8[t * in_features + in_feat + k] as i32;
+                d0 += (qs0[k] as i8 as i32) * a;
+                d1 += (qs1[k] as i8 as i32) * a;
+            }
+            output[t * 2] += s_t * d0 as f32;
+            output[t * 2 + 1] += s_t * d1 as f32;
+        }
+        t += 1;
+    }
+    output
+}
+
+/// REEFUSE-Q8-I8MM-LAB packed-panel: pre-pack a single weight-row pair into
+/// contiguous int8 panels so the kernel can use 16-byte `vld1q` loads instead of
+/// 8-byte lane loads (R117's bottleneck). Per 32-element K-block: 4 segments of
+/// 16 bytes = [row0_K0..7 | row1_K0..7] contiguous. Skips the per-block fp16
+/// scale prefix (lab uses a single scalar `scale` parameter, matching the other
+/// output2 variants).
+#[cfg(target_arch = "aarch64")]
+fn pack_weight_panel_pair_lab(q8_pair: &[u8], blocks_per_row: usize) -> Vec<i8> {
+    let row1_base = blocks_per_row * 34;
+    let mut panel = vec![0i8; 2 * blocks_per_row * 32];
+    for b in 0..blocks_per_row {
+        for seg in 0..4 {
+            let dst = b * 64 + seg * 16;
+            let src_r0 = b * 34 + 2 + seg * 8;
+            let src_r1 = row1_base + b * 34 + 2 + seg * 8;
+            for k in 0..8 {
+                panel[dst + k] = q8_pair[src_r0 + k] as i8;
+                panel[dst + 8 + k] = q8_pair[src_r1 + k] as i8;
+            }
+        }
+    }
+    panel
+}
+
+/// Pack batch activations into pair-major panels so each kernel iteration loads
+/// 16 contiguous bytes `[t0_K0..7 | t1_K0..7]`. Odd-batch tail handled by the
+/// caller via scalar fallback over the raw `act_i8` (one row of ~1/55 of work).
+#[cfg(target_arch = "aarch64")]
+fn pack_act_panel_pair_lab(act_i8: &[i8], batch: usize, in_features: usize) -> Vec<i8> {
+    let pairs = batch / 2;
+    let blocks = in_features / 32;
+    let mut panel = vec![0i8; pairs * 2 * in_features];
+    for p in 0..pairs {
+        let r0 = p * 2;
+        let r1 = r0 + 1;
+        for b in 0..blocks {
+            for seg in 0..4 {
+                let dst = p * 2 * in_features + b * 64 + seg * 16;
+                let src_r0 = r0 * in_features + b * 32 + seg * 8;
+                let src_r1 = r1 * in_features + b * 32 + seg * 8;
+                for k in 0..8 {
+                    panel[dst + k] = act_i8[src_r0 + k];
+                    panel[dst + 8 + k] = act_i8[src_r1 + k];
+                }
+            }
+        }
+    }
+    panel
+}
+
+/// REEFUSE-Q8-I8MM-LAB packed-panel kernel: one matmul over a (batch x 2) output2
+/// shape using `smmla` with contiguous `vld1q` 16-byte loads from packed panels.
+/// Per K-block (32 lanes): 4 `vld1q` act + 4 `vld1q` weight + 4 `smmla` → 4
+/// int32x4 partial tiles accumulated into the register-resident f32 output.
+/// Each `smmla` produces a 2x2 tile `[t0*w0, t0*w1, t1*w0, t1*w1]` per K-segment;
+/// scaling applies `[s_t0, s_t0, s_t1, s_t1]` once per block via `vfmaq_f32`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+pub unsafe fn reefuse_smmla_panel_output2(
+    weight_panel: &[i8],
+    q8_pair: &[u8],
+    act_panel: &[i8],
+    act_i8: &[i8],
+    act_scales: &[f32],
+    weight_scale: f32,
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let mut output = vec![0f32; batch * 2];
+    let pairs = batch / 2;
+    let act_pair_stride = 2 * in_features;
+    let blocks = blocks_per_row;
+    let row1_base = blocks_per_row * 34;
+
+    for p in 0..pairs {
+        let t0 = p * 2;
+        let t1 = t0 + 1;
+        let s_t0 = weight_scale * act_scales[t0];
+        let s_t1 = weight_scale * act_scales[t1];
+        let scale_arr: [f32; 4] = [s_t0, s_t0, s_t1, s_t1];
+        let scale_vec = vld1q_f32(scale_arr.as_ptr());
+        let mut acc_f = vdupq_n_f32(0.0);
+        let act_pair_base = act_panel.as_ptr().add(p * act_pair_stride);
+
+        for b in 0..blocks {
+            let mut a_ptr = act_pair_base.add(b * 64);
+            let mut w_ptr = weight_panel.as_ptr().add(b * 64);
+            let tile_acc: int32x4_t;
+            std::arch::asm!(
+                "movi {acc:v}.4s, #0",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w}], #16",
+                "smmla {acc:v}.4s, v0.16b, v1.16b",
+                acc = out(vreg) tile_acc,
+                a = inout(reg) a_ptr,
+                w = inout(reg) w_ptr,
+                out("v0") _,
+                out("v1") _,
+            );
+            let _ = (a_ptr, w_ptr);
+            acc_f = vfmaq_f32(acc_f, vcvtq_f32_s32(tile_acc), scale_vec);
+        }
+
+        output[t0 * 2] = vgetq_lane_f32(acc_f, 0);
+        output[t0 * 2 + 1] = vgetq_lane_f32(acc_f, 1);
+        output[t1 * 2] = vgetq_lane_f32(acc_f, 2);
+        output[t1 * 2 + 1] = vgetq_lane_f32(acc_f, 3);
+    }
+
+    // Odd batch tail (single row): scalar int8 dot from raw inputs.
+    if batch & 1 != 0 {
+        let t = batch - 1;
+        let s_t = weight_scale * act_scales[t];
+        for b in 0..blocks {
+            let in_feat = b * 32;
+            let qs0 = &q8_pair[b * 34 + 2..b * 34 + 34];
+            let qs1 = &q8_pair[row1_base + b * 34 + 2..row1_base + b * 34 + 34];
+            let mut d0 = 0i32;
+            let mut d1 = 0i32;
+            for k in 0..32 {
+                let a = act_i8[t * in_features + in_feat + k] as i32;
+                d0 += (qs0[k] as i8 as i32) * a;
+                d1 += (qs1[k] as i8 as i32) * a;
+            }
+            output[t * 2] += s_t * d0 as f32;
+            output[t * 2 + 1] += s_t * d1 as f32;
+        }
+    }
+
+    output
+}
+
+/// REEFUSE-Q8-I8MM-LAB output4: process FOUR output rows (two weight row-pairs)
+/// per batch-pair with TWO independent `smmla` accumulator tiles sharing the
+/// activation load. The two tiles form independent dependency chains, so the
+/// CPU overlaps the ~3-cycle `smmla` latency (output2 serializes 4 `smmla` into
+/// one accumulator). The activation `v0` is loaded once per K-segment and reused
+/// for both weight panels, halving activation loads vs running output2 twice.
+/// Returns `batch * 4` laid out `[t][w0,w1,w2,w3]`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+pub unsafe fn reefuse_smmla_panel_output4(
+    weight_panel0: &[i8], // rows (o0,o1) packed pair-major
+    weight_panel1: &[i8], // rows (o2,o3) packed pair-major
+    q8_quad: &[u8],       // 4 rows of raw q8 blocks, for the odd-batch tail
+    act_panel: &[i8],
+    act_i8: &[i8],
+    act_scales: &[f32],
+    weight_scale: f32,
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let mut output = vec![0f32; batch * 4];
+    let pairs = batch / 2;
+    let act_pair_stride = 2 * in_features;
+    let blocks = blocks_per_row;
+    let row_base = blocks_per_row * 34;
+
+    for p in 0..pairs {
+        let t0 = p * 2;
+        let t1 = t0 + 1;
+        let s_t0 = weight_scale * act_scales[t0];
+        let s_t1 = weight_scale * act_scales[t1];
+        let scale_arr: [f32; 4] = [s_t0, s_t0, s_t1, s_t1];
+        let scale_vec = vld1q_f32(scale_arr.as_ptr());
+        let mut acc_f0 = vdupq_n_f32(0.0);
+        let mut acc_f1 = vdupq_n_f32(0.0);
+        let act_pair_base = act_panel.as_ptr().add(p * act_pair_stride);
+
+        for b in 0..blocks {
+            let mut a_ptr = act_pair_base.add(b * 64);
+            let mut w0_ptr = weight_panel0.as_ptr().add(b * 64);
+            let mut w1_ptr = weight_panel1.as_ptr().add(b * 64);
+            let tile0: int32x4_t;
+            let tile1: int32x4_t;
+            // Two independent accumulator chains (acc0/acc1). Each K-segment loads
+            // the shared activation into v0, then issues one smmla per weight
+            // panel — the two smmla are independent and pipeline together.
+            std::arch::asm!(
+                "movi {acc0:v}.4s, #0",
+                "movi {acc1:v}.4s, #0",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "smmla {acc0:v}.4s, v0.16b, v1.16b",
+                "smmla {acc1:v}.4s, v0.16b, v2.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "smmla {acc0:v}.4s, v0.16b, v1.16b",
+                "smmla {acc1:v}.4s, v0.16b, v2.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "smmla {acc0:v}.4s, v0.16b, v1.16b",
+                "smmla {acc1:v}.4s, v0.16b, v2.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "smmla {acc0:v}.4s, v0.16b, v1.16b",
+                "smmla {acc1:v}.4s, v0.16b, v2.16b",
+                acc0 = out(vreg) tile0,
+                acc1 = out(vreg) tile1,
+                a = inout(reg) a_ptr,
+                w0 = inout(reg) w0_ptr,
+                w1 = inout(reg) w1_ptr,
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+            );
+            let _ = (a_ptr, w0_ptr, w1_ptr);
+            acc_f0 = vfmaq_f32(acc_f0, vcvtq_f32_s32(tile0), scale_vec);
+            acc_f1 = vfmaq_f32(acc_f1, vcvtq_f32_s32(tile1), scale_vec);
+        }
+
+        // tile0 = [t0*w0, t0*w1, t1*w0, t1*w1]; tile1 = [t0*w2, t0*w3, t1*w2, t1*w3]
+        output[t0 * 4] = vgetq_lane_f32(acc_f0, 0);
+        output[t0 * 4 + 1] = vgetq_lane_f32(acc_f0, 1);
+        output[t0 * 4 + 2] = vgetq_lane_f32(acc_f1, 0);
+        output[t0 * 4 + 3] = vgetq_lane_f32(acc_f1, 1);
+        output[t1 * 4] = vgetq_lane_f32(acc_f0, 2);
+        output[t1 * 4 + 1] = vgetq_lane_f32(acc_f0, 3);
+        output[t1 * 4 + 2] = vgetq_lane_f32(acc_f1, 2);
+        output[t1 * 4 + 3] = vgetq_lane_f32(acc_f1, 3);
+    }
+
+    // Odd batch tail (single row): scalar int8 dot from raw inputs, all 4 outputs.
+    if batch & 1 != 0 {
+        let t = batch - 1;
+        let s_t = weight_scale * act_scales[t];
+        for b in 0..blocks {
+            let in_feat = b * 32;
+            let qs0 = &q8_quad[b * 34 + 2..b * 34 + 34];
+            let qs1 = &q8_quad[row_base + b * 34 + 2..row_base + b * 34 + 34];
+            let qs2 = &q8_quad[2 * row_base + b * 34 + 2..2 * row_base + b * 34 + 34];
+            let qs3 = &q8_quad[3 * row_base + b * 34 + 2..3 * row_base + b * 34 + 34];
+            let mut d0 = 0i32;
+            let mut d1 = 0i32;
+            let mut d2 = 0i32;
+            let mut d3 = 0i32;
+            for k in 0..32 {
+                let a = act_i8[t * in_features + in_feat + k] as i32;
+                d0 += (qs0[k] as i8 as i32) * a;
+                d1 += (qs1[k] as i8 as i32) * a;
+                d2 += (qs2[k] as i8 as i32) * a;
+                d3 += (qs3[k] as i8 as i32) * a;
+            }
+            output[t * 4] += s_t * d0 as f32;
+            output[t * 4 + 1] += s_t * d1 as f32;
+            output[t * 4 + 2] += s_t * d2 as f32;
+            output[t * 4 + 3] += s_t * d3 as f32;
+        }
+    }
+
+    output
+}
+
+/// REEFUSE-Q8-I8MM-LAB output8: EIGHT output rows (four weight row-pairs) per
+/// batch-pair with FOUR independent `smmla` accumulator tiles, the activation
+/// `v0` loaded once per K-segment and reused across all four weight panels.
+/// Four independent dependency chains maximize overlap of the `smmla` latency,
+/// and activation loads are amortized 4x. Returns `batch * 8` as `[t][w0..w7]`.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "i8mm")]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn reefuse_smmla_panel_output8(
+    wp0: &[i8],
+    wp1: &[i8],
+    wp2: &[i8],
+    wp3: &[i8],
+    q8_oct: &[u8], // 8 rows of raw q8 blocks, for the odd-batch tail
+    act_panel: &[i8],
+    act_i8: &[i8],
+    act_scales: &[f32],
+    weight_scale: f32,
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let mut output = vec![0f32; batch * 8];
+    let pairs = batch / 2;
+    let act_pair_stride = 2 * in_features;
+    let blocks = blocks_per_row;
+
+    for p in 0..pairs {
+        let t0 = p * 2;
+        let t1 = t0 + 1;
+        let s_t0 = weight_scale * act_scales[t0];
+        let s_t1 = weight_scale * act_scales[t1];
+        let scale_arr: [f32; 4] = [s_t0, s_t0, s_t1, s_t1];
+        let scale_vec = vld1q_f32(scale_arr.as_ptr());
+        let mut acc_f0 = vdupq_n_f32(0.0);
+        let mut acc_f1 = vdupq_n_f32(0.0);
+        let mut acc_f2 = vdupq_n_f32(0.0);
+        let mut acc_f3 = vdupq_n_f32(0.0);
+        let act_pair_base = act_panel.as_ptr().add(p * act_pair_stride);
+
+        for b in 0..blocks {
+            let mut a_ptr = act_pair_base.add(b * 64);
+            let mut w0p = wp0.as_ptr().add(b * 64);
+            let mut w1p = wp1.as_ptr().add(b * 64);
+            let mut w2p = wp2.as_ptr().add(b * 64);
+            let mut w3p = wp3.as_ptr().add(b * 64);
+            let tile0: int32x4_t;
+            let tile1: int32x4_t;
+            let tile2: int32x4_t;
+            let tile3: int32x4_t;
+            std::arch::asm!(
+                "movi {a0:v}.4s, #0",
+                "movi {a1:v}.4s, #0",
+                "movi {a2:v}.4s, #0",
+                "movi {a3:v}.4s, #0",
+                // 4 K-segments; v0 = shared activation, v1..v4 = the 4 weight panels.
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                "ld1 {{v0.16b}}, [{a}], #16",
+                "ld1 {{v1.16b}}, [{w0}], #16",
+                "ld1 {{v2.16b}}, [{w1}], #16",
+                "ld1 {{v3.16b}}, [{w2}], #16",
+                "ld1 {{v4.16b}}, [{w3}], #16",
+                "smmla {a0:v}.4s, v0.16b, v1.16b",
+                "smmla {a1:v}.4s, v0.16b, v2.16b",
+                "smmla {a2:v}.4s, v0.16b, v3.16b",
+                "smmla {a3:v}.4s, v0.16b, v4.16b",
+                a0 = out(vreg) tile0,
+                a1 = out(vreg) tile1,
+                a2 = out(vreg) tile2,
+                a3 = out(vreg) tile3,
+                a = inout(reg) a_ptr,
+                w0 = inout(reg) w0p,
+                w1 = inout(reg) w1p,
+                w2 = inout(reg) w2p,
+                w3 = inout(reg) w3p,
+                out("v0") _,
+                out("v1") _,
+                out("v2") _,
+                out("v3") _,
+                out("v4") _,
+            );
+            let _ = (a_ptr, w0p, w1p, w2p, w3p);
+            acc_f0 = vfmaq_f32(acc_f0, vcvtq_f32_s32(tile0), scale_vec);
+            acc_f1 = vfmaq_f32(acc_f1, vcvtq_f32_s32(tile1), scale_vec);
+            acc_f2 = vfmaq_f32(acc_f2, vcvtq_f32_s32(tile2), scale_vec);
+            acc_f3 = vfmaq_f32(acc_f3, vcvtq_f32_s32(tile3), scale_vec);
+        }
+
+        // tileN = [t0*w(2N), t0*w(2N+1), t1*w(2N), t1*w(2N+1)]
+        for (n, accf) in [acc_f0, acc_f1, acc_f2, acc_f3].into_iter().enumerate() {
+            output[t0 * 8 + n * 2] = vgetq_lane_f32(accf, 0);
+            output[t0 * 8 + n * 2 + 1] = vgetq_lane_f32(accf, 1);
+            output[t1 * 8 + n * 2] = vgetq_lane_f32(accf, 2);
+            output[t1 * 8 + n * 2 + 1] = vgetq_lane_f32(accf, 3);
+        }
+    }
+
+    // Odd batch tail (single row): scalar int8 dot from raw inputs, all 8 outputs.
+    if batch & 1 != 0 {
+        let t = batch - 1;
+        let s_t = weight_scale * act_scales[t];
+        let row_base = blocks_per_row * 34;
+        for b in 0..blocks_per_row {
+            let in_feat = b * 32;
+            let mut d = [0i32; 8];
+            for (o, dacc) in d.iter_mut().enumerate() {
+                let qs = &q8_oct[o * row_base + b * 34 + 2..o * row_base + b * 34 + 34];
+                let mut acc = 0i32;
+                for k in 0..32 {
+                    acc += (qs[k] as i8 as i32) * (act_i8[t * in_features + in_feat + k] as i32);
+                }
+                *dacc = acc;
+            }
+            for (o, dv) in d.iter().enumerate() {
+                output[t * 8 + o] += s_t * *dv as f32;
+            }
+        }
+    }
+
+    output
+}
+
+/// quant cost is amortized; the microbench therefore quantizes outside the timed
+/// loop and times only the int8 dot.
+fn quantize_rows_i8(input: &[f32], batch: usize, in_features: usize) -> (Vec<i8>, Vec<f32>) {
+    let mut q = vec![0i8; batch * in_features];
+    let mut scales = vec![0f32; batch];
+    for row in 0..batch {
+        let r = &input[row * in_features..(row + 1) * in_features];
+        let amax = r.iter().fold(0f32, |m, &v| m.max(v.abs()));
+        let (scale, inv) = if amax > 0.0 {
+            (amax / 127.0, 127.0 / amax)
+        } else {
+            (1.0, 0.0)
+        };
+        scales[row] = scale;
+        for i in 0..in_features {
+            q[row * in_features + i] = (r[i] * inv).round().clamp(-127.0, 127.0) as i8;
+        }
+    }
+    (q, scales)
+}
+
+fn dot_i8_i32_scalar(w: &[u8], x: &[i8]) -> i32 {
+    let mut acc = 0i32;
+    for i in 0..32 {
+        acc += (w[i] as i8 as i32) * (x[i] as i32);
+    }
+    acc
+}
+
+// Native ARM `sdot` (dotprod) over 32 int8 lanes via inline asm. The stable
+// `vdotq_s32` intrinsic is still nightly-gated (`stdarch_neon_dotprod`), but the
+// `sdot` instruction itself is usable on stable through `asm!` once the dotprod
+// target feature is enabled. Caller must verify `dotprod` at runtime.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn dot_i8_i32_vdot(w: &[u8], x: &[i8]) -> i32 {
+    use std::arch::asm;
+    let mut acc: i32;
+    asm!(
+        "movi v4.4s, #0",
+        "ld1 {{v0.16b, v1.16b}}, [{w}]",
+        "ld1 {{v2.16b, v3.16b}}, [{x}]",
+        "sdot v4.4s, v0.16b, v2.16b",
+        "sdot v4.4s, v1.16b, v3.16b",
+        "addv s4, v4.4s",
+        "fmov {acc:w}, s4",
+        w = in(reg) w.as_ptr(),
+        x = in(reg) x.as_ptr(),
+        acc = out(reg) acc,
+        out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+    );
+    acc
+}
+
+/// REEDOT-LAB native int8 dot: int8 weight × int8 activation → int32 accumulate
+/// (NEON `vdotq_s32` dotprod on aarch64, scalar fallback otherwise), with the
+/// weight/activation scales applied once at the end. This is the int8 GEMM
+/// direction llama.cpp/ggml uses; the f32 baselines dequantize to f32 first.
+pub fn reedot_i8_vdot(
+    q8: &[u8],
+    scale: f32,
+    input_i8: &[i8],
+    input_scales: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let blocks = q8.len() / 34;
+    let mut acc = vec![0i32; batch];
+    #[cfg(target_arch = "aarch64")]
+    let use_vdot = std::arch::is_aarch64_feature_detected!("dotprod");
+    for block in 0..blocks {
+        let offset = block * 34;
+        let qs = &q8[offset + 2..offset + 34];
+        let in_feature = block * 32;
+        for row in 0..batch {
+            let x = &input_i8[row * in_features + in_feature..];
+            #[cfg(target_arch = "aarch64")]
+            let d = if use_vdot {
+                unsafe { dot_i8_i32_vdot(qs, x) }
+            } else {
+                dot_i8_i32_scalar(qs, x)
+            };
+            #[cfg(not(target_arch = "aarch64"))]
+            let d = dot_i8_i32_scalar(qs, x);
+            acc[row] += d;
+        }
+    }
+    (0..batch)
+        .map(|r| scale * input_scales[r] * acc[r] as f32)
+        .collect()
+}
+
+fn deterministic_input(batch: usize, in_features: usize) -> Vec<f32> {
+    (0..batch * in_features)
+        .map(|idx| (idx as f32 % 97.0) * 0.00390625 - 0.1875)
+        .collect()
+}
+
+fn deterministic_q8_blocks(blocks_per_row: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(blocks_per_row * 34);
+    for block in 0..blocks_per_row {
+        bytes.extend_from_slice(&crate::tensor::f32_to_fp16(0.125).to_le_bytes());
+        for idx in 0..32 {
+            let q = (((block * 7 + idx * 3) as i16 % 17) - 8) as i8;
+            bytes.push(q as u8);
+        }
+    }
+    bytes
+}
+
+fn deterministic_q8_row_pair_blocks(blocks_per_row: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(blocks_per_row * 2 * 34);
+    for row in 0..2 {
+        for block in 0..blocks_per_row {
+            bytes.extend_from_slice(&crate::tensor::f32_to_fp16(0.125).to_le_bytes());
+            for idx in 0..32 {
+                let q = ((((row + 1) * 11 + block * 7 + idx * 3) as i16 % 17) - 8) as i8;
+                bytes.push(q as u8);
+            }
+        }
+    }
+    bytes
+}
+
+fn deterministic_q8_row_oct_blocks(blocks_per_row: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(blocks_per_row * 8 * 34);
+    for row in 0..8 {
+        for block in 0..blocks_per_row {
+            bytes.extend_from_slice(&crate::tensor::f32_to_fp16(0.125).to_le_bytes());
+            for idx in 0..32 {
+                let q = ((((row + 1) * 11 + block * 7 + idx * 3) as i16 % 17) - 8) as i8;
+                bytes.push(q as u8);
+            }
+        }
+    }
+    bytes
+}
+
+fn deterministic_q8_row_quad_blocks(blocks_per_row: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(blocks_per_row * 4 * 34);
+    for row in 0..4 {
+        for block in 0..blocks_per_row {
+            bytes.extend_from_slice(&crate::tensor::f32_to_fp16(0.125).to_le_bytes());
+            for idx in 0..32 {
+                let q = ((((row + 1) * 11 + block * 7 + idx * 3) as i16 % 17) - 8) as i8;
+                bytes.push(q as u8);
+            }
+        }
+    }
+    bytes
+}
+
+fn time_variant(
+    iters: usize,
+    output_len: usize,
+    mut f: impl FnMut() -> Vec<f32>,
+) -> (u128, Vec<f32>) {
+    let warmup = f();
+    assert_eq!(warmup.len(), output_len);
+    let started = Instant::now();
+    let mut output = warmup;
+    for _ in 0..iters {
+        output = f();
+        std::hint::black_box(&output);
+    }
+    (started.elapsed().as_nanos(), output)
+}
+
+pub fn baseline_i8_dot32_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let qs = &q8[offset + 2..offset + 34];
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            for lane in 0..4 {
+                output[batch_idx + lane] +=
+                    scale * dot_i8_f32(qs, &input[(batch_idx + lane) * in_features + in_feature..]);
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                scale * dot_i8_f32(qs, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+pub fn baseline_i8_dot32_output2_batch4(
+    q8_pair: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch * 2];
+    for row in 0..2 {
+        let row_offset = row * blocks_per_row * 34;
+        for block in 0..blocks_per_row {
+            let offset = row_offset + block * 34;
+            let qs = &q8_pair[offset + 2..offset + 34];
+            let in_feature = block * 32;
+            for batch_idx in 0..batch {
+                output[batch_idx * 2 + row] +=
+                    scale * dot_i8_f32(qs, &input[batch_idx * in_features + in_feature..]);
+            }
+        }
+    }
+    output
+}
+
+pub fn scaled_f32_dot32_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = scaled_block(&q8[offset + 2..offset + 34], scale);
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            accumulate_scaled_batch4(
+                &scaled,
+                &input[batch_idx * in_features + in_feature..],
+                in_features,
+                &mut output,
+                batch_idx,
+            );
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+pub fn scaled_f32_dot32_batch4_runtime(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = scaled_block(&q8[offset + 2..offset + 34], scale);
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            accumulate_scaled_batch4_runtime(
+                &scaled,
+                &input[batch_idx * in_features + in_feature..],
+                in_features,
+                &mut output,
+                batch_idx,
+            );
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+pub fn reelane_f32_dot32_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = scaled_block(&q8[offset + 2..offset + 34], scale);
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            accumulate_reelane_scaled_batch4(
+                &scaled,
+                &input[batch_idx * in_features + in_feature..],
+                in_features,
+                &mut output,
+                batch_idx,
+            );
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn reevec_neon_f32_dot32_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = scaled_block(&q8[offset + 2..offset + 34], scale);
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled_batch4(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn reecast_neon_scale_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = unsafe { scaled_block_neon(&q8[offset + 2..offset + 34], scale) };
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled_batch4(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn reetail_neon_tail3_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = unsafe { scaled_block_neon(&q8[offset + 2..offset + 34], scale) };
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled_batch4(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        if batch - batch_idx == 3 {
+            unsafe {
+                accumulate_neon_scaled_tail3(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+        } else {
+            while batch_idx < batch {
+                output[batch_idx] +=
+                    dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+                batch_idx += 1;
+            }
+        }
+    }
+    output
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn reebundle_neon_output2_batch4(
+    q8_pair: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch * 2];
+    let row_stride = blocks_per_row * 34;
+    for block in 0..blocks_per_row {
+        let first_offset = block * 34;
+        let second_offset = row_stride + block * 34;
+        let first_scaled =
+            unsafe { scaled_block_neon(&q8_pair[first_offset + 2..first_offset + 34], scale) };
+        let second_scaled =
+            unsafe { scaled_block_neon(&q8_pair[second_offset + 2..second_offset + 34], scale) };
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_output2_batch4(
+                    &first_scaled,
+                    &second_scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx * 2] += dot_f32_32(
+                &first_scaled,
+                &input[batch_idx * in_features + in_feature..],
+            );
+            output[batch_idx * 2 + 1] += dot_f32_32(
+                &second_scaled,
+                &input[batch_idx * in_features + in_feature..],
+            );
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn reewide_neon_f32_dot32_batch8(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let scaled = unsafe { scaled_block_neon(&q8[offset + 2..offset + 34], scale) };
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 8 <= batch {
+            unsafe {
+                accumulate_neon_scaled_batch8(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 8;
+        }
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled_batch4(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn reeduo_neon_block64_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    let mut block = 0usize;
+    while block + 1 < blocks {
+        let first_offset = block * 34;
+        let second_offset = first_offset + 34;
+        let scaled = unsafe {
+            scaled_pair_block_neon(
+                &q8[first_offset + 2..first_offset + 34],
+                &q8[second_offset + 2..second_offset + 34],
+                scale,
+            )
+        };
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled64_batch4(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] += dot_f32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+        block += 2;
+    }
+    while block < blocks {
+        let offset = block * 34;
+        let scaled = unsafe { scaled_block_neon(&q8[offset + 2..offset + 34], scale) };
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled_batch4(
+                    &scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+        block += 1;
+    }
+    output
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn reeside_prescaled_f32_batch4(
+    sidecar: &[[f32; 32]],
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    for (block, scaled) in sidecar.iter().enumerate() {
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            unsafe {
+                accumulate_neon_scaled_batch4(
+                    scaled,
+                    &input[batch_idx * in_features + in_feature..],
+                    in_features,
+                    &mut output,
+                    batch_idx,
+                );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] += dot_f32_32(scaled, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+pub fn unrolled_i8_dot32_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let qs = &q8[offset + 2..offset + 34];
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            for lane in 0..4 {
+                output[batch_idx + lane] += scale
+                    * dot_i8_f32_unrolled(
+                        qs,
+                        &input[(batch_idx + lane) * in_features + in_feature..],
+                    );
+            }
+            batch_idx += 4;
+        }
+        while batch_idx < batch {
+            output[batch_idx] +=
+                scale * dot_i8_f32_unrolled(qs, &input[batch_idx * in_features + in_feature..]);
+            batch_idx += 1;
+        }
+    }
+    output
+}
+
+pub fn reflow_i8_scaled_batch4(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    batch: usize,
+    in_features: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch];
+    let blocks = q8.len() / 34;
+    for block in 0..blocks {
+        let offset = block * 34;
+        let qs = &q8[offset + 2..offset + 34];
+        let in_feature = block * 32;
+        let mut batch_idx = 0usize;
+        while batch_idx + 4 <= batch {
+            accumulate_reeflow_i8_scaled_batch4(
+                qs,
+                scale,
+                &input[batch_idx * in_features + in_feature..],
+                in_features,
+                &mut output,
+                batch_idx,
+            );
+            batch_idx += 4;
+        }
+        if batch_idx < batch {
+            let scaled = scaled_block(qs, scale);
+            while batch_idx < batch {
+                output[batch_idx] +=
+                    dot_f32_32(&scaled, &input[batch_idx * in_features + in_feature..]);
+                batch_idx += 1;
+            }
+        }
+    }
+    output
+}
+
+/// R128b lab: single-block int8 sdot (32 lanes) → reduced scalar. Mirrors the
+/// runtime `i8_dot32` (ld + 2 sdot + reduce) used per block per row by R128a.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+unsafe fn r128_sdot_block(w: *const u8, a: *const i8) -> i32 {
+    use std::arch::asm;
+    let t: int32x4_t;
+    asm!(
+        "movi {t:v}.4s, #0",
+        "ld1 {{v0.16b, v1.16b}}, [{a}]",
+        "ld1 {{v2.16b, v3.16b}}, [{w}]",
+        "sdot {t:v}.4s, v2.16b, v0.16b",
+        "sdot {t:v}.4s, v3.16b, v1.16b",
+        t = out(vreg) t,
+        a = in(reg) a,
+        w = in(reg) w,
+        out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+    );
+    vaddvq_s32(t)
+}
+
+/// R128b BASELINE: 4 output rows, per-row per-block sdot (the R128a structure).
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+pub unsafe fn r128_x4_baseline(
+    q8_quad: &[u8],
+    weight_scale: f32,
+    a_i8: &[i8],
+    a_scales: &[f32],
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    let row_stride = blocks_per_row * 34;
+    let mut acc = [0.0f32; 4];
+    for j in 0..4 {
+        for b in 0..blocks_per_row {
+            let w = q8_quad.as_ptr().add(j * row_stride + b * 34 + 2);
+            let a = a_i8.as_ptr().add(b * 32);
+            let dot = r128_sdot_block(w, a);
+            acc[j] += weight_scale * a_scales[b] * dot as f32;
+        }
+    }
+    acc.to_vec()
+}
+
+/// R128b ILP: 4 output rows in ONE asm block per K-block — 4 independent sdot
+/// accumulator chains, the activation block loaded ONCE (v0/v1) and shared. The
+/// four chains pipeline to hide sdot latency; reduce each in Rust (vaddvq_s32),
+/// scale per block. Same math as the baseline, reordered for ILP + load reuse.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+pub unsafe fn r128_x4_ilp(
+    q8_quad: &[u8],
+    weight_scale: f32,
+    a_i8: &[i8],
+    a_scales: &[f32],
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    use std::arch::asm;
+    let row_stride = blocks_per_row * 34;
+    let mut acc = [0.0f32; 4];
+    for b in 0..blocks_per_row {
+        let a = a_i8.as_ptr().add(b * 32);
+        let w0 = q8_quad.as_ptr().add(b * 34 + 2);
+        let w1 = q8_quad.as_ptr().add(row_stride + b * 34 + 2);
+        let w2 = q8_quad.as_ptr().add(2 * row_stride + b * 34 + 2);
+        let w3 = q8_quad.as_ptr().add(3 * row_stride + b * 34 + 2);
+        let t0: int32x4_t;
+        let t1: int32x4_t;
+        let t2: int32x4_t;
+        let t3: int32x4_t;
+        asm!(
+            "movi {a0:v}.4s, #0",
+            "movi {a1:v}.4s, #0",
+            "movi {a2:v}.4s, #0",
+            "movi {a3:v}.4s, #0",
+            "ld1 {{v0.16b, v1.16b}}, [{a}]",
+            "ld1 {{v2.16b, v3.16b}}, [{w0}]",
+            "sdot {a0:v}.4s, v2.16b, v0.16b",
+            "sdot {a0:v}.4s, v3.16b, v1.16b",
+            "ld1 {{v4.16b, v5.16b}}, [{w1}]",
+            "sdot {a1:v}.4s, v4.16b, v0.16b",
+            "sdot {a1:v}.4s, v5.16b, v1.16b",
+            "ld1 {{v6.16b, v7.16b}}, [{w2}]",
+            "sdot {a2:v}.4s, v6.16b, v0.16b",
+            "sdot {a2:v}.4s, v7.16b, v1.16b",
+            "ld1 {{v16.16b, v17.16b}}, [{w3}]",
+            "sdot {a3:v}.4s, v16.16b, v0.16b",
+            "sdot {a3:v}.4s, v17.16b, v1.16b",
+            a0 = out(vreg) t0,
+            a1 = out(vreg) t1,
+            a2 = out(vreg) t2,
+            a3 = out(vreg) t3,
+            a = in(reg) a,
+            w0 = in(reg) w0,
+            w1 = in(reg) w1,
+            w2 = in(reg) w2,
+            w3 = in(reg) w3,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+            out("v5") _, out("v6") _, out("v7") _, out("v16") _, out("v17") _,
+        );
+        let sa = a_scales[b];
+        acc[0] += weight_scale * sa * vaddvq_s32(t0) as f32;
+        acc[1] += weight_scale * sa * vaddvq_s32(t1) as f32;
+        acc[2] += weight_scale * sa * vaddvq_s32(t2) as f32;
+        acc[3] += weight_scale * sa * vaddvq_s32(t3) as f32;
+    }
+    acc.to_vec()
+}
+
+/// R129 lab: pack 4 q8 weight rows into the interleaved layout the 4-output GEMV
+/// kernel consumes. Per K-block (32 weights): 8 segments × `[r0[seg*4..+4] |
+/// r1 | r2 | r3]` (16 bytes each) = 128 bytes, plus the 4 per-row fp16 scales.
+/// This is the layout that would be baked into the `.spsa` at pack time (R129).
+fn pack_w_interleaved_x4(q8_quad: &[u8], blocks_per_row: usize) -> (Vec<i8>, Vec<f32>) {
+    let row_stride = blocks_per_row * 34;
+    let mut packed = vec![0i8; blocks_per_row * 128];
+    let mut scales = vec![0.0f32; blocks_per_row * 4];
+    for b in 0..blocks_per_row {
+        for (j, row) in (0..4).enumerate() {
+            let blk = row * row_stride + b * 34;
+            scales[b * 4 + j] = crate::tensor::fp16_to_f32(u16::from_le_bytes([
+                q8_quad[blk],
+                q8_quad[blk + 1],
+            ]));
+            let qs = &q8_quad[blk + 2..blk + 34];
+            for seg in 0..8 {
+                for k in 0..4 {
+                    packed[b * 128 + seg * 16 + j * 4 + k] = qs[seg * 4 + k] as i8;
+                }
+            }
+        }
+    }
+    (packed, scales)
+}
+
+/// R129 lab kernel: 4-output GEMV with NO per-block `addv`. One `sdot` per
+/// K-segment puts 4 DIFFERENT outputs in its 4 lanes (interleaved weights +
+/// `ld1r`-broadcast activation); 8 sdots accumulate a 32-block into one int32x4
+/// tile whose 4 lanes ARE the 4 outputs; convert + scale once per block (4
+/// outputs at once via `vfmaq_f32`) into a register f32 accumulator, written
+/// once at the end. This is llama.cpp's q8_0 4x8 GEMV structure.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+pub unsafe fn r129_x4_interleaved(
+    w_packed: &[i8],
+    w_scales: &[f32],
+    a_i8: &[i8],
+    a_scales: &[f32],
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    use std::arch::asm;
+    let mut acc_f = vdupq_n_f32(0.0);
+    for b in 0..blocks_per_row {
+        let mut w_ptr = w_packed.as_ptr().add(b * 128);
+        let mut a_ptr = a_i8.as_ptr().add(b * 32);
+        let tile: int32x4_t;
+        asm!(
+            "movi {t:v}.4s, #0",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t:v}.4s, v1.16b, v0.16b",
+            t = out(vreg) tile,
+            a = inout(reg) a_ptr,
+            w = inout(reg) w_ptr,
+            out("v0") _,
+            out("v1") _,
+        );
+        let _ = (a_ptr, w_ptr);
+        let s_a = a_scales[b];
+        let sc = [
+            w_scales[b * 4] * s_a,
+            w_scales[b * 4 + 1] * s_a,
+            w_scales[b * 4 + 2] * s_a,
+            w_scales[b * 4 + 3] * s_a,
+        ];
+        let scale_vec = vld1q_f32(sc.as_ptr());
+        acc_f = vfmaq_f32(acc_f, vcvtq_f32_s32(tile), scale_vec);
+    }
+    let mut out = vec![0.0f32; 4];
+    vst1q_f32(out.as_mut_ptr(), acc_f);
+    out
+}
+
+/// R129 lab, 2-tile variant: same interleaved 4-output layout, but split the 8
+/// K-segments across TWO independent int32 tiles (t0: segs 0,2,4,6; t1: segs
+/// 1,3,5,7) so the sdot chains pipeline (the 1-tile version was a serial chain).
+/// Summed before the per-block scale. 4 outputs, no per-block addv, 2-way ILP.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "dotprod")]
+pub unsafe fn r129_x4_interleaved_2t(
+    w_packed: &[i8],
+    w_scales: &[f32],
+    a_i8: &[i8],
+    a_scales: &[f32],
+    blocks_per_row: usize,
+) -> Vec<f32> {
+    use std::arch::asm;
+    let mut acc_f = vdupq_n_f32(0.0);
+    for b in 0..blocks_per_row {
+        let mut w_ptr = w_packed.as_ptr().add(b * 128);
+        let mut a_ptr = a_i8.as_ptr().add(b * 32);
+        let t0: int32x4_t;
+        let t1: int32x4_t;
+        asm!(
+            "movi {t0:v}.4s, #0",
+            "movi {t1:v}.4s, #0",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t0:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v2.4s}}, [{a}], #4",
+            "ld1 {{v3.16b}}, [{w}], #16",
+            "sdot {t1:v}.4s, v3.16b, v2.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t0:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v2.4s}}, [{a}], #4",
+            "ld1 {{v3.16b}}, [{w}], #16",
+            "sdot {t1:v}.4s, v3.16b, v2.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t0:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v2.4s}}, [{a}], #4",
+            "ld1 {{v3.16b}}, [{w}], #16",
+            "sdot {t1:v}.4s, v3.16b, v2.16b",
+            "ld1r {{v0.4s}}, [{a}], #4",
+            "ld1 {{v1.16b}}, [{w}], #16",
+            "sdot {t0:v}.4s, v1.16b, v0.16b",
+            "ld1r {{v2.4s}}, [{a}], #4",
+            "ld1 {{v3.16b}}, [{w}], #16",
+            "sdot {t1:v}.4s, v3.16b, v2.16b",
+            t0 = out(vreg) t0,
+            t1 = out(vreg) t1,
+            a = inout(reg) a_ptr,
+            w = inout(reg) w_ptr,
+            out("v0") _,
+            out("v1") _,
+            out("v2") _,
+            out("v3") _,
+        );
+        let _ = (a_ptr, w_ptr);
+        let tile = vaddq_s32(t0, t1);
+        let s_a = a_scales[b];
+        let sc = [
+            w_scales[b * 4] * s_a,
+            w_scales[b * 4 + 1] * s_a,
+            w_scales[b * 4 + 2] * s_a,
+            w_scales[b * 4 + 3] * s_a,
+        ];
+        let scale_vec = vld1q_f32(sc.as_ptr());
+        acc_f = vfmaq_f32(acc_f, vcvtq_f32_s32(tile), scale_vec);
+    }
+    let mut out = vec![0.0f32; 4];
+    vst1q_f32(out.as_mut_ptr(), acc_f);
+    out
+}
+
+pub fn baseline_i8_dot32_batch1_row(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    in_features: usize,
+) -> Vec<f32> {
+    let blocks = q8.len() / 34;
+    let mut output = vec![0.0f32; 1];
+    for block in 0..blocks {
+        let offset = block * 34;
+        let in_feature = block * 32;
+        output[0] += scale * dot_i8_f32(&q8[offset + 2..offset + 34], &input[in_feature..]);
+    }
+    assert_eq!(blocks * 32, in_features);
+    output
+}
+
+pub fn scaled_f32_dot32_batch1_row(
+    q8: &[u8],
+    scale: f32,
+    input: &[f32],
+    in_features: usize,
+) -> Vec<f32> {
+    let blocks = q8.len() / 34;
+    let mut output = vec![0.0f32; 1];
+    for block in 0..blocks {
+        let offset = block * 34;
+        let in_feature = block * 32;
+        let scaled = scaled_block(&q8[offset + 2..offset + 34], scale);
+        output[0] += dot_f32_32(&scaled, &input[in_feature..]);
+    }
+    assert_eq!(blocks * 32, in_features);
+    output
+}
+
+fn dot_i8_f32(qs: &[u8], input: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    for idx in 0..32 {
+        acc += (qs[idx] as i8 as f32) * input[idx];
+    }
+    acc
+}
+
+fn dot_i8_f32_unrolled(qs: &[u8], input: &[f32]) -> f32 {
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+    let mut acc3 = 0.0f32;
+    let mut idx = 0usize;
+    while idx < 32 {
+        acc0 += (qs[idx] as i8 as f32) * input[idx];
+        acc1 += (qs[idx + 1] as i8 as f32) * input[idx + 1];
+        acc2 += (qs[idx + 2] as i8 as f32) * input[idx + 2];
+        acc3 += (qs[idx + 3] as i8 as f32) * input[idx + 3];
+        idx += 4;
+    }
+    (acc0 + acc1) + (acc2 + acc3)
+}
+
+fn scaled_block(qs: &[u8], scale: f32) -> [f32; 32] {
+    let mut scaled = [0.0f32; 32];
+    for idx in 0..32 {
+        scaled[idx] = (qs[idx] as i8 as f32) * scale;
+    }
+    scaled
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn scaled_block_neon(qs: &[u8], scale: f32) -> [f32; 32] {
+    let mut out = [0.0f32; 32];
+    let scale_vec = vdupq_n_f32(scale);
+    let mut offset = 0usize;
+    while offset < 32 {
+        let q_i8 = vld1q_s8(qs.as_ptr().add(offset) as *const i8);
+        let low_i16 = vmovl_s8(vget_low_s8(q_i8));
+        let high_i16 = vmovl_s8(vget_high_s8(q_i8));
+
+        let low_low_i32 = vmovl_s16(vget_low_s16(low_i16));
+        let low_high_i32 = vmovl_s16(vget_high_s16(low_i16));
+        let high_low_i32 = vmovl_s16(vget_low_s16(high_i16));
+        let high_high_i32 = vmovl_s16(vget_high_s16(high_i16));
+
+        vst1q_f32(
+            out.as_mut_ptr().add(offset),
+            vmulq_f32(vcvtq_f32_s32(low_low_i32), scale_vec),
+        );
+        vst1q_f32(
+            out.as_mut_ptr().add(offset + 4),
+            vmulq_f32(vcvtq_f32_s32(low_high_i32), scale_vec),
+        );
+        vst1q_f32(
+            out.as_mut_ptr().add(offset + 8),
+            vmulq_f32(vcvtq_f32_s32(high_low_i32), scale_vec),
+        );
+        vst1q_f32(
+            out.as_mut_ptr().add(offset + 12),
+            vmulq_f32(vcvtq_f32_s32(high_high_i32), scale_vec),
+        );
+        offset += 16;
+    }
+    out
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn scaled_pair_block_neon(first: &[u8], second: &[u8], scale: f32) -> [f32; 64] {
+    let mut out = [0.0f32; 64];
+    let first_scaled = scaled_block_neon(first, scale);
+    let second_scaled = scaled_block_neon(second, scale);
+    out[..32].copy_from_slice(&first_scaled);
+    out[32..].copy_from_slice(&second_scaled);
+    out
+}
+
+#[cfg(target_arch = "aarch64")]
+fn prescaled_sidecar_blocks(q8: &[u8], scale: f32) -> Vec<[f32; 32]> {
+    let blocks = q8.len() / 34;
+    let mut sidecar = Vec::with_capacity(blocks);
+    for block in 0..blocks {
+        let offset = block * 34;
+        sidecar.push(unsafe { scaled_block_neon(&q8[offset + 2..offset + 34], scale) });
+    }
+    sidecar
+}
+
+fn accumulate_scaled_batch4(
+    scaled: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    output[batch_idx] += dot_f32_32(scaled, input);
+    output[batch_idx + 1] += dot_f32_32(scaled, &input[stride..]);
+    output[batch_idx + 2] += dot_f32_32(scaled, &input[stride * 2..]);
+    output[batch_idx + 3] += dot_f32_32(scaled, &input[stride * 3..]);
+}
+
+fn accumulate_scaled_batch4_runtime(
+    scaled: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = output[batch_idx];
+    let mut acc1 = output[batch_idx + 1];
+    let mut acc2 = output[batch_idx + 2];
+    let mut acc3 = output[batch_idx + 3];
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weight = scaled[idx];
+        acc0 += weight * input[idx];
+        acc1 += weight * input[stride + idx];
+        acc2 += weight * input[stride * 2 + idx];
+        acc3 += weight * input[stride * 3 + idx];
+        idx += 1;
+    }
+    output[batch_idx] = acc0;
+    output[batch_idx + 1] = acc1;
+    output[batch_idx + 2] = acc2;
+    output[batch_idx + 3] = acc3;
+}
+
+fn accumulate_reelane_scaled_batch4(
+    scaled: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = output[batch_idx];
+    let mut acc1 = output[batch_idx + 1];
+    let mut acc2 = output[batch_idx + 2];
+    let mut acc3 = output[batch_idx + 3];
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weight0 = scaled[idx];
+        let weight1 = scaled[idx + 1];
+        let weight2 = scaled[idx + 2];
+        let weight3 = scaled[idx + 3];
+
+        acc0 += weight0 * input[idx];
+        acc1 += weight0 * input[stride + idx];
+        acc2 += weight0 * input[stride * 2 + idx];
+        acc3 += weight0 * input[stride * 3 + idx];
+
+        acc0 += weight1 * input[idx + 1];
+        acc1 += weight1 * input[stride + idx + 1];
+        acc2 += weight1 * input[stride * 2 + idx + 1];
+        acc3 += weight1 * input[stride * 3 + idx + 1];
+
+        acc0 += weight2 * input[idx + 2];
+        acc1 += weight2 * input[stride + idx + 2];
+        acc2 += weight2 * input[stride * 2 + idx + 2];
+        acc3 += weight2 * input[stride * 3 + idx + 2];
+
+        acc0 += weight3 * input[idx + 3];
+        acc1 += weight3 * input[stride + idx + 3];
+        acc2 += weight3 * input[stride * 2 + idx + 3];
+        acc3 += weight3 * input[stride * 3 + idx + 3];
+
+        idx += 4;
+    }
+    output[batch_idx] = acc0;
+    output[batch_idx + 1] = acc1;
+    output[batch_idx + 2] = acc2;
+    output[batch_idx + 3] = acc3;
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn accumulate_neon_scaled_batch4(
+    scaled: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weights = vld1q_f32(scaled.as_ptr().add(idx));
+        let x0 = vld1q_f32(input.as_ptr().add(idx));
+        let x1 = vld1q_f32(input.as_ptr().add(stride + idx));
+        let x2 = vld1q_f32(input.as_ptr().add(stride * 2 + idx));
+        let x3 = vld1q_f32(input.as_ptr().add(stride * 3 + idx));
+        acc0 = vfmaq_f32(acc0, weights, x0);
+        acc1 = vfmaq_f32(acc1, weights, x1);
+        acc2 = vfmaq_f32(acc2, weights, x2);
+        acc3 = vfmaq_f32(acc3, weights, x3);
+        idx += 4;
+    }
+    output[batch_idx] += vaddvq_f32(acc0);
+    output[batch_idx + 1] += vaddvq_f32(acc1);
+    output[batch_idx + 2] += vaddvq_f32(acc2);
+    output[batch_idx + 3] += vaddvq_f32(acc3);
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn accumulate_neon_output2_batch4(
+    first: &[f32; 32],
+    second: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut first0 = vdupq_n_f32(0.0);
+    let mut first1 = vdupq_n_f32(0.0);
+    let mut first2 = vdupq_n_f32(0.0);
+    let mut first3 = vdupq_n_f32(0.0);
+    let mut second0 = vdupq_n_f32(0.0);
+    let mut second1 = vdupq_n_f32(0.0);
+    let mut second2 = vdupq_n_f32(0.0);
+    let mut second3 = vdupq_n_f32(0.0);
+    let mut idx = 0usize;
+    while idx < 32 {
+        let x0 = vld1q_f32(input.as_ptr().add(idx));
+        let x1 = vld1q_f32(input.as_ptr().add(stride + idx));
+        let x2 = vld1q_f32(input.as_ptr().add(stride * 2 + idx));
+        let x3 = vld1q_f32(input.as_ptr().add(stride * 3 + idx));
+        let first_weights = vld1q_f32(first.as_ptr().add(idx));
+        let second_weights = vld1q_f32(second.as_ptr().add(idx));
+        first0 = vfmaq_f32(first0, first_weights, x0);
+        first1 = vfmaq_f32(first1, first_weights, x1);
+        first2 = vfmaq_f32(first2, first_weights, x2);
+        first3 = vfmaq_f32(first3, first_weights, x3);
+        second0 = vfmaq_f32(second0, second_weights, x0);
+        second1 = vfmaq_f32(second1, second_weights, x1);
+        second2 = vfmaq_f32(second2, second_weights, x2);
+        second3 = vfmaq_f32(second3, second_weights, x3);
+        idx += 4;
+    }
+    output[batch_idx * 2] += vaddvq_f32(first0);
+    output[batch_idx * 2 + 1] += vaddvq_f32(second0);
+    output[(batch_idx + 1) * 2] += vaddvq_f32(first1);
+    output[(batch_idx + 1) * 2 + 1] += vaddvq_f32(second1);
+    output[(batch_idx + 2) * 2] += vaddvq_f32(first2);
+    output[(batch_idx + 2) * 2 + 1] += vaddvq_f32(second2);
+    output[(batch_idx + 3) * 2] += vaddvq_f32(first3);
+    output[(batch_idx + 3) * 2 + 1] += vaddvq_f32(second3);
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn accumulate_neon_scaled_tail3(
+    scaled: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weights = vld1q_f32(scaled.as_ptr().add(idx));
+        acc0 = vfmaq_f32(acc0, weights, vld1q_f32(input.as_ptr().add(idx)));
+        acc1 = vfmaq_f32(acc1, weights, vld1q_f32(input.as_ptr().add(stride + idx)));
+        acc2 = vfmaq_f32(
+            acc2,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 2 + idx)),
+        );
+        idx += 4;
+    }
+    output[batch_idx] += vaddvq_f32(acc0);
+    output[batch_idx + 1] += vaddvq_f32(acc1);
+    output[batch_idx + 2] += vaddvq_f32(acc2);
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn accumulate_neon_scaled_batch8(
+    scaled: &[f32; 32],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut acc4 = vdupq_n_f32(0.0);
+    let mut acc5 = vdupq_n_f32(0.0);
+    let mut acc6 = vdupq_n_f32(0.0);
+    let mut acc7 = vdupq_n_f32(0.0);
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weights = vld1q_f32(scaled.as_ptr().add(idx));
+        acc0 = vfmaq_f32(acc0, weights, vld1q_f32(input.as_ptr().add(idx)));
+        acc1 = vfmaq_f32(acc1, weights, vld1q_f32(input.as_ptr().add(stride + idx)));
+        acc2 = vfmaq_f32(
+            acc2,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 2 + idx)),
+        );
+        acc3 = vfmaq_f32(
+            acc3,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 3 + idx)),
+        );
+        acc4 = vfmaq_f32(
+            acc4,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 4 + idx)),
+        );
+        acc5 = vfmaq_f32(
+            acc5,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 5 + idx)),
+        );
+        acc6 = vfmaq_f32(
+            acc6,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 6 + idx)),
+        );
+        acc7 = vfmaq_f32(
+            acc7,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 7 + idx)),
+        );
+        idx += 4;
+    }
+    output[batch_idx] += vaddvq_f32(acc0);
+    output[batch_idx + 1] += vaddvq_f32(acc1);
+    output[batch_idx + 2] += vaddvq_f32(acc2);
+    output[batch_idx + 3] += vaddvq_f32(acc3);
+    output[batch_idx + 4] += vaddvq_f32(acc4);
+    output[batch_idx + 5] += vaddvq_f32(acc5);
+    output[batch_idx + 6] += vaddvq_f32(acc6);
+    output[batch_idx + 7] += vaddvq_f32(acc7);
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn accumulate_neon_scaled64_batch4(
+    scaled: &[f32; 64],
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = vdupq_n_f32(0.0);
+    let mut acc1 = vdupq_n_f32(0.0);
+    let mut acc2 = vdupq_n_f32(0.0);
+    let mut acc3 = vdupq_n_f32(0.0);
+    let mut idx = 0usize;
+    while idx < 64 {
+        let weights = vld1q_f32(scaled.as_ptr().add(idx));
+        acc0 = vfmaq_f32(acc0, weights, vld1q_f32(input.as_ptr().add(idx)));
+        acc1 = vfmaq_f32(acc1, weights, vld1q_f32(input.as_ptr().add(stride + idx)));
+        acc2 = vfmaq_f32(
+            acc2,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 2 + idx)),
+        );
+        acc3 = vfmaq_f32(
+            acc3,
+            weights,
+            vld1q_f32(input.as_ptr().add(stride * 3 + idx)),
+        );
+        idx += 4;
+    }
+    output[batch_idx] += vaddvq_f32(acc0);
+    output[batch_idx + 1] += vaddvq_f32(acc1);
+    output[batch_idx + 2] += vaddvq_f32(acc2);
+    output[batch_idx + 3] += vaddvq_f32(acc3);
+}
+
+fn accumulate_reeflow_i8_scaled_batch4(
+    qs: &[u8],
+    scale: f32,
+    input: &[f32],
+    stride: usize,
+    output: &mut [f32],
+    batch_idx: usize,
+) {
+    let mut acc0 = output[batch_idx];
+    let mut acc1 = output[batch_idx + 1];
+    let mut acc2 = output[batch_idx + 2];
+    let mut acc3 = output[batch_idx + 3];
+    let mut idx = 0usize;
+    while idx < 32 {
+        let weight = scale * (qs[idx] as i8) as f32;
+        acc0 += weight * input[idx];
+        acc1 += weight * input[stride + idx];
+        acc2 += weight * input[stride * 2 + idx];
+        acc3 += weight * input[stride * 3 + idx];
+        idx += 1;
+    }
+    output[batch_idx] = acc0;
+    output[batch_idx + 1] = acc1;
+    output[batch_idx + 2] = acc2;
+    output[batch_idx + 3] = acc3;
+}
+
+fn dot_f32_32(weights: &[f32; 32], input: &[f32]) -> f32 {
+    let mut acc = 0.0f32;
+    for idx in 0..32 {
+        acc += weights[idx] * input[idx];
+    }
+    acc
+}
+
+fn dot_f32(weights: &[f32], input: &[f32]) -> f32 {
+    weights
+        .iter()
+        .zip(input.iter())
+        .map(|(weight, value)| weight * value)
+        .sum()
+}
+
+fn checksum(values: &[f32]) -> f32 {
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| value * ((idx % 13) as f32 + 1.0))
+        .sum()
+}
+
+fn max_abs_diff(left: &[f32], right: &[f32]) -> f32 {
+    assert_eq!(left.len(), right.len());
+    left.iter()
+        .zip(right)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R123 ILP microbench: realistic prefill-shape panel timings. Run with:
+    /// `cargo test -p spissa-runtime --release q8_kernel_lab::tests::r123_output4_microbench -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn r123_output4_microbench() {
+        let report = run_suite(Q8KernelBenchConfig::default());
+        println!("\n== R123 panel ILP microbench (batch={} in={} iters={}) ==", report.batch, report.in_features, report.iters);
+        for r in &report.results {
+            if r.variant.contains("panel") || r.variant.contains("reebundle") {
+                println!(
+                    "{:<40} {:>10.3} ms   diff={:.5}   {:.3}x",
+                    r.variant,
+                    r.elapsed_ns as f64 / 1e6,
+                    r.max_abs_diff,
+                    r.speedup_vs_baseline,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn q8_kernel_lab_reports_required_ree_variants() {
+        let report = run_suite(Q8KernelBenchConfig {
+            batch: 5,
+            in_features: 64,
+            blocks_per_row: 2,
+            out_features: 1,
+            iters: 2,
+        });
+
+        assert_eq!(report.ree_kernel, "REEDOT-LAB");
+
+        let variants = report
+            .results
+            .iter()
+            .map(|result| result.variant.as_str())
+            .collect::<Vec<_>>();
+        let portable_variants = [
+            "baseline_i8_dot32_batch4",
+            "scaled_f32_dot32_batch4",
+            "scaled_f32_dot32_batch4_runtime",
+            "reelane_f32_dot32_batch4",
+            "reeflow_i8_scaled_batch4",
+            "unrolled_i8_dot32_batch4",
+        ];
+        assert_eq!(&variants[..portable_variants.len()], portable_variants);
+        #[cfg(target_arch = "aarch64")]
+        assert!(variants.contains(&"reevec_neon_f32_dot32_batch4"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(variants.contains(&"reecast_neon_scale_batch4"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(variants.contains(&"reewide_neon_f32_dot32_batch8"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(variants.contains(&"reeduo_neon_block64_batch4"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(variants.contains(&"reeside_prescaled_f32_batch4"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(variants.contains(&"reetail_neon_tail3_batch4"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(variants.contains(&"reebundle_neon_output2_batch4"));
+
+        for result in &report.results {
+            assert!(
+                result.elapsed_ns > 0,
+                "{} should report elapsed time",
+                result.variant
+            );
+            // The f32 variants are bit-exact against the baseline. `reedot_i8_vdot`
+            // quantizes activations to int8, so it carries a small, bounded error
+            // by design (the lossy-but-validated int8 path); allow a looser bound.
+            let tolerance = if result.variant == "reedot_i8_vdot"
+                || result.variant == "reefuse_smmla_output2"
+                || result.variant == "reefuse_smmla_output2_inline"
+                || result.variant == "reefuse_smmla_panel_output2"
+                || result.variant == "reefuse_smmla_panel_output4"
+                || result.variant == "reefuse_smmla_panel_output2_x2(4rows)"
+                || result.variant == "reefuse_smmla_panel_output8"
+                || result.variant == "reefuse_smmla_panel_output2_x4(8rows)"
+            {
+                0.05
+            } else {
+                0.0001
+            };
+            assert!(
+                result.max_abs_diff <= tolerance,
+                "{} diff {} exceeded tolerance {}",
+                result.variant,
+                result.max_abs_diff,
+                tolerance
+            );
+        }
+    }
+
+    #[test]
+    fn q8_kernel_lab_reports_batch1_decode_gate_variants() {
+        let report = run_suite(Q8KernelBenchConfig {
+            batch: 1,
+            in_features: 2048,
+            blocks_per_row: 64,
+            out_features: 8192,
+            iters: 2,
+        });
+
+        let variants = report
+            .results
+            .iter()
+            .map(|result| result.variant.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(variants.contains(&"baseline_i8_dot32_batch1_row"));
+        assert!(variants.contains(&"scaled_f32_dot32_batch1_row"));
+
+        for result in report
+            .results
+            .iter()
+            .filter(|result| result.variant.ends_with("_batch1_row"))
+        {
+            assert!(
+                result.max_abs_diff <= 0.0001,
+                "{} diff {} exceeded tolerance",
+                result.variant,
+                result.max_abs_diff
+            );
+        }
+    }
+}

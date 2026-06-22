@@ -1,0 +1,126 @@
+// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
+// distribution of this file, via any medium, is strictly prohibited.
+
+//! RLLM runtime foundation.
+//!
+//! Phase 5 starts with full-decode loading: read a `.spsa` container,
+//! decode every tensor into memory, convert supported dtypes to `f32`, and
+//! expose small tensor operations needed by a toy transformer runtime.
+#![allow(clippy::too_many_arguments)]
+
+#[path = "session.rs"]
+mod chat_session;
+mod dequantize;
+mod echo;
+mod error;
+mod lazy;
+mod loader;
+mod memory;
+pub mod models;
+mod ops;
+mod planner;
+#[doc(hidden)]
+pub mod q8_kernel_lab;
+mod q8_profile;
+mod rolling;
+mod rotary;
+mod speed;
+mod streaming;
+pub mod tensor;
+mod tiny;
+mod tokenizer;
+mod trace;
+
+pub use chat_session::{
+    RamaChatSession, RamaRepetitionStats, RamaRollingStats, RamaSessionAdapter,
+    RamaSessionPhaseTimings, RamaSessionStep, RamaSessionTurnMetrics, RamaSessionTurnResult,
+    RamaTransformerPhaseTimings,
+};
+pub use dequantize::{dequantize_q4_0, dequantize_q8_0, quantize_to_q4_0, quantize_to_q8_0};
+pub use echo::{
+    streaming_echo_transformer_decode_step_from_model,
+    streaming_echo_transformer_generate_from_model, streaming_echo_transformer_prefill_from_model,
+    streaming_rama_transformer_decode_step_from_model,
+    streaming_rama_transformer_generate_from_model, streaming_rama_transformer_prefill_from_model,
+    RamaContextState, RamaGenerationTiming, StreamingEchoGenerationResult,
+    StreamingEchoTransformerConfig, StreamingEchoTransformerParameters,
+    StreamingEchoTransformerTensorNames, StreamingRamaGenerationResult,
+    StreamingRamaTransformerConfig, StreamingRamaTransformerParameters,
+    StreamingRamaTransformerTensorNames,
+};
+pub use error::{Result, RuntimeError};
+pub use lazy::{LazyModelStats, LazySpissaModel, RamaIntegrityMode};
+pub use loader::{FullDecodeModel, FullDecodeStats};
+pub use memory::MemoryBudget;
+pub use models::gpt_neox::*;
+pub use models::llama::*;
+// Gemma items are reached via the `spissa_runtime::models::gemma::*` path (like
+// the llama-test binary imports llama) to avoid ambiguous glob re-exports of the
+// shared `api`/`generate`/`model` submodule names at the crate root.
+pub use ops::*;
+pub use planner::{
+    build_runtime_plan, ModelShapeHints, PlanStatus, PlanStep, RuntimeMode, RuntimePlan,
+    RuntimePlanConfig,
+};
+pub use q8_profile::{
+    q8_kernel_profile_enabled, q8_kernel_profile_snapshot_and_reset, record_q8_kernel_path,
+    Q8KernelPath, Q8KernelProfileRow, Q8KernelProfileSnapshot,
+};
+pub use rotary::{
+    apply_gpt_neox_rotary_inplace, gpt_neox_rotary_dim, scaled_dot_product_attention_with_cache,
+    KvAttentionConfig, KvCache, RotaryEmbeddingConfig,
+};
+pub use speed::{
+    parse_aip_attention_locality_extra, parse_aip_attention_locality_window,
+    parse_aip_column_cache_enabled, parse_aip_edge_layers, parse_aip_edge_topk,
+    parse_aip_exact_edge_layers, parse_aip_exact_edge_projection, parse_aip_exact_layer,
+    parse_aip_exact_layer_projection, parse_aip_input_tiles_enabled,
+    parse_aip_layer_drift_probe_enabled, parse_aip_lm_head_agreement_enabled,
+    parse_aip_lm_head_exact_every, parse_aip_lm_head_novelty_gap_milli,
+    parse_aip_lm_head_novelty_repeat_penalty_milli, parse_aip_lm_head_novelty_retention_milli,
+    parse_aip_lm_head_novelty_window, parse_aip_lm_head_repeat_margin_adaptive_enabled,
+    parse_aip_lm_head_repeat_margin_milli, parse_aip_lm_head_rescore,
+    parse_aip_lm_head_rescore_gap_milli, parse_aip_lm_head_rows, parse_aip_no_repeat_last_enabled,
+    parse_aip_policy, parse_aip_repeat_run_limit, parse_aip_topk, parse_experimental_speed_enabled,
+    parse_turbo_topk, select_top_abs_indices, select_top_abs_indices_with_recent,
+    RamaAipPolicyKind, RamaAipProjectionDecision, RamaAipProjectionKind,
+    RamaAttentionLocalityCache, RamaExperimentalSpeedConfig, RamaExperimentalSpeedStats,
+    RamaLayerAttributionProbeStats, RamaLayerDriftProbeStats,
+};
+pub use streaming::{
+    input_tile_sidecar_weight_name, lm_head_logits_parallel, lm_head_logits_parallel_bf16,
+    streaming_attention_from_model,
+    streaming_attention_with_runtime_from_model,
+    streaming_column_cached_sparse_silu_gate_up_from_model,
+    streaming_column_cached_sparse_tile_linear_from_model,
+    streaming_input_tiled_sparse_silu_gate_up_from_model,
+    streaming_input_tiled_sparse_tile_linear_from_model,
+    streaming_input_tiled_sparse_tile_linear_selected_from_model, streaming_linear_from_model,
+    streaming_mlp_from_model, streaming_silu_gate_up_from_model,
+    streaming_sparse_silu_gate_up_from_model, streaming_sparse_tile_linear_from_model,
+    streaming_tile_linear_argmax_candidate_rows_from_model,
+    streaming_tile_linear_argmax_candidate_rows_range_from_model,
+    streaming_tile_linear_argmax_from_model, streaming_tile_linear_argmax_prefix_from_model,
+    streaming_tile_linear_from_model, streaming_tile_linear_multiply_into_from_model,
+    streaming_transformer_block_from_model,
+    streaming_transformer_block_with_runtime_and_timing_from_model,
+    streaming_transformer_block_with_runtime_from_model, SparseColumnCache, SparseColumnCacheStats,
+    StreamingAttentionConfig, StreamingAttentionRuntime, StreamingBlockConfig,
+    StreamingBlockParameters, StreamingBlockRuntime, StreamingBlockTensorNames,
+    StreamingBlockTiming, StreamingLinearConfig, StreamingMlpConfig, StreamingTileLinearConfig,
+    DEFAULT_STREAMING_TILE_ELEMENTS,
+};
+pub use tensor::{bf16_to_f32, fp16_to_f32, Tensor};
+pub use tiny::{
+    streaming_embedding_lookup_from_model, streaming_tiny_transformer_decode_step_from_model,
+    streaming_tiny_transformer_generate_from_model,
+    streaming_tiny_transformer_next_token_from_model,
+    streaming_tiny_transformer_next_token_with_runtime_from_model,
+    streaming_tiny_transformer_prefill_from_model, ContextEchoState, StreamingEmbeddingConfig,
+    StreamingNextTokenResult, StreamingSamplingConfig, StreamingTinyGenerationConfig,
+    StreamingTinyGenerationResult, StreamingTinyRotaryConfig, StreamingTinyTransformerConfig,
+    StreamingTinyTransformerParameters, StreamingTinyTransformerTensorNames,
+};
+pub use tokenizer::SpissaTokenizer;
+pub use trace::{RamaTrace, RamaTraceEvent, RamaTraceEventInput};
