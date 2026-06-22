@@ -275,7 +275,7 @@ enum Commands {
         #[arg(long, default_value = "llama3")]
         chat_template: String,
 
-        /// Optional system prompt (Llama templates)
+        /// Optional system prompt (Qwen ChatML + Llama templates)
         #[arg(long)]
         system: Option<String>,
 
