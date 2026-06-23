@@ -75,6 +75,12 @@ pub fn bar(frac: f64, width: usize) -> String {
     format!("▕{}{}▏", "█".repeat(filled), "░".repeat(width - filled))
 }
 
+/// One green braille spinner frame for a synchronous (no background thread) progress line —
+/// pass a counter or `elapsed_ms/80` so it cycles. Used by the download checklist.
+pub fn spinner_frame(i: usize) -> String {
+    format!("\x1b[92m{}\x1b[0m", FRAMES[i % FRAMES.len()])
+}
+
 /// Human-readable byte size, e.g. `3.76 GB`.
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -89,6 +95,35 @@ pub fn human_size(bytes: u64) -> String {
     } else {
         format!("{v:.2} {}", UNITS[u])
     }
+}
+
+/// Draw the green result panel: a `✓ headline` line above a titled box of rows.
+fn render_box(headline: &str, title_name: &str, rows: &[String]) {
+    let title = format!(" {title_name} ");
+    let content = rows
+        .iter()
+        .map(|r| r.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(title_name.chars().count())
+        .max(40);
+    let pad = 2usize;
+    let w = content + pad * 2; // inner cells between the borders
+
+    println!();
+    println!("  \x1b[1;92m✓\x1b[0m  {headline}");
+    println!();
+    let top_fill = w.saturating_sub(1 + title.chars().count());
+    println!("  \x1b[92m┌─{title}{}┐\x1b[0m", "─".repeat(top_fill));
+    for r in rows {
+        let right = w.saturating_sub(pad + r.chars().count());
+        println!(
+            "  \x1b[92m│\x1b[0m{}{r}{}\x1b[92m│\x1b[0m",
+            " ".repeat(pad),
+            " ".repeat(right)
+        );
+    }
+    println!("  \x1b[92m└{}┘\x1b[0m", "─".repeat(w));
 }
 
 /// Print the post-pack summary box (the green-check result panel).
@@ -121,29 +156,27 @@ pub fn print_pack_result(
         ),
         format!("output    {output_path}"),
     ];
-    let title = format!(" {filename} ");
-    let content = rows
-        .iter()
-        .map(|r| r.chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(filename.chars().count())
-        .max(40);
-    let pad = 2usize;
-    let w = content + pad * 2; // inner cells between the borders
+    render_box(&format!("Packed in {elapsed_secs:.1}s"), filename, &rows);
+}
 
-    println!();
-    println!("  \x1b[1;92m✓\x1b[0m  Packed in {elapsed_secs:.1}s");
-    println!();
-    let top_fill = w.saturating_sub(1 + title.chars().count());
-    println!("  \x1b[92m┌─{title}{}┐\x1b[0m", "─".repeat(top_fill));
-    for r in &rows {
-        let right = w.saturating_sub(pad + r.chars().count());
-        println!(
-            "  \x1b[92m│\x1b[0m{}{r}{}\x1b[92m│\x1b[0m",
-            " ".repeat(pad),
-            " ".repeat(right)
-        );
-    }
-    println!("  \x1b[92m└{}┘\x1b[0m", "─".repeat(w));
+/// Print the post-download summary box (mirrors the pack result panel).
+pub fn print_fetch_result(
+    name: &str,
+    files: usize,
+    total_bytes: u64,
+    downloaded_bytes: u64,
+    elapsed_secs: f64,
+    dest: &str,
+) {
+    let avg = if elapsed_secs > 0.0 {
+        (downloaded_bytes as f64 / elapsed_secs) as u64
+    } else {
+        0
+    };
+    let rows = [
+        format!("files     {files}   ·   {}", human_size(total_bytes)),
+        format!("avg       {}/s", human_size(avg)),
+        format!("path      {dest}"),
+    ];
+    render_box(&format!("Downloaded in {elapsed_secs:.1}s"), name, &rows);
 }

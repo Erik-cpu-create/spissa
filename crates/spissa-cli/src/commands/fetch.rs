@@ -106,6 +106,8 @@ fn human(bytes: u64) -> String {
 }
 
 /// Stream-download one file with resume + a single-line progress indicator.
+/// Returns the bytes actually pulled over the network this run (0 if skipped) for the avg-speed
+/// summary. Each finished file leaves a permanent green-check checklist row.
 fn download_file(
     repo: &str,
     revision: &str,
@@ -113,9 +115,7 @@ fn download_file(
     expected: Option<u64>,
     dest_dir: &Path,
     token: Option<&str>,
-    idx: usize,
-    total: usize,
-) -> Result<()> {
+) -> Result<u64> {
     let final_path = dest_dir.join(rfilename);
     if let Some(parent) = final_path.parent() {
         fs::create_dir_all(parent)?;
@@ -124,8 +124,11 @@ fn download_file(
     // Skip if already complete (size matches, or just exists when size is unknown).
     if let Ok(meta) = fs::metadata(&final_path) {
         if expected.map(|e| e == meta.len()).unwrap_or(true) {
-            println!("[{idx}/{total}] {rfilename} — already present, skip");
-            return Ok(());
+            println!(
+                "  \x1b[1;92m✓\x1b[0m  {rfilename:<32} {:>9}  \x1b[2m(already present)\x1b[0m",
+                human(meta.len())
+            );
+            return Ok(0);
         }
     }
 
@@ -171,14 +174,12 @@ fn download_file(
         }
         file.write_all(&buf[..n])?;
         done += n as u64;
-        if last.elapsed().as_millis() >= 250 {
-            print_progress(idx, total, rfilename, done, total_bytes, started, resume_from);
+        if last.elapsed().as_millis() >= 120 {
+            print_progress(rfilename, done, total_bytes, started, resume_from);
             last = Instant::now();
         }
     }
     file.flush()?;
-    print_progress(idx, total, rfilename, done, total_bytes, started, resume_from);
-    println!();
 
     if let Some(exp) = expected {
         if done != exp {
@@ -187,31 +188,55 @@ fn download_file(
     }
     fs::rename(&part_path, &final_path)
         .with_context(|| format!("finalizing {}", final_path.display()))?;
-    Ok(())
+    // Wipe the live line, leave the permanent green-check checklist row.
+    print!("\r\x1b[2K");
+    println!("  \x1b[1;92m✓\x1b[0m  {rfilename:<32} {:>9}", human(done));
+    let _ = std::io::stdout().flush();
+    Ok(done.saturating_sub(resume_from))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn print_progress(
-    idx: usize,
-    total: usize,
-    name: &str,
-    done: u64,
-    total_bytes: Option<u64>,
-    started: Instant,
-    resume_from: u64,
-) {
+/// The live line for the file currently downloading: spinner + name + bar + %/size/speed/ETA.
+fn print_progress(name: &str, done: u64, total_bytes: Option<u64>, started: Instant, resume_from: u64) {
     let secs = started.elapsed().as_secs_f64().max(1e-3);
     let speed = (done.saturating_sub(resume_from)) as f64 / secs;
-    let pct = total_bytes
-        .map(|t| format!("{:5.1}%", done as f64 / t.max(1) as f64 * 100.0))
-        .unwrap_or_else(|| "   ?%".to_string());
+    let frame = crate::progress::spinner_frame((started.elapsed().as_millis() / 80) as usize);
+    let (gbar, pct, eta) = match total_bytes {
+        Some(t) if t > 0 => {
+            let frac = done as f64 / t as f64;
+            let eta = if speed > 1.0 {
+                fmt_eta((t.saturating_sub(done) as f64 / speed) as u64)
+            } else {
+                "—".to_string()
+            };
+            (
+                crate::progress::bar(frac, 10),
+                format!("{:.0}%", (frac * 100.0).min(100.0)),
+                eta,
+            )
+        }
+        _ => (
+            crate::progress::bar(0.0, 10),
+            "?%".to_string(),
+            "—".to_string(),
+        ),
+    };
     print!(
-        "\r[{idx}/{total}] {name}  {pct}  {} / {}  {}/s   ",
+        "\r\x1b[2K  {frame}  {name:<32} {gbar} {pct:>4}   {} / {}   {}/s   ETA {eta}",
         human(done),
         total_bytes.map(human).unwrap_or_else(|| "?".to_string()),
-        human(speed as u64)
+        human(speed as u64),
     );
     let _ = std::io::stdout().flush();
+}
+
+fn fmt_eta(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
 }
 
 pub fn run(
@@ -242,33 +267,33 @@ pub fn run(
     fs::create_dir_all(&dest)?;
 
     let total_bytes: u64 = info.siblings.iter().filter_map(|s| s.size).sum();
-    println!(
-        "pipeline = {}  ->  category = {cat}",
-        info.pipeline_tag.as_deref().unwrap_or("(none)")
-    );
-    println!(
-        "{} files ({}) -> {}",
-        info.siblings.len(),
-        human(total_bytes),
-        dest.display()
-    );
-
     let n = info.siblings.len();
-    for (i, s) in info.siblings.iter().enumerate() {
-        download_file(
-            repo,
-            revision,
-            &s.rfilename,
-            s.size,
-            &dest,
-            token.as_deref(),
-            i + 1,
-            n,
-        )?;
+    println!();
+    println!(
+        "  \x1b[1m{repo}\x1b[0m   ·   {n} files   ·   {}   ·   {cat}",
+        human(total_bytes)
+    );
+    println!();
+
+    let started = Instant::now();
+    let mut downloaded = 0u64;
+    for s in &info.siblings {
+        downloaded += download_file(repo, revision, &s.rfilename, s.size, &dest, token.as_deref())?;
     }
 
-    println!("\n✓ {repo} -> {}", dest.display());
-    println!("  pack it with:  rllm pack {} --out <name>.spsa", dest.display());
+    crate::progress::print_fetch_result(
+        &folder,
+        n,
+        total_bytes,
+        downloaded,
+        started.elapsed().as_secs_f64(),
+        &dest.display().to_string(),
+    );
+    println!();
+    println!(
+        "  pack it with:  \x1b[1mspissa pack {} --out <name>.spsa\x1b[0m",
+        dest.display()
+    );
     Ok(())
 }
 
