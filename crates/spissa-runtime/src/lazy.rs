@@ -58,7 +58,7 @@ pub struct LazySpissaModel {
     /// opened here and `reeform-delta-v1` tensors are reconstructed as `W_ft = W_base + Δ` on
     /// decode. `None` for ordinary self-contained models.
     base: Option<Box<LazySpissaModel>>,
-    delta_table: Option<rtc_codec::delta::Tables>,
+    delta_codebook: Option<rtc_codec::delta::Codebook>,
 }
 
 /// Resolve a delta's base path: try it as given, else next to the delta file (by the stored path,
@@ -156,7 +156,7 @@ impl LazySpissaModel {
                 Ok("1") | Ok("true")
             ),
             base: None,
-            delta_table: None,
+            delta_codebook: None,
         };
 
         // REEFORM delta: if this `.spsa` is a delta, open its base + load the global Δ table so
@@ -171,7 +171,7 @@ impl LazySpissaModel {
             })?;
             let table_bytes =
                 model.decode_tensor_raw_bytes(rtc_codec::delta::DELTA_TABLE_TENSOR)?;
-            model.delta_table = Some(rtc_codec::delta::Tables::from_freq_bytes(&table_bytes));
+            model.delta_codebook = Some(rtc_codec::delta::Codebook::deserialize(&table_bytes));
             model.base = Some(Box::new(base));
         }
         Ok(model)
@@ -510,22 +510,16 @@ impl LazySpissaModel {
             // Copy the encoded Δ out of the mmap first (releases the reader borrow before the
             // base decode below borrows self mutably).
             let encoded = self.reader.read_chunk_slice(chunk.chunk_id)?.to_vec();
-            let n_weights = (tensor_meta.original_size_bytes / 2) as usize;
             let base = self.base.as_mut().ok_or_else(|| {
                 RuntimeError::InvalidTensorData(format!(
                     "tensor '{name}' is a delta but this model has no base loaded"
                 ))
             })?;
             let base_bytes = base.decode_tensor_raw_bytes(name)?;
-            let table = self.delta_table.as_ref().ok_or_else(|| {
-                RuntimeError::InvalidTensorData("delta model is missing its global Δ table".into())
+            let cb = self.delta_codebook.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidTensorData("delta model is missing its codebook".into())
             })?;
-            return Ok(rtc_codec::delta::decode_tensor(
-                &encoded,
-                &base_bytes,
-                n_weights,
-                table,
-            ));
+            return Ok(rtc_codec::delta::decode_tensor_bx(&encoded, &base_bytes, cb));
         }
         crate::loader::decode_tensor_bytes(&self.reader, &tensor_meta)
     }

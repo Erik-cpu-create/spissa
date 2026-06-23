@@ -679,7 +679,6 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
         mapped: String,
         src: String,
         shape: Vec<u64>,
-        zz: Vec<u16>,
         ft_sha: [u8; 32],
     }
     struct RItem {
@@ -691,7 +690,9 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
     }
     let mut ditems: Vec<DItem> = Vec::new();
     let mut ritems: Vec<RItem> = Vec::new();
-    let mut hist = vec![0u64; 65536];
+    // Global histogram + a per-base-exponent histogram (flat 256×65536) drive the codebook.
+    let mut global_hist = vec![0u64; 65536];
+    let mut per_exp_hist = vec![0u64; 256 * 65536];
     let (mut wdelta, mut wraw) = (0u64, 0u64);
     for (mapped, src) in &tensors {
         let meta = source.to_rllm_meta(src)?;
@@ -704,13 +705,13 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
                 .map_err(|e| anyhow::anyhow!("decode base tensor {mapped}: {e}"))?;
             if bb.len() == ftb.len() {
                 let zz = dc::delta_zigzag(&ftb, &bb);
-                dc::accumulate_hist(&mut hist, &zz);
+                let exps = dc::base_exps(&bb);
+                dc::accumulate_bx(&mut per_exp_hist, &mut global_hist, &zz, &exps);
                 wdelta += zz.len() as u64;
                 ditems.push(DItem {
                     mapped: mapped.clone(),
                     src: src.clone(),
                     shape: meta.shape.clone(),
-                    zz,
                     ft_sha: sha256_array(&ftb),
                 });
                 continue;
@@ -729,8 +730,10 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
     if let Some(s) = &spinner {
         s.set("Building rANS model + encoding …");
     }
-    let table = dc::Tables::from_hist(&hist);
-    let table_bytes = table.freq_to_bytes();
+    // Decide the base-exponent codebook (global table + per-exponent tables where they pay).
+    let codebook = dc::build_codebook(&per_exp_hist, &global_hist);
+    drop(per_exp_hist);
+    let table_bytes = codebook.serialize();
 
     let metadata = GlobalMetadata {
         model_name,
@@ -771,10 +774,13 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
     let tid = add(&mut writer, dc::DELTA_TABLE_TENSOR.to_string(), vec![table_bytes.len() as u64], DType::U8, table_bytes.len() as u64, sha256_array(&table_bytes));
     writer.write_chunk(tid, CODEC_RAW_V1, &table_bytes, &table_bytes, 0)?;
 
-    // delta tensors (single chunk each, reeform-delta-v1 of the zigzag Δ).
+    // delta tensors (single chunk each, base-exponent-conditioned reeform-delta-v1).
     for it in &ditems {
         let ftb = source.read_tensor(&it.src)?; // decoded reference for chunk checksum/size
-        let enc = dc::encode_stream(&it.zz, &table);
+        let bb = base
+            .decode_tensor_raw_bytes(&it.mapped)
+            .map_err(|e| anyhow::anyhow!("decode base tensor {}: {e}", it.mapped))?;
+        let enc = dc::encode_tensor_bx(&ftb, &bb, &codebook);
         let tid = add(&mut writer, it.mapped.clone(), it.shape.clone(), DType::Bf16, ftb.len() as u64, it.ft_sha);
         writer.write_chunk(tid, dc::CODEC_DELTA_V1, &enc, &ftb, 0)?;
     }
