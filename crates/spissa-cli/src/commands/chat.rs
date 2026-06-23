@@ -13,7 +13,8 @@
 //!   * `--low-ram`   → stream the embedding (SPISSA_STREAM_EMBEDDING): resident ≈ the
 //!                     compressed size; slower (re-decode per token) but fits the
 //!                     >RAM regime where the bf16 table would not.
-//!   * `--fast`      → q8 turbo (mlock + int8-activation kernels) for q8 models.
+//!   * `--fast`      → mlock: page-lock the model in RAM to avoid swap. The fast SIMD decode path
+//!                     is already on by default for every dtype, so this only adds the page lock.
 
 use anyhow::{Context, Result};
 use std::io::{self, BufRead, Write};
@@ -291,13 +292,7 @@ fn stream_qwen_turn(
         budget,
         &mut |tok| {
             acc.push(tok);
-            if let Ok(full) = tokenizer.decode(&acc) {
-                if full.starts_with(&shown) && full.len() > shown.len() {
-                    print!("{}", &full[shown.len()..]);
-                    io::stdout().flush().ok();
-                    shown = full;
-                }
-            }
+            print_reply_suffix(tokenizer, &acc, &mut shown, true);
             true
         },
     )?;
@@ -311,11 +306,43 @@ fn stream_qwen_turn(
     Ok(())
 }
 
-/// Print the streaming reply suffix: re-decode the whole reply each token (so
-/// multi-token glyphs render) but print only the NEW tail. Shared by both REPLs.
-fn print_reply_suffix(tokenizer: &SpissaTokenizer, reply: &[usize], shown: &mut String) {
-    let full = tokenizer.decode(reply).unwrap_or_default();
-    let full = full.trim_end_matches('\u{FFFD}');
+/// Drop Qwen reasoning from the visible stream: remove complete `<think>...</think>` blocks, and
+/// while a `<think>` is still open (no `</think>` yet) hold back everything after it until the
+/// closing tag arrives. Operates on decoded text, so it works even if `<think>` isn't one token.
+fn strip_think_spans(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(start) = rest.find("<think>") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + "<think>".len()..];
+        match after.find("</think>") {
+            Some(end) => rest = &after[end + "</think>".len()..],
+            None => return out, // open think → suppress the tail until it closes
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Print the streaming reply suffix: re-decode the whole reply each token (so multi-token glyphs
+/// render) but print only the NEW tail. Trims a trailing U+FFFD so a multi-byte glyph (e.g. an
+/// emoji) split across tokens is held back until its bytes complete instead of flashing a
+/// replacement char. `strip_think` additionally hides Qwen `<think>…</think>` reasoning. Shared by
+/// every REPL.
+fn print_reply_suffix(
+    tokenizer: &SpissaTokenizer,
+    reply: &[usize],
+    shown: &mut String,
+    strip_think: bool,
+) {
+    let decoded = tokenizer.decode(reply).unwrap_or_default();
+    let trimmed = decoded.trim_end_matches('\u{FFFD}');
+    let full = if strip_think {
+        strip_think_spans(trimmed)
+    } else {
+        trimmed.to_string()
+    };
+    let full = full.as_str();
     if let Some(rest) = full.strip_prefix(shown.as_str()) {
         print!("{rest}");
     } else {
@@ -453,7 +480,7 @@ fn gemma_run_turn(
     let mut shown = String::new();
     let mut on_token = |token: usize| -> bool {
         reply.push(token);
-        print_reply_suffix(tokenizer, &reply, &mut shown);
+        print_reply_suffix(tokenizer, &reply, &mut shown, false);
         true
     };
     let result =
@@ -547,7 +574,7 @@ fn llama_chat(
                 return false;
             }
             reply.push(token);
-            print_reply_suffix(&tokenizer, &reply, &mut shown);
+            print_reply_suffix(&tokenizer, &reply, &mut shown, false);
             true
         };
         let result = session.generate_turn(&input_tokens, max_new_tokens, &mut budget, &mut on_token);
@@ -571,4 +598,21 @@ fn llama_chat(
     }
     println!("bye!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_think_spans;
+
+    #[test]
+    fn strip_think_spans_hides_reasoning() {
+        // Complete block removed; the answer remains.
+        assert_eq!(strip_think_spans("<think>reasoning here</think>The answer"), "The answer");
+        // Block in the middle.
+        assert_eq!(strip_think_spans("Sure!<think>x</think> done"), "Sure! done");
+        // Streaming: an open <think> with no closing tag yet → suppress the tail.
+        assert_eq!(strip_think_spans("ok <think>still going"), "ok ");
+        // No think + an emoji → byte-for-byte unchanged.
+        assert_eq!(strip_think_spans("just text 😀✨"), "just text 😀✨");
+    }
 }
