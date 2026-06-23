@@ -88,8 +88,11 @@ pub fn run(
         std::env::set_var("SPISSA_DECODE_RESIDENT", "1");
     }
     if fast {
+        // The fast SIMD decode path is ON by default for EVERY dtype (q8/bf16/rANS/delta) — it is an
+        // opt-out flag — so `--fast`'s only real effect is page-locking the model in RAM (mlock) to
+        // avoid swap. (We intentionally do NOT set SPISSA_Q8_ACTIVATION=1: it is a no-op default-on,
+        // and setting it here made `--fast` look q8-specific when it isn't.)
         std::env::set_var("SPISSA_MLOCK", "1");
-        std::env::set_var("SPISSA_Q8_ACTIVATION", "1");
     }
 
     let mut model = LazySpissaModel::open(model_path)?;

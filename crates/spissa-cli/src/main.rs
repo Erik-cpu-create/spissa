@@ -287,7 +287,8 @@ enum Commands {
         #[arg(long)]
         low_ram: bool,
 
-        /// q8 turbo: mlock residency + int8-activation kernels (q8 models)
+        /// Page-lock the model in RAM (mlock) to avoid swap. The fast SIMD decode path is already on
+        /// by default for all dtypes; this only adds mlock, so use it only when the model fits in RAM.
         #[arg(long)]
         fast: bool,
 

@@ -11,6 +11,7 @@
 //! the choice persists in `~/.config/spissa/settings.json`. No new dependency — `serde_json`
 //! is already linked and the home dir comes from `$HOME`.
 
+use crate::progress::human_size;
 use anyhow::Result;
 use inquire::{Confirm, Select, Text};
 use serde::{Deserialize, Serialize};
@@ -112,7 +113,7 @@ struct Strings {
     pack_pick_base: &'static str,
     pack_output: &'static str,
     chat_pick: &'static str,
-    chat_fast: &'static str,
+    chat_mlock: &'static str,
     chat_maxtok: &'static str,
     chat_system: &'static str,
     chat_system_help: &'static str,
@@ -158,7 +159,7 @@ static EN: Strings = Strings {
     pack_pick_base: "Pick the base .spsa (must be lossless):",
     pack_output: "Output .spsa:",
     chat_pick: "Chat — pick a model:",
-    chat_fast: "Fast mode (q8 turbo)?",
+    chat_mlock: "Lock model in RAM (mlock — avoids swap)?",
     chat_maxtok: "Max tokens per reply:",
     chat_system: "System prompt (Enter = skip):",
     chat_system_help: "give a persona/rule, e.g. 'answer briefly'",
@@ -197,7 +198,7 @@ static ID: Strings = Strings {
     pack_pick_base: "Pilih base .spsa (harus lossless):",
     pack_output: "Output .spsa:",
     chat_pick: "Chat — pilih model:",
-    chat_fast: "Mode --fast (q8 turbo)?",
+    chat_mlock: "Kunci model di RAM (mlock — cegah swap)?",
     chat_maxtok: "Max token per balasan:",
     chat_system: "System prompt (Enter = lewati):",
     chat_system_help: "kasih persona/aturan, mis. 'jawab singkat pakai bahasa gaul'",
@@ -374,10 +375,31 @@ fn menu_chat(s: &Strings) -> Result<()> {
         Some(m) => m,
         None => return Ok(()),
     };
-    let fast = Confirm::new(s.chat_fast)
-        .with_default(true)
+    // mlock (page-lock in RAM, avoids swap) — NOT q8-specific; the fast SIMD path is on by default
+    // for every dtype. Only worth it when the model's resident footprint fits in RAM, so we show
+    // the sizes and default the prompt ON only if it fits (resident < 60% of RAM).
+    let resident = estimate_resident_bytes(&model);
+    let ram = total_ram_bytes();
+    // Conservative: default ON only under ~40% of total RAM (OS + runtime overhead eat the rest,
+    // e.g. macOS ~4GB on an 8GB box). On Android mlock is a desktop optimization that usually FAILS
+    // (low RLIMIT_MEMLOCK for non-root apps) and risks the low-memory killer if it succeeds — so it
+    // defaults OFF there (the prompt still shows, so a capable phone can opt in). The shown sizes
+    // let the user override on any platform.
+    let fits = !cfg!(target_os = "android")
+        && matches!((resident, ram), (Some(r), Some(m)) if r < m / 10 * 4);
+    let prompt = match (resident, ram) {
+        (Some(r), Some(m)) => format!(
+            "{}  (model {}, RAM {})",
+            s.chat_mlock,
+            human_size(r),
+            human_size(m)
+        ),
+        _ => s.chat_mlock.to_string(),
+    };
+    let fast = Confirm::new(&prompt)
+        .with_default(fits)
         .prompt()
-        .unwrap_or(true);
+        .unwrap_or(false);
 
     // Max tokens per reply (Enter = default). Falls back to 512 on bad/empty input.
     let max_new_tokens = Text::new(s.chat_maxtok)
@@ -477,6 +499,53 @@ fn normalize_pack_output(input: &str, default: &str) -> String {
 
 // ---- model discovery under models/ ----
 
+/// Resident (decompressed) footprint of a `.spsa` — the bytes held in RAM under decode-resident.
+/// Reads only the container metadata (no decode, no base open), so it is cheap and never fails on a
+/// missing delta base. `None` if the file can't be read as a `.spsa`.
+fn estimate_resident_bytes(path: &str) -> Option<u64> {
+    let reader = spissa_container::SpissaReader::open(path).ok()?;
+    Some(
+        reader
+            .list_tensors()
+            .iter()
+            .map(|t| t.original_size_bytes)
+            .sum(),
+    )
+}
+
+/// Total physical RAM in bytes (macOS: `hw.memsize`; Linux/Android: `/proc/meminfo`). Portable, no
+/// extra deps. `None` if it can't be determined (the caller then defaults mlock OFF).
+fn total_ram_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut size: u64 = 0;
+        let mut len = std::mem::size_of::<u64>();
+        let ret = unsafe {
+            libc::sysctlbyname(
+                b"hw.memsize\0".as_ptr() as *const libc::c_char,
+                &mut size as *mut u64 as *mut libc::c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if ret == 0 && size > 0 {
+            Some(size)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+        s.lines().find_map(|line| {
+            line.strip_prefix("MemTotal:")
+                .and_then(|r| r.trim().trim_end_matches("kB").trim().parse::<u64>().ok())
+                .map(|kb| kb * 1024)
+        })
+    }
+}
+
 fn discover_rllm(root: &str) -> Vec<String> {
     let mut out = Vec::new();
     walk(Path::new(root), 4, &mut |p, is_dir| {
@@ -519,6 +588,24 @@ fn walk(dir: &Path, depth: usize, f: &mut impl FnMut(&Path, bool)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mlock_gate_helpers_work() {
+        // Total RAM must resolve to a sane value on this host (FFI sysctl / /proc/meminfo).
+        let ram = total_ram_bytes();
+        assert!(
+            ram.map(|r| r > (1u64 << 30)).unwrap_or(false),
+            "total RAM should resolve to > 1 GB, got {ram:?}"
+        );
+        // Resident estimate of a packed model (metadata-only) should be > 100 MB, if one is present.
+        if std::path::Path::new("models/SmolLM2-135M.spsa").exists() {
+            let r = estimate_resident_bytes("models/SmolLM2-135M.spsa");
+            assert!(
+                r.map(|b| b > (100u64 << 20)).unwrap_or(false),
+                "resident estimate should be > 100 MB, got {r:?}"
+            );
+        }
+    }
 
     #[test]
     fn i18n_table_and_settings_roundtrip() {
