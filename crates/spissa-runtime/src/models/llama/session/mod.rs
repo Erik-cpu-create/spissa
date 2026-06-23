@@ -28,7 +28,7 @@ use crate::streaming::{
     streaming_tile_linear_argmax_with_rolling_from_model,
 };
 use crate::{
-    embedding_lookup, rms_norm, sample_argmax_excluding, sample_top_p, select_top_indices_by_value,
+    rms_norm, sample_argmax_excluding, sample_top_p, select_top_indices_by_value,
     streaming_input_tiled_sparse_tile_linear_from_model, streaming_tile_linear_argmax_from_model,
     streaming_tile_linear_from_model, LazySpissaModel, MemoryBudget, Result, RuntimeError,
 };
@@ -47,7 +47,6 @@ pub struct LlamaRamaSessionAdapter<'a> {
     intermediate_size: usize,
     head_dim: usize,
     vocab_size: usize,
-    embedding_data: Vec<f32>,
     layer_norms: Vec<OwnedLlamaStreamingBlockParameters>,
     caches: Vec<KvCache>,
     last_phase_timings: Option<RamaSessionPhaseTimings>,
@@ -122,10 +121,12 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             )?;
         }
 
-        let embedding_data = model
-            .decode_tensor(&prepared.embedding_weight, budget)?
-            .data;
-
+        // R150: do NOT materialize the tied embedding as a resident f32 table. For a
+        // big-vocab model (Phi-4: 200064×3072) that table is 2.46 GB of f32 — on top of
+        // the bf16 chunks the decode-once cache already holds for the LM head — which is
+        // what pushed Phi past 8 GB into swap (4.7 GB/s effective vs Qwen's 21.9). The
+        // gather now streams rows straight from the cache (`embed_gather`), so the only
+        // resident copy of the embedding is the bf16 chunk cache the LM head already uses.
         let mut layer_norms = Vec::with_capacity(prepared.layers.len());
         for i in 0..prepared.layers.len() {
             layer_norms.push(OwnedLlamaStreamingBlockParameters {
@@ -160,7 +161,6 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             intermediate_size,
             head_dim,
             vocab_size,
-            embedding_data,
             layer_norms,
             caches,
             last_phase_timings: None,
@@ -244,6 +244,60 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         self.layer_drift_probe = enabled;
     }
 
+    /// Gather embedding rows for `token_ids` by decoding ONLY the chunk(s) that hold them
+    /// (a cache hit in decode-once mode — the LM head already keeps these bf16 chunks
+    /// resident). Replaces the 2.46 GB resident f32 table; peak resident drops by the full
+    /// table for big-vocab models. The packer pads each chunk to a whole number of rows, so
+    /// a row never straddles a chunk boundary. bf16 embedding only (Llama/Phi tied tables).
+    fn embed_gather(&mut self, token_ids: &[usize], budget: &mut MemoryBudget) -> Result<Vec<f32>> {
+        let hidden = self.hidden_size;
+        let vocab = self.vocab_size;
+        let row_bytes = hidden * 2; // bf16 = 2 bytes/element
+        for &row in token_ids {
+            if row >= vocab {
+                return Err(RuntimeError::Shape(format!(
+                    "token id {row} out of range for vocab {vocab}"
+                )));
+            }
+        }
+        let tensor_id = self.model.tensor(&self.prepared.embedding_weight)?.tensor_id;
+        let mut out = vec![0.0f32; token_ids.len() * hidden];
+        let mut chunks = self.model.chunks_for_tensor(tensor_id).to_vec();
+        chunks.sort_by_key(|chunk| chunk.chunk_offset_in_tensor);
+        let mut byte_offset = 0usize;
+        for chunk in chunks {
+            let chunk_start = byte_offset;
+            let chunk_len = chunk.uncompressed_size as usize;
+            byte_offset += chunk_len;
+            let chunk_end = chunk_start + chunk_len;
+            let hits: Vec<(usize, usize)> = token_ids
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &row)| {
+                    let row_start = row.checked_mul(row_bytes)?;
+                    (row_start >= chunk_start && row_start + row_bytes <= chunk_end)
+                        .then_some((i, row_start - chunk_start))
+                })
+                .collect();
+            if hits.is_empty() {
+                continue; // skip the decode entirely — only touch chunks we need
+            }
+            self.model
+                .with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
+                    for (out_idx, local) in &hits {
+                        let dst = &mut out[out_idx * hidden..(out_idx + 1) * hidden];
+                        for (h, value) in dst.iter_mut().enumerate() {
+                            let lo = bytes[local + 2 * h];
+                            let hi = bytes[local + 2 * h + 1];
+                            *value = f32::from_bits((u16::from_le_bytes([lo, hi]) as u32) << 16);
+                        }
+                    }
+                    Ok(())
+                })?;
+        }
+        Ok(out)
+    }
+
     fn append_tokens_inner(
         &mut self,
         tokens: &[usize],
@@ -295,12 +349,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             )?;
         }
         let phase_start = Instant::now();
-        let mut hidden = embedding_lookup(
-            &self.embedding_data,
-            self.vocab_size,
-            self.hidden_size,
-            tokens,
-        )?;
+        let mut hidden = self.embed_gather(tokens, budget)?;
         phase_timings.embedding_ms += phase_start.elapsed().as_secs_f64() * 1000.0;
 
         let phase_start = Instant::now();
