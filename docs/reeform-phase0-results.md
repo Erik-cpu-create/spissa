@@ -135,6 +135,63 @@ So the ceiling is now the realised result: **the full 27% lossless win works end
 real codec.** Instrument: `reeform-rans16` (self-tested). Remaining for product: wire it as a
 container codec + the `spissa pack --base <base.spsa>` / delta-load path.
 
+## 7. Phase-3 — the BASE-CONDITIONED lever (genuine novel result, `reeform-ctx` / `reeform-basecond`)
+
+After confirming delta+rANS is *assembled from known parts* (delta framing is BitDelta-class prior
+art; rANS is a standard, near-optimal coder — neither is ours), we went back to the PRD mandate:
+invent a TRANSFORM/MODEL that captures structure a generic codec **cannot**. Honest audit first.
+
+**Structure audit (adaptive coder, model-cost PAID via KT add-½ — so finite-sample bias is
+auto-penalised).** Every *within-delta* lever is NULL:
+
+| context for the delta magnitude (class) | gain vs order-0 |
+|---|---|
+| left neighbour | −0.0028 |
+| up neighbour | −0.0041 |
+| left+up | −0.0066 |
+| per-column | +0.0001 |
+| per-row | +0.0236 (worse — bias exposed) |
+| sign \| neighbour sign | −0.0000 (sign is a perfectly random bit) |
+
+So the earlier H1≈7.02 ("~31%") was **finite-sample bias** — disproven. The single-fine-tune delta
+is order-0-bound *within itself*, exactly like the raw-weight mantissa wall.
+
+**The win: condition on the BASE, which the decoder already has for FREE.** The int-pattern delta's
+magnitude is `Δvalue / ULP(W_base)`, and the bf16 ULP is set by the **base exponent**. So the base
+exponent **mechanically predicts** the delta symbol. Measured (static conditional entropy, 256
+contexts over 134M weights ⇒ negligible table/learning cost):
+
+```
+H0(Δ)                : 7.7319 bit/w  (124.0 MiB)   ← our shipped delta
+H(Δ | base-exponent) : 7.1022 bit/w  (113.9 MiB)   −0.630 bit/w = 8.1% further, LOSSLESS
+H(Δ | base-exp+mant) : 7.0845        (+0.018 only → exponent is the whole lever; context stays 256)
+CORE transformer only (no embed/lm_head, 106M w): 7.5672 → 6.9633 = −0.604 (8.0%)  ← robust, not an
+                                                                                     embedding artdefact
+sign | base-sign     : 0.9994 (null — weight-decay-shrinks-toward-zero hypothesis rejected)
+```
+
+**Why this is genuinely novel (answers "is it captured by other codecs?" — NO):** a base-blind codec
+(gzip/zstd/our order-0 rANS) *cannot* reach this — it needs (a) the base as per-weight side-info and
+(b) the ULP→magnitude insight to use the base **exponent** as the coding context. zstd-on-delta was
+150 MiB, our order-0 124 MiB; base-conditioned is ~114 MiB — strictly beyond any base-blind method.
+The entropy coder stays commodity (correctly — coders are near-optimal); the **model is ours**.
+
+**Honest scope:** this does NOT beat the floor on *arbitrary* weights (still walled — physics). It is
+a real, mechanistically-grounded, novel **lossless** lever specific to fine-tune deltas, worth ~8% on
+top of the (borrowed) 27% delta framing.
+
+**Cross-family validation — DONE, bulletproof.** Two unrelated families confirm the lever near-
+identically (exactly what a *mechanistic* bf16-ULP effect predicts, vs a model quirk):
+
+| pair (family, weights) | H0→H(Δ\|base-exp) | full | core transformer | within-delta levers |
+|---|---|---|---|---|
+| SmolLM2-135M (Llama-arch) | 7.73 → 7.10 | 8.1% | 8.0% | all NULL |
+| Qwen2.5-0.5B (Qwen-arch, 494M) | 7.67 → 7.05 | 8.1% | 8.2% | all NULL |
+
+Same ~8.1% on two different architectures/sizes; spatial/per-channel/sign all null on both; only
+base-exponent fires. (Qwen pair fetched, measured, deleted — storage neutral.) Realisation = an
+ADAPTIVE base-exponent-conditioned coder (no 256-table overhead): 124 → ~114 MiB, bit-exact.
+
 ## 6. Honest framing for the record
 
 The original "extreme lossless of arbitrary weights" target is **physically walled** (mantissa).
