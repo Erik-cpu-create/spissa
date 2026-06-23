@@ -165,7 +165,7 @@ impl LazySpissaModel {
             let base_path = resolve_base_path(&model.path, &base_ref.path);
             let base = LazySpissaModel::open(&base_path).map_err(|e| {
                 RuntimeError::InvalidTensorData(format!(
-                    "this model is a delta and needs its base '{}', which could not be opened: {e}",
+                    "this model needs its base '{}', which could not be opened: {e}",
                     base_path.display()
                 ))
             })?;
@@ -520,12 +520,12 @@ impl LazySpissaModel {
             let encoded = self.reader.read_chunk_slice(chunk.chunk_id)?.to_vec();
             let base = self.base.as_mut().ok_or_else(|| {
                 RuntimeError::InvalidTensorData(format!(
-                    "tensor '{name}' is a delta but this model has no base loaded"
+                    "tensor '{name}' needs a base that is not loaded"
                 ))
             })?;
             let base_bytes = base.decode_tensor_raw_bytes(name)?;
             let cb = self.delta_codebook.as_ref().ok_or_else(|| {
-                RuntimeError::InvalidTensorData("delta model is missing its codebook".into())
+                RuntimeError::InvalidTensorData("missing decode table".into())
             })?;
             return Ok(rtc_codec::delta::decode_tensor_bx(&encoded, &base_bytes, cb));
         }
@@ -974,10 +974,10 @@ impl LazySpissaModel {
                 let base = self
                     .base
                     .as_ref()
-                    .ok_or_else(|| RuntimeError::InvalidTensorData("delta model has no base".into()))?
+                    .ok_or_else(|| RuntimeError::InvalidTensorData("no base loaded".into()))?
                     .as_ref();
                 let cb = self.delta_codebook.as_ref().ok_or_else(|| {
-                    RuntimeError::InvalidTensorData("delta model missing its codebook".into())
+                    RuntimeError::InvalidTensorData("missing decode table".into())
                 })?;
                 std::thread::scope(|scope| -> Result<Vec<(u64, Vec<u8>)>> {
                     let handles: Vec<_> = delta_chunks
