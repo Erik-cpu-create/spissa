@@ -108,6 +108,8 @@ struct Strings {
     pack_mode_rans: &'static str,
     pack_mode_q4: &'static str,
     pack_mode_raw: &'static str,
+    pack_mode_delta: &'static str,
+    pack_pick_base: &'static str,
     pack_output: &'static str,
     chat_pick: &'static str,
     chat_fast: &'static str,
@@ -152,6 +154,8 @@ static EN: Strings = Strings {
     pack_mode_rans: "rANS — lossless (bit-exact)",
     pack_mode_q4: "q4 — small (lossy ~10%)",
     pack_mode_raw: "raw bf16 — lossless, large",
+    pack_mode_delta: "delta — lossless vs a base .spsa (~46% of raw)",
+    pack_pick_base: "Pick the base .spsa (must be lossless):",
     pack_output: "Output .spsa:",
     chat_pick: "Chat — pick a model:",
     chat_fast: "Fast mode (q8 turbo)?",
@@ -189,6 +193,8 @@ static ID: Strings = Strings {
     pack_mode_rans: "rANS — lossless (bit-exact)",
     pack_mode_q4: "q4 — kecil (lossy ~10%)",
     pack_mode_raw: "raw bf16 — lossless besar",
+    pack_mode_delta: "delta — lossless vs base .spsa (~46% raw)",
+    pack_pick_base: "Pilih base .spsa (harus lossless):",
     pack_output: "Output .spsa:",
     chat_pick: "Chat — pilih model:",
     chat_fast: "Mode --fast (q8 turbo)?",
@@ -310,10 +316,25 @@ fn menu_pack(s: &Strings) -> Result<()> {
         s.pack_mode_rans,
         s.pack_mode_q4,
         s.pack_mode_raw,
+        s.pack_mode_delta,
     ];
     let mode = match Select::new(s.pack_mode, modes).prompt() {
         Ok(m) => m,
         Err(_) => return Ok(()),
+    };
+    // Delta mode: pack the fine-tune losslessly against a chosen base `.spsa`.
+    let base_spsa = if mode == s.pack_mode_delta {
+        let bases = discover_rllm("models");
+        if bases.is_empty() {
+            println!("  {}", s.no_spsa);
+            return Ok(());
+        }
+        match Select::new(s.pack_pick_base, bases).prompt() {
+            Ok(b) => Some(b),
+            Err(_) => return Ok(()),
+        }
+    } else {
+        None
     };
     let (codec, quant): (&str, Option<&str>) = if mode == s.pack_mode_q8 {
         ("raw", Some("q8_transformer_keep_io"))
@@ -339,6 +360,9 @@ fn menu_pack(s: &Strings) -> Result<()> {
         Err(_) => return Ok(()),
     };
     let out = normalize_pack_output(&raw, &default_out);
+    if let Some(base) = base_spsa {
+        return super::pack::run_delta(&dir, &base, &out, false);
+    }
     super::pack::run(
         &dir, &out, "1mb", codec, None, None, false, false, false, 16, None, None, false, quant,
         false, // clean animated UX (not verbose)
