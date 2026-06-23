@@ -11,12 +11,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         budget: &mut MemoryBudget,
     ) -> Result<Vec<LlamaLayerDriftProbeOutput>> {
         let seq_len = tokens.len();
-        let mut hidden = embedding_lookup(
-            &self.embedding_data,
-            self.vocab_size,
-            self.hidden_size,
-            tokens,
-        )?;
+        let mut hidden = self.embed_gather(tokens, budget)?;
         let mut caches = self.caches.clone();
         let mut sparse_column_cache = SparseColumnCache::from_env();
         let mut attention_locality_caches = self.attention_locality_caches.clone();
@@ -128,12 +123,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             ));
         };
         let seq_len = tokens.len();
-        let mut hidden = embedding_lookup(
-            &self.embedding_data,
-            self.vocab_size,
-            self.hidden_size,
-            tokens,
-        )?;
+        let mut hidden = self.embed_gather(tokens, budget)?;
         let mut caches = self.caches.clone();
         let mut sparse_column_cache = SparseColumnCache::from_env();
         let mut attention_locality_caches = self.attention_locality_caches.clone();
