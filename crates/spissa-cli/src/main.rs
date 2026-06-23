@@ -96,30 +96,17 @@ enum Commands {
         file: String,
     },
 
-    /// Pack a fine-tune as a lossless delta from its base (~27% smaller than the full model)
+    /// Pack a fine-tune as a lossless delta `.spsa` against a base `.spsa` (~50% of raw bf16;
+    /// chat/menu reconstruct it transparently — the base `.spsa` must stay on disk)
     Delta {
         /// Fine-tune safetensors (file or dir)
         finetune: String,
 
-        /// Base safetensors the fine-tune was derived from (file or dir)
+        /// Base model as a LOSSLESS `.spsa` the fine-tune was derived from
         #[arg(long)]
         base: String,
 
-        /// Output .spsd delta file
-        #[arg(short, long)]
-        out: String,
-    },
-
-    /// Reconstruct a fine-tune (bit-exact) from a .spsd delta + its base
-    Undelta {
-        /// Input .spsd delta file
-        input: String,
-
-        /// Base safetensors (must match the one used to pack the delta)
-        #[arg(long)]
-        base: String,
-
-        /// Output reconstructed safetensors
+        /// Output delta `.spsa`
         #[arg(short, long)]
         out: String,
     },
@@ -480,10 +467,7 @@ fn main() -> Result<()> {
         ),
         Commands::Inspect { file } => commands::inspect::run(&file),
         Commands::Delta { finetune, base, out } => {
-            commands::delta::run_pack(&finetune, &base, &out, verbose)
-        }
-        Commands::Undelta { input, base, out } => {
-            commands::delta::run_unpack(&input, &base, &out)
+            commands::pack::run_delta(&finetune, &base, &out, verbose)
         }
         Commands::Verify {
             original,

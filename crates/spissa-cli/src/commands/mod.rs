@@ -7,7 +7,6 @@ pub mod benchmark;
 pub mod chat;
 pub mod chat_session;
 pub mod chat_session_token;
-pub mod delta;
 pub mod doctor;
 pub mod fetch;
 pub mod import;
