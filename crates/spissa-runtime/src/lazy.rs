@@ -496,6 +496,14 @@ impl LazySpissaModel {
         self.decode_raw_with_base(name)
     }
 
+    /// Immutable tensor decode for a self-contained (non-delta) model. Reads the mmap + runs the
+    /// stateless codec with no mutation, so it is safe to call concurrently — used to decode base
+    /// tensors across threads during a delta model's parallel prewarm reconstruction.
+    pub(crate) fn decode_tensor_bytes_shared(&self, name: &str) -> Result<Vec<u8>> {
+        let meta = self.tensor(name)?;
+        crate::loader::decode_tensor_bytes(&self.reader, meta)
+    }
+
     /// Decode a tensor to its original raw bytes, reconstructing `reeform-delta-v1` tensors against
     /// the base (`W_ft = W_base + Δ`). Ordinary tensors take the normal codec path unchanged.
     fn decode_raw_with_base(&mut self, name: &str) -> Result<Vec<u8>> {
@@ -947,12 +955,65 @@ impl LazySpissaModel {
                 (id, name)
             })
             .collect();
-        for (id, name) in delta_chunks {
-            if name.is_empty() {
-                continue;
+        if !delta_chunks.is_empty() {
+            let delta_start = Instant::now();
+            let nd = delta_chunks.len();
+            let nthreads = std::env::var("RLLM_THREADS")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+                .min(nd)
+                .max(1);
+            let part = nd.div_ceil(nthreads);
+            // Reconstruct in parallel: each delta tensor reads its Δ chunk, decodes the base tensor
+            // (immutable mmap + stateless codec) and rebuilds W_ft — no shared mutation, so it
+            // parallelises like the normal prewarm. Cache inserts happen after the scope joins.
+            let reconstructed: Vec<(u64, Vec<u8>)> = {
+                let reader = &self.reader;
+                let base = self
+                    .base
+                    .as_ref()
+                    .ok_or_else(|| RuntimeError::InvalidTensorData("delta model has no base".into()))?
+                    .as_ref();
+                let cb = self.delta_codebook.as_ref().ok_or_else(|| {
+                    RuntimeError::InvalidTensorData("delta model missing its codebook".into())
+                })?;
+                std::thread::scope(|scope| -> Result<Vec<(u64, Vec<u8>)>> {
+                    let handles: Vec<_> = delta_chunks
+                        .chunks(part)
+                        .map(|slice| {
+                            scope.spawn(move || -> Result<Vec<(u64, Vec<u8>)>> {
+                                let mut out = Vec::with_capacity(slice.len());
+                                for (id, name) in slice {
+                                    if name.is_empty() {
+                                        continue;
+                                    }
+                                    let encoded = reader.read_chunk_slice(*id)?.to_vec();
+                                    let base_bytes = base.decode_tensor_bytes_shared(name)?;
+                                    out.push((
+                                        *id,
+                                        rtc_codec::delta::decode_tensor_bx(&encoded, &base_bytes, cb),
+                                    ));
+                                }
+                                Ok(out)
+                            })
+                        })
+                        .collect();
+                    let mut all = Vec::with_capacity(nd);
+                    for h in handles {
+                        all.extend(h.join().expect("delta reconstruct worker panicked")?);
+                    }
+                    Ok(all)
+                })?
+            };
+            for (id, bytes) in reconstructed {
+                self.decoded_cache.insert(id, bytes);
             }
-            let bytes = self.decode_raw_with_base(&name)?;
-            self.decoded_cache.insert(id, bytes);
+            eprintln!(
+                "[prewarm-delta] reconstructed {nd} delta tensors (base+Δ) in {:.1}s ({nthreads} threads)",
+                delta_start.elapsed().as_secs_f64()
+            );
         }
         let jobs: Vec<(u64, String, u64)> = self
             .chunks_by_id
