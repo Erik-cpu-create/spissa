@@ -459,9 +459,21 @@ fn byte_level_pretokens(segment: &str) -> Vec<String> {
         }
 
         if ch.is_ascii_digit() {
-            flush_pending_spaces(&mut tokens, &mut pending_spaces);
-            tokens.push(ch.to_string());
-            idx += 1;
+            // o200k / cl100k group digits in runs of up to 3 (`\p{N}{1,3}`); a leading space
+            // attaches to the run as a Ġ prefix (the GPT-2 heuristic split each digit alone, which
+            // mis-tokenizes numbers for the Phi-4 / GPT-4o vocab).
+            let mut token = String::new();
+            if pending_spaces > 0 {
+                token.extend(std::iter::repeat_n('Ġ', pending_spaces));
+                pending_spaces = 0;
+            }
+            let mut run = 0;
+            while idx < chars.len() && chars[idx].is_ascii_digit() && run < 3 {
+                token.push(chars[idx]);
+                idx += 1;
+                run += 1;
+            }
+            tokens.push(token);
             continue;
         }
 
@@ -541,6 +553,16 @@ mod tests {
         assert_eq!(byte_level_byte_to_char(b' '), 'Ġ');
         assert_eq!(byte_level_byte_to_char(b'\n'), 'Ċ');
         assert_eq!(byte_level_byte_to_char(b'A'), 'A');
+    }
+
+    #[test]
+    fn byte_level_pretokens_groups_digits_in_runs_of_three() {
+        // o200k / cl100k: digit runs of up to 3, leading space attached as Ġ prefix.
+        assert_eq!(byte_level_pretokens("12"), vec!["12"]);
+        assert_eq!(byte_level_pretokens("123"), vec!["123"]);
+        assert_eq!(byte_level_pretokens("1234"), vec!["123", "4"]);
+        assert_eq!(byte_level_pretokens(" 42"), vec!["Ġ42"]);
+        assert_eq!(byte_level_pretokens("2+2"), vec!["2", "+", "2"]);
     }
 
     #[test]
