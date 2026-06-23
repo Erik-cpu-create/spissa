@@ -12,9 +12,10 @@
 // exponent (a further ~8% lossless) without changing this format's framing.
 
 /// Chunk codec id for a delta-coded tensor (payload = global-table u16-rANS of the zigzag Δ).
-pub const CODEC_DELTA_V1: &str = "reeform-delta-v1";
-/// Synthetic tensor that carries the model's single global rANS frequency table (raw chunk).
-pub const DELTA_TABLE_TENSOR: &str = "__reeform_delta_table__";
+/// Generic on-disk id (the secret project codename is kept out of the binary + `.spsa` files).
+pub const CODEC_DELTA_V1: &str = "rtc-delta-v1";
+/// Synthetic tensor that carries the model's codebook (raw chunk). Generic on-disk name.
+pub const DELTA_TABLE_TENSOR: &str = "__rtc_delta_table__";
 
 const PROB_BITS: u32 = 20;
 const PROB_SCALE: u64 = 1 << PROB_BITS;
