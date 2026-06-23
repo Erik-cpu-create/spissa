@@ -10,6 +10,7 @@
 mod bitplane;
 mod bitreader_fast;
 mod codec;
+pub mod delta;
 mod dfloat;
 mod error;
 mod huff;
@@ -19,6 +20,7 @@ mod rle;
 
 pub use bitplane::*;
 pub use codec::*;
+pub use delta::*;
 pub use dfloat::*;
 pub use error::*;
 pub use huff::*;

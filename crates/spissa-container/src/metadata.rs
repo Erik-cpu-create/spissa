@@ -277,6 +277,21 @@ pub struct TokenizerMetadata {
     pub add_bos_token: Option<bool>,
 }
 
+/// Reference to a base model that this `.spsa` is a lossless DELTA from.
+///
+/// When present, the model's delta-coded tensors (`reeform-delta-v1` chunks) are reconstructed at
+/// load time as `W_ft = W_base + Δ`, so the base `.spsa` must be present on disk. The base must be
+/// LOSSLESS (rANS/raw) so its bf16 bytes are exact. `path` is stored as given at pack time (the
+/// loader also resolves it relative to the delta file's directory); `sha256` is the base file hash
+/// for a correctness check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseRef {
+    /// Path to the base `.spsa` (as given at pack time; loader also tries it relative to the delta).
+    pub path: String,
+    /// SHA-256 of the base file at pack time.
+    pub sha256: [u8; 32],
+}
+
 /// Global metadata for the model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GlobalMetadata {
@@ -302,6 +317,9 @@ pub struct GlobalMetadata {
     /// Optional tokenizer vocabulary/config fields needed by text-boundary runtime adapters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer: Option<TokenizerMetadata>,
+    /// Optional base reference — present iff this model is a lossless DELTA from a base `.spsa`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_ref: Option<BaseRef>,
 }
 
 impl GlobalMetadata {
@@ -318,6 +336,7 @@ impl GlobalMetadata {
             codec: "rtc-raw-v1".to_string(),
             model_config: None,
             tokenizer: None,
+            base_ref: None,
         }
     }
 }

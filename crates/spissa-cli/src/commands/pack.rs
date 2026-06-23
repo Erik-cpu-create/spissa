@@ -379,6 +379,7 @@ pub fn run(
         codec: codec_policy.metadata_label().to_string(),
         model_config,
         tokenizer,
+        base_ref: None,
     };
 
     let mut writer = SpissaWriter::new(output, metadata)?;
@@ -615,6 +616,196 @@ pub fn run(
         );
     }
 
+    Ok(())
+}
+
+/// Pack a fine-tune as a lossless DELTA against a base `.spsa` → a delta-`.spsa` (same format and
+/// `.spsa` extension as any model; `spissa chat`/menu reconstruct `W_ft = W_base + Δ` transparently
+/// via the loader). The base must be a LOSSLESS `.spsa`, present on disk when the delta is loaded.
+pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Result<()> {
+    use crate::progress::human_size;
+    use rtc_codec::delta as dc;
+    use spissa_container::BaseRef;
+    use spissa_runtime::LazySpissaModel;
+
+    let ft_path = Path::new(ft);
+    if !ft_path.exists() {
+        anyhow::bail!("Fine-tune path does not exist: {ft}");
+    }
+    if !Path::new(base_spsa).exists() {
+        anyhow::bail!("Base .spsa does not exist: {base_spsa}");
+    }
+    let mut spinner = (!verbose).then(|| Spinner::start("Reading base + fine-tune …"));
+
+    // Base: hash the file (BaseRef correctness check) + open it to decode base tensors.
+    let base_sha = sha256_array(&std::fs::read(base_spsa)?);
+    let mut base = LazySpissaModel::open(base_spsa)
+        .map_err(|e| anyhow::anyhow!("Failed to open base .spsa {base_spsa}: {e}"))?;
+    let base_shapes: std::collections::HashMap<String, Vec<u64>> =
+        base.tensors().map(|t| (t.name.clone(), t.shape.clone())).collect();
+
+    // Fine-tune source + arch/config/tokenizer (the delta `.spsa` carries the FT's own metadata).
+    let mut source = TensorSource::open(ft_path)
+        .with_context(|| format!("Failed to open fine-tune safetensors: {ft}"))?;
+    let raw_names = source.list_tensors();
+    let model_name = ft_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let model_config = resolve_model_config_path(ft_path, None)
+        .map(|p| read_model_config_metadata(&p))
+        .transpose()?;
+    let architecture = model_config
+        .as_ref()
+        .and_then(|c| c.architecture_type.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let tensors = map_tensor_names(&raw_names, &architecture);
+    let default_context_length = model_config
+        .as_ref()
+        .and_then(|c| c.max_position_embeddings)
+        .unwrap_or(0);
+    let tokenizer = resolve_tokenizer_path(ft_path, None, false)
+        .map(|p| read_tokenizer_metadata(&p))
+        .transpose()?;
+    let tokenizer_type = tokenizer
+        .as_ref()
+        .and_then(|t| t.tokenizer_type.clone())
+        .unwrap_or_else(|| "none".to_string());
+
+    // Pass 1: zigzag deltas (vs the decoded base) + global histogram. Non-matching tensors are
+    // kept raw (passthrough). zz is held for pass-2 encoding; base is decoded once.
+    struct DItem {
+        mapped: String,
+        src: String,
+        shape: Vec<u64>,
+        zz: Vec<u16>,
+        ft_sha: [u8; 32],
+    }
+    struct RItem {
+        mapped: String,
+        shape: Vec<u64>,
+        dtype: DType,
+        sha: [u8; 32],
+        bytes: Vec<u8>,
+    }
+    let mut ditems: Vec<DItem> = Vec::new();
+    let mut ritems: Vec<RItem> = Vec::new();
+    let mut hist = vec![0u64; 65536];
+    let (mut wdelta, mut wraw) = (0u64, 0u64);
+    for (mapped, src) in &tensors {
+        let meta = source.to_rllm_meta(src)?;
+        let ftb = source.read_tensor(src)?;
+        let eligible = meta.dtype == DType::Bf16
+            && base_shapes.get(mapped).map(|s| *s == meta.shape).unwrap_or(false);
+        if eligible {
+            let bb = base
+                .decode_tensor_raw_bytes(mapped)
+                .map_err(|e| anyhow::anyhow!("decode base tensor {mapped}: {e}"))?;
+            if bb.len() == ftb.len() {
+                let zz = dc::delta_zigzag(&ftb, &bb);
+                dc::accumulate_hist(&mut hist, &zz);
+                wdelta += zz.len() as u64;
+                ditems.push(DItem {
+                    mapped: mapped.clone(),
+                    src: src.clone(),
+                    shape: meta.shape.clone(),
+                    zz,
+                    ft_sha: sha256_array(&ftb),
+                });
+                continue;
+            }
+        }
+        wraw += (ftb.len() / 2) as u64;
+        ritems.push(RItem {
+            mapped: mapped.clone(),
+            shape: meta.shape.clone(),
+            dtype: meta.dtype,
+            sha: sha256_array(&ftb),
+            bytes: ftb,
+        });
+    }
+
+    if let Some(s) = &spinner {
+        s.set("Building rANS model + encoding …");
+    }
+    let table = dc::Tables::from_hist(&hist);
+    let table_bytes = table.freq_to_bytes();
+
+    let metadata = GlobalMetadata {
+        model_name,
+        architecture,
+        source_format: "safetensors".to_string(),
+        lossless: true,
+        default_context_length,
+        tokenizer_type,
+        created_by: "spissa-cli".to_string(),
+        codec: dc::CODEC_DELTA_V1.to_string(),
+        model_config,
+        tokenizer,
+        base_ref: Some(BaseRef {
+            path: base_spsa.to_string(),
+            sha256: base_sha,
+        }),
+    };
+    let mut writer = SpissaWriter::new(output, metadata)?;
+    let mut next_id = 0u64;
+    let mut add = |w: &mut SpissaWriter, name: String, shape: Vec<u64>, dtype: DType, n: u64, sha: [u8; 32]| -> u64 {
+        let tid = next_id;
+        next_id += 1;
+        w.add_tensor(TensorMeta {
+            tensor_id: tid,
+            name,
+            shape,
+            dtype,
+            original_size_bytes: n,
+            compressed_size_bytes: 0,
+            original_sha256: sha,
+            chunk_count: 1,
+            chunk_start_index: tid,
+        });
+        tid
+    };
+
+    // synthetic global-table tensor (raw) — one per model, read back by the loader.
+    let tid = add(&mut writer, dc::DELTA_TABLE_TENSOR.to_string(), vec![table_bytes.len() as u64], DType::U8, table_bytes.len() as u64, sha256_array(&table_bytes));
+    writer.write_chunk(tid, CODEC_RAW_V1, &table_bytes, &table_bytes, 0)?;
+
+    // delta tensors (single chunk each, reeform-delta-v1 of the zigzag Δ).
+    for it in &ditems {
+        let ftb = source.read_tensor(&it.src)?; // decoded reference for chunk checksum/size
+        let enc = dc::encode_stream(&it.zz, &table);
+        let tid = add(&mut writer, it.mapped.clone(), it.shape.clone(), DType::Bf16, ftb.len() as u64, it.ft_sha);
+        writer.write_chunk(tid, dc::CODEC_DELTA_V1, &enc, &ftb, 0)?;
+    }
+    // raw passthrough tensors.
+    for it in &ritems {
+        let tid = add(&mut writer, it.mapped.clone(), it.shape.clone(), it.dtype, it.bytes.len() as u64, it.sha);
+        writer.write_chunk(tid, CODEC_RAW_V1, &it.bytes, &it.bytes, 0)?;
+    }
+    writer.finalize()?;
+    if let Some(s) = spinner.take() {
+        s.clear();
+    }
+
+    let out_size = std::fs::metadata(output)?.len();
+    let ft_raw = (wdelta + wraw) * 2;
+    if verbose {
+        println!("Written delta .spsa to: {output} ({out_size} bytes)");
+    } else {
+        println!();
+        println!("  \x1b[1;92m✓\x1b[0m  Delta packed → .spsa");
+        println!();
+        println!("  fine-tune (bf16)   {}", human_size(ft_raw));
+        println!(
+            "  delta (.spsa)      {}   ({:.1}% of raw)",
+            human_size(out_size),
+            out_size as f64 / ft_raw.max(1) as f64 * 100.0
+        );
+        println!("  delta-coded        {wdelta} weights · raw fallback {wraw}");
+        println!("  base .spsa         {base_spsa}");
+        println!("  → {output}");
+    }
     Ok(())
 }
 

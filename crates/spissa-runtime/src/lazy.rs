@@ -54,6 +54,33 @@ pub struct LazySpissaModel {
     /// costs the full decoded (bf16) RAM, so only for models that fit decompressed.
     decoded_cache: HashMap<u64, Vec<u8>>,
     decode_resident: bool,
+    /// REEFORM delta: when this `.spsa` is a delta (metadata `base_ref` set), the base model is
+    /// opened here and `reeform-delta-v1` tensors are reconstructed as `W_ft = W_base + Δ` on
+    /// decode. `None` for ordinary self-contained models.
+    base: Option<Box<LazySpissaModel>>,
+    delta_table: Option<rtc_codec::delta::Tables>,
+}
+
+/// Resolve a delta's base path: try it as given, else next to the delta file (by the stored path,
+/// then by just the file name). Falls through to the given path so `open` reports a clear error.
+fn resolve_base_path(delta_path: &Path, base_ref: &str) -> PathBuf {
+    let p = Path::new(base_ref);
+    if p.exists() {
+        return p.to_path_buf();
+    }
+    if let Some(dir) = delta_path.parent() {
+        let joined = dir.join(p);
+        if joined.exists() {
+            return joined;
+        }
+        if let Some(file) = p.file_name() {
+            let sibling = dir.join(file);
+            if sibling.exists() {
+                return sibling;
+            }
+        }
+    }
+    p.to_path_buf()
 }
 
 impl LazySpissaModel {
@@ -108,7 +135,7 @@ impl LazySpissaModel {
             full_decode_runtime_bytes,
         };
 
-        Ok(Self {
+        let mut model = Self {
             path: path_buf,
             reader,
             metadata,
@@ -128,7 +155,26 @@ impl LazySpissaModel {
                 std::env::var("SPISSA_DECODE_RESIDENT").as_deref(),
                 Ok("1") | Ok("true")
             ),
-        })
+            base: None,
+            delta_table: None,
+        };
+
+        // REEFORM delta: if this `.spsa` is a delta, open its base + load the global Δ table so
+        // `reeform-delta-v1` tensors reconstruct (`W_ft = W_base + Δ`) transparently on decode.
+        if let Some(base_ref) = model.metadata.base_ref.clone() {
+            let base_path = resolve_base_path(&model.path, &base_ref.path);
+            let base = LazySpissaModel::open(&base_path).map_err(|e| {
+                RuntimeError::InvalidTensorData(format!(
+                    "this model is a delta and needs its base '{}', which could not be opened: {e}",
+                    base_path.display()
+                ))
+            })?;
+            let table_bytes =
+                model.decode_tensor_raw_bytes(rtc_codec::delta::DELTA_TABLE_TENSOR)?;
+            model.delta_table = Some(rtc_codec::delta::Tables::from_freq_bytes(&table_bytes));
+            model.base = Some(Box::new(base));
+        }
+        Ok(model)
     }
 
     /// Expose a whole tensor's raw bytes as ONE contiguous zero-copy mmap slice,
@@ -447,7 +493,40 @@ impl LazySpissaModel {
     /// `decode_tensor` performs. Lets a non-raw (e.g. rANS-compressed) bf16 embedding be
     /// held resident as bf16 (604 MB) instead of f32 (1.2 GB) — R158b.
     pub fn decode_tensor_raw_bytes(&mut self, name: &str) -> Result<Vec<u8>> {
+        self.decode_raw_with_base(name)
+    }
+
+    /// Decode a tensor to its original raw bytes, reconstructing `reeform-delta-v1` tensors against
+    /// the base (`W_ft = W_base + Δ`). Ordinary tensors take the normal codec path unchanged.
+    fn decode_raw_with_base(&mut self, name: &str) -> Result<Vec<u8>> {
         let tensor_meta = self.tensor(name)?.clone();
+        let delta_chunk = self
+            .chunks_by_tensor
+            .get(&tensor_meta.tensor_id)
+            .and_then(|chunks| chunks.first())
+            .filter(|c| c.codec_id == rtc_codec::delta::CODEC_DELTA_V1)
+            .cloned();
+        if let Some(chunk) = delta_chunk {
+            // Copy the encoded Δ out of the mmap first (releases the reader borrow before the
+            // base decode below borrows self mutably).
+            let encoded = self.reader.read_chunk_slice(chunk.chunk_id)?.to_vec();
+            let n_weights = (tensor_meta.original_size_bytes / 2) as usize;
+            let base = self.base.as_mut().ok_or_else(|| {
+                RuntimeError::InvalidTensorData(format!(
+                    "tensor '{name}' is a delta but this model has no base loaded"
+                ))
+            })?;
+            let base_bytes = base.decode_tensor_raw_bytes(name)?;
+            let table = self.delta_table.as_ref().ok_or_else(|| {
+                RuntimeError::InvalidTensorData("delta model is missing its global Δ table".into())
+            })?;
+            return Ok(rtc_codec::delta::decode_tensor(
+                &encoded,
+                &base_bytes,
+                n_weights,
+                table,
+            ));
+        }
         crate::loader::decode_tensor_bytes(&self.reader, &tensor_meta)
     }
 
@@ -457,7 +536,7 @@ impl LazySpissaModel {
             tensor_meta.original_size_bytes as usize,
             format!("tensor raw bytes: {name}"),
         )?;
-        let raw_bytes = match crate::loader::decode_tensor_bytes(&self.reader, &tensor_meta) {
+        let raw_bytes = match self.decode_raw_with_base(name) {
             Ok(bytes) => bytes,
             Err(err) => {
                 budget.release(
@@ -857,10 +936,37 @@ impl LazySpissaModel {
         if !self.decode_resident {
             return Ok(0);
         }
+        // REEFORM delta: delta chunks reconstruct against the base (a &mut-self op), so they can't
+        // ride the parallel reader-only decode below — rebuild them first, into the resident cache.
+        let delta_chunks: Vec<(u64, String)> = self
+            .chunks_by_id
+            .iter()
+            .filter(|(id, c)| {
+                c.codec_id == rtc_codec::delta::CODEC_DELTA_V1 && !self.decoded_cache.contains_key(id)
+            })
+            .map(|(&id, c)| {
+                let name = self
+                    .tensors_by_id
+                    .get(&c.tensor_id)
+                    .map(|t| t.name.clone())
+                    .unwrap_or_default();
+                (id, name)
+            })
+            .collect();
+        for (id, name) in delta_chunks {
+            if name.is_empty() {
+                continue;
+            }
+            let bytes = self.decode_raw_with_base(&name)?;
+            self.decoded_cache.insert(id, bytes);
+        }
         let jobs: Vec<(u64, String, u64)> = self
             .chunks_by_id
             .iter()
-            .filter(|(id, _)| !self.decoded_cache.contains_key(id))
+            .filter(|(id, c)| {
+                !self.decoded_cache.contains_key(id)
+                    && c.codec_id != rtc_codec::delta::CODEC_DELTA_V1
+            })
             .map(|(&id, c)| (id, c.codec_id.clone(), c.uncompressed_size))
             .collect();
         if jobs.is_empty() {
@@ -928,6 +1034,28 @@ impl LazySpissaModel {
         budget: &mut MemoryBudget,
         f: impl FnOnce(&[u8], &mut MemoryBudget) -> Result<R>,
     ) -> Result<R> {
+        // REEFORM delta: a `reeform-delta-v1` chunk reconstructs to its whole FT tensor (W_base +
+        // Δ, base required). Delta tensors are single-chunk, so decoding the chunk == reconstructing
+        // the tensor. Cache it under decode-resident so the base+Δ rebuild happens once, not /token.
+        let delta_name = self
+            .chunks_by_id
+            .get(&chunk_id)
+            .filter(|c| c.codec_id == rtc_codec::delta::CODEC_DELTA_V1)
+            .map(|c| c.tensor_id)
+            .and_then(|tid| self.tensors_by_id.get(&tid).map(|t| t.name.clone()));
+        if let Some(name) = delta_name {
+            if self.decode_resident {
+                if let Some(bytes) = self.decoded_cache.get(&chunk_id) {
+                    return f(bytes, budget);
+                }
+            }
+            let bytes = self.decode_raw_with_base(&name)?;
+            if self.decode_resident {
+                self.decoded_cache.insert(chunk_id, bytes.clone());
+            }
+            return f(&bytes, budget);
+        }
+
         // R160 decode-once-at-load: reuse already-decoded bytes (skip read/verify/decode).
         if self.decode_resident {
             if let Some(bytes) = self.decoded_cache.get(&chunk_id) {
