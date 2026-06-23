@@ -11,6 +11,7 @@ pub enum ChatTemplateKind {
     Raw,
     Llama3,
     ChatMl,
+    Phi,
 }
 
 impl FromStr for ChatTemplateKind {
@@ -21,8 +22,9 @@ impl FromStr for ChatTemplateKind {
             "raw" | "none" => Ok(Self::Raw),
             "llama3" | "llama-3" | "llama3-instruct" | "llama-3-instruct" => Ok(Self::Llama3),
             "chatml" | "chat-ml" | "smollm" | "smollm2" => Ok(Self::ChatMl),
+            "phi" | "phi3" | "phi4" => Ok(Self::Phi),
             other => Err(anyhow!(
-                "unknown chat template {other:?}; expected raw, llama3, or chatml"
+                "unknown chat template {other:?}; expected raw, llama3, chatml, or phi"
             )),
         }
     }
@@ -55,6 +57,12 @@ pub fn render_interactive_user_turn(
             system_prompt,
             user_text,
         ),
+        ChatTemplateKind::Phi => render_phi_user_turn(
+            has_context,
+            previous_assistant_ended,
+            system_prompt,
+            user_text,
+        ),
     }
 }
 
@@ -76,8 +84,35 @@ pub fn stop_token_ids(
     } else if kind == ChatTemplateKind::ChatMl {
         push_unique_token_id(&mut ids, tokenizer.token_id_for_raw_token("<|im_end|>"));
         push_unique_token_id(&mut ids, tokenizer.token_id_for_raw_token("<|endoftext|>"));
+    } else if kind == ChatTemplateKind::Phi {
+        push_unique_token_id(&mut ids, tokenizer.token_id_for_raw_token("<|end|>"));
+        push_unique_token_id(&mut ids, tokenizer.token_id_for_raw_token("<|endoftext|>"));
     }
     ids
+}
+
+/// Phi-3 / Phi-4 chat template: `<|system|>…<|end|><|user|>…<|end|><|assistant|>`.
+fn render_phi_user_turn(
+    has_context: bool,
+    previous_assistant_ended: bool,
+    system_prompt: Option<&str>,
+    user_text: &str,
+) -> String {
+    let mut rendered = String::new();
+    if !has_context {
+        if let Some(sys) = system_prompt.map(str::trim).filter(|t| !t.is_empty()) {
+            rendered.push_str("<|system|>\n");
+            rendered.push_str(sys);
+            rendered.push_str("<|end|>\n");
+        }
+    } else if !previous_assistant_ended {
+        rendered.push_str("<|end|>\n");
+    }
+    rendered.push_str("<|user|>\n");
+    rendered.push_str(user_text.trim());
+    rendered.push_str("<|end|>\n");
+    rendered.push_str("<|assistant|>\n");
+    rendered
 }
 
 fn render_llama3_user_turn(

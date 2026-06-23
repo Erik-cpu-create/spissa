@@ -136,9 +136,19 @@ pub fn run(
             params.to_streaming(),
         ),
         "qwen3" | "qwen" => qwen_chat(&mut model, ctx, max_new_tokens, params, system_prompt),
+        // Phi-3 / Phi-4 reuse the LLaMA decode (split fused tensors + partial RoPE + LongRoPE short
+        // factor are wired through it), with the Phi `<|user|>…<|assistant|>` chat template.
+        "phi3" | "phi" => llama_chat(
+            &mut model,
+            ctx,
+            max_new_tokens,
+            "phi",
+            system_prompt,
+            params.to_streaming(),
+        ),
         other => {
             anyhow::bail!(
-                "rllm chat: unsupported architecture {other:?} (supported: gemma3, llama, qwen3)"
+                "rllm chat: unsupported architecture {other:?} (supported: gemma3, llama, qwen3, phi3)"
             )
         }
     }

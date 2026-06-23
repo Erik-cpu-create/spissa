@@ -58,7 +58,7 @@ pub fn apply_gpt_neox_rotary_inplace(
         for head in 0..config.num_heads {
             let row_start = (pos * config.num_heads + head) * config.head_dim;
             for pair in 0..half_rotary {
-                let angle = rotary_angle(absolute_pos, pair, config)?;
+                let angle = rotary_angle(absolute_pos, pair, config, None)?;
                 let cos = angle.cos();
                 let sin = angle.sin();
                 rotate_neox_pair(q, row_start, pair, half_rotary, cos, sin);
@@ -79,6 +79,7 @@ pub fn apply_llama_rotary_inplace(
     q_heads: usize,
     k_heads: usize,
     config: RotaryEmbeddingConfig,
+    freq_scale: Option<&[f32]>,
 ) -> Result<()> {
     if q_heads == 0 || k_heads == 0 {
         return Err(RuntimeError::Shape("heads must be > 0".to_string()));
@@ -103,7 +104,7 @@ pub fn apply_llama_rotary_inplace(
         for head in 0..q_heads {
             let row_start = (pos * q_heads + head) * config.head_dim;
             for pair in 0..half_rotary {
-                let angle = rotary_angle(absolute_pos, pair, config)?;
+                let angle = rotary_angle(absolute_pos, pair, config, freq_scale)?;
                 let cos = angle.cos();
                 let sin = angle.sin();
                 rotate_neox_pair(q, row_start, pair, half_rotary, cos, sin);
@@ -114,7 +115,7 @@ pub fn apply_llama_rotary_inplace(
         for head in 0..k_heads {
             let row_start = (pos * k_heads + head) * config.head_dim;
             for pair in 0..half_rotary {
-                let angle = rotary_angle(absolute_pos, pair, config)?;
+                let angle = rotary_angle(absolute_pos, pair, config, freq_scale)?;
                 let cos = angle.cos();
                 let sin = angle.sin();
                 rotate_neox_pair(k, row_start, pair, half_rotary, cos, sin);
@@ -451,9 +452,16 @@ fn validate_rotary_inputs(q: &[f32], k: &[f32], config: RotaryEmbeddingConfig) -
     Ok(())
 }
 
-fn rotary_angle(absolute_pos: usize, pair: usize, config: RotaryEmbeddingConfig) -> Result<f32> {
+fn rotary_angle(
+    absolute_pos: usize,
+    pair: usize,
+    config: RotaryEmbeddingConfig,
+    freq_scale: Option<&[f32]>,
+) -> Result<f32> {
     let exponent = (2 * pair) as f32 / config.rotary_dim as f32;
-    let inv_freq = 1.0 / config.base.powf(exponent);
+    // LongRoPE (Phi-3): divide the base inv_freq by a per-dimension factor (the short/long factor).
+    let scale = freq_scale.and_then(|s| s.get(pair)).copied().unwrap_or(1.0);
+    let inv_freq = 1.0 / (config.base.powf(exponent) * scale);
     Ok(absolute_pos as f32 * inv_freq)
 }
 
@@ -682,7 +690,7 @@ mod tests {
             .collect();
 
         let (mut q_llama, mut k_llama) = (q.clone(), k.clone());
-        apply_llama_rotary_inplace(&mut q_llama, &mut k_llama, 2, 1, config).unwrap();
+        apply_llama_rotary_inplace(&mut q_llama, &mut k_llama, 2, 1, config, None).unwrap();
 
         let (mut q_gemma, mut k_gemma) = (q.clone(), k.clone());
         apply_gemma_rotary_inplace(&mut q_gemma, &mut k_gemma, 2, 1, config, 1.0).unwrap();

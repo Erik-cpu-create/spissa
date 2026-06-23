@@ -297,7 +297,7 @@ pub fn qwen_gated_attention_block(
         base: cfg.rope_theta,
         position_offset,
     };
-    apply_llama_rotary_inplace(&mut query, &mut k, nh, nkv, rope)?;
+    apply_llama_rotary_inplace(&mut query, &mut k, nh, nkv, rope, None)?;
 
     let attn_cfg = KvAttentionConfig {
         query_len: seq_len,
