@@ -101,6 +101,9 @@ struct HuggingFaceModelConfig {
 struct RopeScalingConfig {
     factor: Option<f32>,
     rope_type: Option<String>,
+    /// Phi-3 LongRoPE per-dimension factors.
+    short_factor: Option<Vec<f32>>,
+    long_factor: Option<Vec<f32>>,
 }
 
 /// Qwen3.5 `rope_parameters` block: rope theta, partial-rotary fraction, and the
@@ -169,6 +172,11 @@ pub fn model_config_metadata_from_json_str(json: &str) -> Result<ModelConfigMeta
                     .unwrap_or(false)
             })
             .and_then(|scaling| scaling.factor),
+        // Phi-3 LongRoPE short factor (applies within the original window — short-context chat).
+        rope_short_factor: dims
+            .rope_scaling
+            .as_ref()
+            .and_then(|s| s.short_factor.clone()),
         // --- Qwen3.5 / Qwen3-Next hybrid linear-attention fields ---
         layer_types: dims.layer_types.clone(),
         full_attention_interval: dims.full_attention_interval,
@@ -207,6 +215,10 @@ fn normalize_architecture_type(value: &str) -> String {
         "qwen3".to_string()
     } else if normalized.contains("qwen") {
         "qwen".to_string()
+    } else if normalized.contains("phi3") || normalized.contains("phi4") {
+        // Phi-3 / Phi-4-mini: fused qkv/gate_up are split at import → reuses the LLaMA decode with
+        // partial RoPE + LongRoPE short factor. Matches both "phi3" and "Phi3ForCausalLM".
+        "phi3".to_string()
     } else {
         normalized
     }

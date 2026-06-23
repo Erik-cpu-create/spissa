@@ -31,6 +31,12 @@ pub struct LlamaStreamingBlockConfig {
     pub q_heads: usize,
     pub kv_heads: usize,
     pub head_dim: usize,
+    /// Rotated dimensions per head. Equals `head_dim` for full RoPE (LLaMA/Qwen); smaller for
+    /// Phi-3 partial rotary (`partial_rotary_factor * head_dim`).
+    pub rotary_dim: usize,
+    /// Optional per-dimension RoPE frequency scale (Phi-3 LongRoPE short/long factor); `None` =
+    /// standard RoPE. Length `rotary_dim / 2`.
+    pub rope_freq_scale: Option<std::sync::Arc<[f32]>>,
     pub intermediate_size: usize,
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
@@ -346,12 +352,20 @@ pub fn streaming_llama_transformer_block_with_timing(
         seq_len: config.seq_len,
         num_heads: config.q_heads,
         head_dim: config.head_dim,
-        rotary_dim: config.head_dim,
+        // Phi-3 rotates only `partial_rotary_factor * head_dim`; full models set rotary_dim = head_dim.
+        rotary_dim: config.rotary_dim,
         base: config.rope_theta,
         position_offset: config.position_offset,
     };
     let started = Instant::now();
-    apply_llama_rotary_inplace(&mut q, &mut k, config.q_heads, config.kv_heads, rope_config)?;
+    apply_llama_rotary_inplace(
+        &mut q,
+        &mut k,
+        config.q_heads,
+        config.kv_heads,
+        rope_config,
+        config.rope_freq_scale.as_deref(),
+    )?;
     if let Some(timing) = timing.as_deref_mut() {
         timing.rotary_ms += started.elapsed().as_secs_f64() * 1000.0;
     }

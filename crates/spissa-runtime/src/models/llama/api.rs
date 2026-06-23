@@ -103,6 +103,22 @@ pub fn prepare_llama_rama_layer_decode_transformer_from_metadata(
         })
         .unwrap_or(2048);
 
+    // Phi-3: rotate only `partial_rotary_factor * head_dim` (full RoPE otherwise), and apply the
+    // LongRoPE short factor as a per-dimension inv_freq divisor (length rotary_dim/2).
+    let head_dim = model_config
+        .head_dim
+        .map(|h| h as usize)
+        .unwrap_or(hidden_size / num_heads.max(1));
+    let rotary_dim = match model_config.partial_rotary_factor {
+        Some(p) if (0.0..1.0).contains(&p) => ((head_dim as f32 * p) as usize) / 2 * 2,
+        _ => head_dim,
+    };
+    let rope_freq_scale: Option<std::sync::Arc<[f32]>> = model_config
+        .rope_short_factor
+        .as_ref()
+        .filter(|s| s.len() >= rotary_dim / 2)
+        .map(|s| std::sync::Arc::from(&s[..rotary_dim / 2]));
+
     let build = LlamaEchoBuildConfig {
         max_new_tokens: generation.max_new_tokens,
         max_seq_len: Some(max_seq_len),
@@ -111,6 +127,7 @@ pub fn prepare_llama_rama_layer_decode_transformer_from_metadata(
         causal: generation.causal,
         rms_norm_eps: model_config.rms_norm_eps.unwrap_or(1e-5),
         rope_theta: model_config.rope_theta.unwrap_or(10000.0),
+        rotary_dim,
         sampling: generation.sampling,
     };
 
@@ -154,6 +171,7 @@ pub fn prepare_llama_rama_layer_decode_transformer_from_metadata(
         embedding_weight,
         layers,
         lm_head_weight,
+        rope_freq_scale,
         final_layernorm_weight,
         pinned_lm_head_weight: None,
         resident_parameter_bytes: 0,
@@ -247,6 +265,8 @@ pub fn rama_layer_decoded_llama_transformer_generate_from_model(
                 q_heads: prepared.config.num_heads,
                 kv_heads: prepared.config.num_key_value_heads,
                 head_dim,
+                rotary_dim: prepared.config.rotary_dim,
+                rope_freq_scale: prepared.rope_freq_scale.clone(),
                 intermediate_size,
                 rms_norm_eps: prepared.config.rms_norm_eps,
                 rope_theta: prepared.config.rope_theta,

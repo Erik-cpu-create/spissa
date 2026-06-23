@@ -237,6 +237,44 @@ impl TensorSource {
 /// `model.layers.*` convention (so the existing quant matchers + runtime naming
 /// apply), and drops the vision tower / multimodal projector. Other architectures
 /// pass through unchanged.
+/// Expand Phi-3's fused projections into standard LLaMA tensors at pack time: `qkv_proj` →
+/// q/k/v_proj (output-feature row blocks sized by heads × head_dim), `gate_up_proj` → gate/up_proj
+/// (the two intermediate-size halves). The row ranges are derived purely from config, so the loop
+/// can slice each block out of the source tensor's raw bytes. Returns 3-tuples
+/// `(packed_name, source_name, Some((row_start, row_end)))`; non-fused tensors get `None`.
+fn expand_fused_phi3(
+    tensors: Vec<(String, String)>,
+    config: Option<&spissa_container::ModelConfigMetadata>,
+) -> Result<Vec<(String, String, Option<(usize, usize)>)>> {
+    let c = config.context("Phi-3 pack needs config.json (heads / head_dim / intermediate_size)")?;
+    let nh = c.num_attention_heads.context("phi3: num_attention_heads")? as usize;
+    let nkv = c
+        .num_key_value_heads
+        .or(c.num_attention_heads)
+        .context("phi3: num_key_value_heads")? as usize;
+    let hs = c.hidden_size.context("phi3: hidden_size")? as usize;
+    let hd = c
+        .head_dim
+        .map(|h| h as usize)
+        .unwrap_or(if nh > 0 { hs / nh } else { 0 });
+    let inter = c.intermediate_size.context("phi3: intermediate_size")? as usize;
+    let (q, kv) = (nh * hd, nkv * hd);
+    let mut out = Vec::with_capacity(tensors.len());
+    for (mapped, src) in tensors {
+        if let Some(base) = mapped.strip_suffix("qkv_proj.weight") {
+            out.push((format!("{base}q_proj.weight"), src.clone(), Some((0, q))));
+            out.push((format!("{base}k_proj.weight"), src.clone(), Some((q, q + kv))));
+            out.push((format!("{base}v_proj.weight"), src, Some((q + kv, q + 2 * kv))));
+        } else if let Some(base) = mapped.strip_suffix("gate_up_proj.weight") {
+            out.push((format!("{base}gate_proj.weight"), src.clone(), Some((0, inter))));
+            out.push((format!("{base}up_proj.weight"), src, Some((inter, 2 * inter))));
+        } else {
+            out.push((mapped, src, None));
+        }
+    }
+    Ok(out)
+}
+
 fn map_tensor_names(raw: &[String], architecture: &str) -> Vec<(String, String)> {
     const PREFIX: &str = "language_model.";
     // Multimodal Gemma (`Gemma3ForConditionalGeneration`, e.g. 4B) wraps the LM
@@ -342,7 +380,15 @@ pub fn run(
         .unwrap_or_else(|| "unknown".to_string());
     // Map raw checkpoint names to `.spsa` names (filters vision + strips the
     // `language_model.` prefix for multimodal Gemma; identity otherwise).
-    let tensors = map_tensor_names(&raw_names, &architecture);
+    let mapped = map_tensor_names(&raw_names, &architecture);
+    // Phi-3 packs q/k/v as one fused `qkv_proj` and gate/up as one `gate_up_proj`; split them at
+    // import so the runtime sees a standard LLaMA model (separately-named projection tensors). Each
+    // entry is (packed_name, source_name, Some(row_start..row_end)) for a split, None otherwise.
+    let tensors: Vec<(String, String, Option<(usize, usize)>)> = if architecture == "phi3" {
+        expand_fused_phi3(mapped, model_config.as_ref())?
+    } else {
+        mapped.into_iter().map(|(m, s)| (m, s, None)).collect()
+    };
     if verbose {
         println!(
             "Found {} tensors ({} packed for architecture '{}')",
@@ -401,7 +447,7 @@ pub fn run(
 
     // Process each tensor
     let total_tensors = tensors.len();
-    for (tensor_idx, (tensor_name, src_name)) in tensors.iter().enumerate() {
+    for (tensor_idx, (tensor_name, src_name, slice)) in tensors.iter().enumerate() {
         if verbose {
             println!(
                 "Processing tensor: {} ({}/{})",
@@ -424,6 +470,15 @@ pub fn run(
         let mut tensor_data = source.read_tensor(src_name)?;
         let mut meta = source.to_rllm_meta(src_name)?;
         meta.name = tensor_name.clone();
+        // Phi-3 fused split: keep only this projection's row-block of the source tensor.
+        if let Some((r0, r1)) = *slice {
+            let cols = *meta.shape.get(1).unwrap_or(&1) as usize;
+            let stride = cols * meta.dtype.size_bytes();
+            tensor_data = tensor_data[r0 * stride..r1 * stride].to_vec();
+            meta.shape = vec![(r1 - r0) as u64, cols as u64];
+            meta.original_size_bytes = tensor_data.len() as u64;
+            meta.original_sha256 = sha256_array(&tensor_data);
+        }
         let tensor_id = next_tensor_id;
         next_tensor_id = next_tensor_id.saturating_add(1);
         meta.tensor_id = tensor_id;

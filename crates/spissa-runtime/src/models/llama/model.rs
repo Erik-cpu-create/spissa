@@ -13,6 +13,8 @@ pub struct LlamaEchoBuildConfig {
     pub causal: bool,
     pub rms_norm_eps: f32,
     pub rope_theta: f32,
+    /// Rotated dims per head: `head_dim` for full RoPE, `partial_rotary_factor*head_dim` for Phi-3.
+    pub rotary_dim: usize,
     pub sampling: StreamingSamplingConfig,
 }
 
@@ -78,6 +80,8 @@ pub struct LayerDecodedLlamaRamaTransformer {
     pub embedding_weight: String,
     pub layers: Vec<OwnedLlamaStreamingBlockTensorNames>,
     pub lm_head_weight: String,
+    /// Phi-3 LongRoPE per-dimension short factor (length `rotary_dim/2`); `None` for standard RoPE.
+    pub rope_freq_scale: Option<std::sync::Arc<[f32]>>,
     pub final_layernorm_weight: Vec<f32>,
     pub pinned_lm_head_weight: Option<Vec<f32>>,
     pub resident_parameter_bytes: usize,

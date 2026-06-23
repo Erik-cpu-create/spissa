@@ -238,6 +238,10 @@ pub struct ModelConfigMetadata {
     /// Fraction of `head_dim` that RoPE rotates (Qwen3.5: 0.25 → 64 of 256).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partial_rotary_factor: Option<f32>,
+    /// Phi-3 LongRoPE per-dimension short factor (length `rotary_dim/2`), used for positions within
+    /// the original context window — divides each base inv_freq. `None` for non-LongRoPE models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rope_short_factor: Option<Vec<f32>>,
     /// Multimodal-RoPE section split (collapses to ordinary RoPE for text-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mrope_section: Option<Vec<u64>>,
