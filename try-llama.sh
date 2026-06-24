@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quick Llama 3.2 (q8, lossless) chat runner for RLLM.
+# Quick Llama 3.2 (q8, lossless) chat runner for Spissa.
 #
 # Usage:
 #   ./try-llama.sh chat                            # interactive multi-turn chat (REPL)
@@ -33,21 +33,21 @@ while [[ "${1:-}" == -* ]]; do
 done
 
 case "$MODEL_KEY" in
-  1b) MODEL="models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.rllm" ;;
-  3b) MODEL="models/Llama-3.2-3B-Instruct-q8.rllm" ;;
+  1b) MODEL="models/Llama-3.2-1B-Instruct-q8_transformer_keepio-rowchunks.spsa" ;;
+  3b) MODEL="models/Llama-3.2-3B-Instruct-q8.spsa" ;;
   *) echo "unknown model '$MODEL_KEY' (use 1b or 3b)" >&2; exit 1 ;;
 esac
 
 if [[ ! -f "$MODEL" ]]; then
   echo "Model not found: $MODEL" >&2
-  echo "Pack the $MODEL_KEY model first, or point MODEL= at your .rllm file." >&2
+  echo "Pack the $MODEL_KEY model first, or point MODEL= at your .spsa file." >&2
   exit 1
 fi
 
 build_if_stale() {
   if [[ ! -x "$BIN" ]] || [[ -n "$(find crates -name '*.rs' -newer "$BIN" -print -quit 2>/dev/null)" ]]; then
     echo "[try-llama] building release binary..." >&2
-    cargo build --release -p rllm-cli >&2
+    cargo build --release -p spissa-cli >&2
   fi
 }
 
