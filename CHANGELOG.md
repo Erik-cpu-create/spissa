@@ -9,6 +9,12 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 <!-- BUMP:INSERT -->
 
+## [0.1.1.0] - 2026-06-24
+
+### Build & CI
+- simplify bump to patch-per-push, trim Android ABIs, add Linux x86_64 release
+
+
 ## [0.1.0.0] - 2026-06-24
 
 ### Build & CI
