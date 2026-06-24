@@ -245,15 +245,19 @@ pub fn f32_to_fp16(val: f32) -> u16 {
         let exp = exp_bits as i32 - 127;
         let exp_norm = exp + 15;
         if exp_norm <= 0 {
-            // Underflow to zero or subnormal
-            if exp_norm < -10 {
-                sign // Underflow to zero
+            // f16 subnormal range, or underflow to zero. For a value 2^exp × mantissa/2^23 the
+            // subnormal fraction is `mantissa >> (-exp - 1)`. The old shift `14 - exp` overshot
+            // by 15: for exp <= -18 it reached >= 32, overflowing the u32 shift (Rust masks it to
+            // `shift & 31`), which produced garbage f16 bits — sometimes a NaN/Inf pattern. That
+            // corrupted q8 block scales for small-magnitude weight blocks (common in Qwen2 MLP
+            // weights) into NaN, which propagated into NaN logits. `-exp - 1` is in [14, 23] for
+            // every representable subnormal; anything smaller (shift >= 24) rounds to zero.
+            let shift = (-exp - 1) as u32;
+            if shift >= 24 {
+                sign // too small for even the smallest f16 subnormal
             } else {
-                // Representable as subnormal f16
-                let frac = frac_bits | 0x0080_0000;
-                let shift = (14 - exp) as u32;
-                let half_frac = (frac >> shift) as u16;
-                sign | half_frac
+                let mantissa = frac_bits | 0x0080_0000;
+                sign | (mantissa >> shift) as u16
             }
         } else if exp_norm >= 31 {
             // Overflow to Inf
@@ -293,6 +297,35 @@ mod tests {
             let decoded = fp16_to_f32(bits);
             assert_close(decoded, val);
         }
+    }
+
+    #[test]
+    fn f32_to_fp16_never_emits_nan_or_inf_for_small_finite_values() {
+        // Regression: the subnormal path used `14 - exp`, overflowing the u32 shift (>= 32 for
+        // exp <= -18; Rust masks it to `shift & 31`), producing garbage f16 bits — sometimes a
+        // NaN/Inf pattern. q8 block scales for small-magnitude weight blocks (e.g. Qwen2 MLP)
+        // hit this and decoded to NaN weights → NaN logits. Sweep every exponent down through
+        // and below the q8-scale range; a finite input must always yield a finite f16.
+        let mut v = 1.0e-1f32;
+        while v > 1.0e-12 {
+            for &val in &[v, -v] {
+                let decoded = fp16_to_f32(f32_to_fp16(val));
+                assert!(decoded.is_finite(), "f32_to_fp16({val:e}) -> non-finite {decoded}");
+                if decoded != 0.0 {
+                    assert_eq!(decoded.signum(), val.signum(), "sign flip for {val:e}");
+                }
+            }
+            v *= 0.5;
+        }
+    }
+
+    #[test]
+    fn f32_to_fp16_handles_subnormals_and_underflow() {
+        // Exact f16 subnormals survive; values below the smallest subnormal (2^-24) round to 0.
+        assert_eq!(fp16_to_f32(f32_to_fp16(2.0f32.powi(-24))), 2.0f32.powi(-24));
+        assert_eq!(fp16_to_f32(f32_to_fp16(2.0f32.powi(-15))), 2.0f32.powi(-15));
+        assert_eq!(fp16_to_f32(f32_to_fp16(2.0f32.powi(-20))), 2.0f32.powi(-20));
+        assert_eq!(fp16_to_f32(f32_to_fp16(2.0f32.powi(-30))), 0.0);
     }
 
     #[test]
