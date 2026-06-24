@@ -1,21 +1,21 @@
-# RLLM RAMA Architecture
+# Spissa RAMA Architecture
 
 Status: accepted Phase 5D.5 architecture direction
-Scope: original brain-inspired, memory-first RLLM runtime architecture
-Audience: RLLM implementers and future contributors
+Scope: original brain-inspired, memory-first Spissa runtime architecture
+Audience: Spissa implementers and future contributors
 
 ## Objective
 
-Define the official brain-inspired architecture identity for RLLM without changing what RLLM already means as a product and file/runtime system.
+Define the official brain-inspired architecture identity for Spissa without changing what Spissa already means as a product and file/runtime system.
 
-RLLM remains:
+Spissa remains:
 
 ```text
-RLLM = Runtime-compressed Local LLM
-RTC  = RLLM Tensor Codec
+Spissa = Runtime-compressed Local LLM
+RTC  = Rama Tensor Codec
 ```
 
-The official runtime architecture inside RLLM is:
+The official runtime architecture inside Spissa is:
 
 ```text
 RAMA = Rama Active Memory Architecture
@@ -36,20 +36,20 @@ REE = Rama Erik Esprada kernel lineage
 Short positioning:
 
 ```text
-RLLM is powered by RAMA: compressed memory, selective recall, bounded active thought.
+Spissa is powered by RAMA: compressed memory, selective recall, bounded active thought.
 ```
 
 Formal positioning:
 
 ```text
-RLLM is a runtime-compressed local LLM system powered by RAMA, a memory-first execution architecture where compressed model weights are treated as dormant long-term memory, bounded RAM is treated as active working memory, and the runtime recalls only the chunks, layers, tiles, and context traces required for the current inference step.
+Spissa is a runtime-compressed local LLM system powered by RAMA, a memory-first execution architecture where compressed model weights are treated as dormant long-term memory, bounded RAM is treated as active working memory, and the runtime recalls only the chunks, layers, tiles, and context traces required for the current inference step.
 ```
 
 ## Naming Decision
 
-RLLM is the product and system name. It owns:
+Spissa is the product and system name. It owns:
 
-- the CLI identity (`rllm`)
+- the CLI identity (`spissa`)
 - the `.spsa` container format
 - the runtime-compressed local LLM value proposition
 - the workspace/crate-level project identity
@@ -64,10 +64,10 @@ RAMA is the runtime architecture. It owns:
 
 ERIK is reserved for a later focused subsystem. It should not be used as a broad architecture name. Its intended scope is smarter episodic/context recall after RAMA has a stable runtime foundation.
 
-REE is the required lineage prefix for original RLLM execution kernels. Any new CPU
+REE is the required lineage prefix for original Spissa execution kernels. Any new CPU
 kernel that becomes a serious benchmark candidate must receive a REE name before
 it is reported, merged, or promoted into runtime use. This naming is not cosmetic:
-it is part of RLLM's kernel versioning and research traceability contract.
+it is part of Spissa's kernel versioning and research traceability contract.
 
 Required REE naming rules:
 
@@ -82,31 +82,31 @@ Required REE naming rules:
 
 ## Originality Doctrine
 
-RLLM/RAMA must be genuine from-scratch engineering work.
+Spissa/RAMA must be genuine from-scratch engineering work.
 
 Always:
 
-- Design mechanisms from first principles around RLLM's constraints: low RAM, local-first execution, lossless storage, chunk/layer/tile streaming, deterministic verification, and correctness.
-- Implement custom RLLM/RTC/RAMA mechanisms directly in this repository unless the user explicitly approves a dependency trade-off.
-- Define every major concept with an executable RLLM-specific meaning before coding it.
+- Design mechanisms from first principles around Spissa's constraints: low RAM, local-first execution, lossless storage, chunk/layer/tile streaming, deterministic verification, and correctness.
+- Implement custom Spissa/RTC/RAMA mechanisms directly in this repository unless the user explicitly approves a dependency trade-off.
+- Define every major concept with an executable Spissa-specific meaning before coding it.
 - Credit external facts when used for compatibility, for example safetensors layout, GPT-NeoX tensor names, dtype definitions, tokenizer formats, or known model config fields.
 - Treat brain terminology as analogy for memory/runtime structure, not as biological equivalence.
 
 Never:
 
 - Copy architecture, code, naming systems, diagrams, or prose from another project.
-- Claim RLLM is biologically accurate, conscious, self-learning, or human-brain equivalent.
+- Claim Spissa is biologically accurate, conscious, self-learning, or human-brain equivalent.
 - Add generic compression dependencies such as zstd/lz4 unless explicitly approved.
 - Use neuroscience words as decoration without a concrete runtime contract.
-- Rebrand standard transformer behavior as novel without explaining what RLLM/RAMA specifically adds.
+- Rebrand standard transformer behavior as novel without explaining what Spissa/RAMA specifically adds.
 
-If a name or mechanism resembles existing work by coincidence, this spec must define the RLLM-specific meaning and avoid implying affiliation or derivation.
+If a name or mechanism resembles existing work by coincidence, this spec must define the Spissa-specific meaning and avoid implying affiliation or derivation.
 
 ## What RAMA Is / Is Not
 
 RAMA is:
 
-- A memory-first runtime architecture for RLLM.
+- A memory-first runtime architecture for Spissa.
 - A design language for deciding what to load, decode, cache, release, evict, and verify.
 - A hierarchy for compressed storage, bounded working memory, recall, context cache, and streaming execution.
 - A brain-inspired engineering analogy around memory pressure and selective activation.
@@ -378,9 +378,9 @@ ERIK must not be introduced until the exact runtime contract is testable. It sho
 
 ## Current Implementation Mapping
 
-Current RLLM pieces map into RAMA as follows:
+Current Spissa pieces map into RAMA as follows:
 
-| RAMA concept | Current RLLM implementation |
+| RAMA concept | Current Spissa implementation |
 |---|---|
 | Dormant Memory | `.spsa` container, chunk metadata, RTC codecs |
 | Recall Path | `LazyRllmModel`, chunk decode, streaming primitives |
@@ -393,7 +393,7 @@ Some code may currently use the earlier ECHO/EMBER names. Those names are supers
 
 ## Implementation Boundary
 
-RAMA belongs primarily in `rllm-runtime` and runtime-facing CLI/status planning.
+RAMA belongs primarily in `spissa-runtime` and runtime-facing CLI/status planning.
 
 RAMA may define:
 
@@ -406,10 +406,10 @@ RAMA may define:
 
 RAMA must not own:
 
-- `.spsa` binary container semantics that belong in `rllm-container`
+- `.spsa` binary container semantics that belong in `spissa-container`
 - codec internals that belong in `rtc-codec`
-- safetensors parsing that belongs in `rllm-import`
-- broad CLI formatting that belongs in `rllm-cli`
+- safetensors parsing that belongs in `spissa-import`
+- broad CLI formatting that belongs in `spissa-cli`
 - external model architecture facts beyond compatibility metadata
 
 ## Success Criteria
@@ -449,10 +449,10 @@ Do not use this spec to justify:
 Accepted naming:
 
 ```text
-Product/system: RLLM = Runtime-compressed Local LLM
-Codec layer:    RTC  = RLLM Tensor Codec
+Product/system: Spissa = Runtime-compressed Local LLM
+Codec layer:    RTC  = Rama Tensor Codec
 Architecture:   RAMA = Rama Active Memory Architecture
 Future kernel:  ERIK = Episodic Recall Inference Kernel
 ```
 
-RLLM remains the product. RAMA is the official runtime architecture inside it.
+Spissa remains the product. RAMA is the official runtime architecture inside it.
