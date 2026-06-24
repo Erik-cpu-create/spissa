@@ -13,8 +13,9 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 ### Build & CI
 - Add automated four-part (`A.B.C.D`) versioning + changelog pipeline.
-- Add CI (format/build/test) and Android cross-compile workflows producing
-  `spissa` binaries for `arm64-v8a`, `armeabi-v7a`, and `x86_64`.
+- Add CI (format/build/test) plus Android cross-compile (`arm64-v8a`, `x86_64`)
+  and native Linux (`x86_64`) build workflows producing `spissa` binaries and a
+  GitHub Release on every push to `main`.
 
 ### Documentation
 - Add mandatory `CONTRIBUTING.md` describing the versioning, changelog, and

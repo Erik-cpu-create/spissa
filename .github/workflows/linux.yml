@@ -1,0 +1,60 @@
+name: Linux
+
+# Builds the native Linux x86_64 `spissa` CLI and uploads it.
+# Reusable (workflow_call) for the release pipeline; also build-only on PRs that
+# touch the runtime and on manual dispatch.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build (defaults to the triggering ref)
+        type: string
+        required: false
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/linux.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-x86_64
+
+      - name: Build spissa (release)
+        run: cargo build --release -p spissa-cli --bin spissa
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp target/release/spissa dist/spissa-linux-x86_64
+          ( cd dist && sha256sum spissa-linux-x86_64 > spissa-linux-x86_64.sha256 )
+          ls -l dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spissa-linux-x86_64
+          path: dist/spissa-linux-x86_64*
+          if-no-files-found: error

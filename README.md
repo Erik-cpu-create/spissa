@@ -437,15 +437,17 @@ Spissa is versioned automatically. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for
 the full rules.
 
 - **Scheme:** four-part `A.B.C.D` (`MAJOR.MINOR.PATCH.REVISION`); the single
-  source of truth is [`VERSION`](VERSION). A normal change advances the patch
-  part (`0.0.1.0 → 0.0.2.0`).
+  source of truth is [`VERSION`](VERSION). Every push advances the patch part
+  (`0.0.1.0 → 0.0.2.0`); use a `[minor]`/`[major]`/`[revision]` commit marker to
+  override.
 - **Automatic on every push to `main`** (`.github/workflows/release.yml`): the
-  version + [`CHANGELOG.md`](CHANGELOG.md) are bumped from the commit messages,
-  tagged `vA.B.C.D`, and a GitHub Release is published.
-- **Android binaries:** each release cross-compiles the `spissa` CLI for
-  `arm64-v8a`, `armeabi-v7a`, and `x86_64` (minSdk 24) and attaches them to the
-  release. Continuous integration (`ci.yml`) builds and tests every push/PR;
-  `android.yml` also build-checks the cross-compile on PRs.
+  version advances, [`CHANGELOG.md`](CHANGELOG.md) is generated from the commit
+  messages, the commit is tagged `vA.B.C.D`, and a GitHub Release is published.
+- **Binaries on each release:** the `spissa` CLI cross-compiled for Android
+  `arm64-v8a` + `x86_64` (minSdk 24) and built natively for Linux `x86_64`,
+  attached to the release with `.sha256` checksums. CI (`ci.yml`) builds and
+  tests every push/PR; `android.yml` / `linux.yml` build-check the binaries on
+  PRs.
 
 ## Design Principles
 
