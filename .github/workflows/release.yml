@@ -1,0 +1,98 @@
+name: Release
+
+# On every push to main: bump the four-part version + changelog from the new
+# commits, tag it, cross-compile the Android binaries, and publish a GitHub
+# Release with the changelog as notes and the binaries attached.
+# The bump commit carries [skip ci], so it does not re-trigger this workflow.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: bump version & changelog
+    if: ${{ github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+      version: ${{ steps.bump.outputs.version }}
+      level: ${{ steps.bump.outputs.level }}
+      changelog: ${{ steps.bump.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version + changelog
+        id: bump
+        run: bash scripts/bump-version.sh
+
+      - name: Commit, tag, and push
+        run: |
+          git add VERSION CHANGELOG.md Cargo.toml Cargo.lock
+          git commit -m "chore(release): ${{ steps.bump.outputs.tag }} [skip ci]"
+          git tag -a "${{ steps.bump.outputs.tag }}" -m "Spissa ${{ steps.bump.outputs.tag }}"
+          git push origin HEAD:${{ github.ref_name }}
+          git push origin "${{ steps.bump.outputs.tag }}"
+
+  android:
+    name: android
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/android.yml
+    with:
+      ref: ${{ needs.version.outputs.tag }}
+
+  linux:
+    name: linux
+    needs: version
+    permissions:
+      contents: read
+    uses: ./.github/workflows/linux.yml
+    with:
+      ref: ${{ needs.version.outputs.tag }}
+
+  release:
+    name: publish release
+    needs: [version, android, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: spissa-*
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lR artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: Spissa ${{ needs.version.outputs.version }}
+          body: |
+            Automated release (${{ needs.version.outputs.level }} bump).
+
+            ${{ needs.version.outputs.changelog }}
+
+            ### Binaries
+            - **Android** `spissa` CLI (minSdk 24): `arm64-v8a`, `x86_64`
+            - **Linux** `spissa` CLI: `x86_64`
+
+            Each binary ships with a matching `.sha256` checksum.
+          files: artifacts/**

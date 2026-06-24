@@ -1,4 +1,4 @@
-# RLLM Format v1 Specification
+# Spissa Format v1 Specification
 
 ## Overview
 
@@ -32,7 +32,7 @@ Size: 44 bytes, little-endian
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0 | 4 | magic | "RLLM" (0x524C4C4D) |
+| 0 | 4 | magic | "SPSA" (0x53505341) |
 | 4 | 4 | version | Format version (u32, currently 1) |
 | 8 | 1 | endian | 0 = little-endian |
 | 9 | 3 | reserved | Must be zero |
@@ -54,7 +54,7 @@ little-endian `u64` JSON byte length, followed by the JSON payload.
   "lossless": true,
   "default_context_length": 2048,
   "tokenizer_type": "sentencepiece",
-  "created_by": "rllm-pack",
+  "created_by": "spissa-pack",
   "codec": "rtc-lossless-v1",
   "tokenizer": {
     "tokenizer_type": "hf-bpe",
@@ -143,7 +143,7 @@ Trade-offs:
 
 ## Integrity
 
-RLLM v1 stores SHA-256 integrity metadata per tensor and per chunk. Optional
+Spissa v1 stores SHA-256 integrity metadata per tensor and per chunk. Optional
 range checksums may also be present for verified partial reads. There is no
 footer checksum in the current writer implementation.
 

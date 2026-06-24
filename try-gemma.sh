@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quick Gemma 3 4B (q8, lossless) chat runner for RLLM.
+# Quick Gemma 3 4B (q8, lossless) chat runner for Spissa.
 #
 # Usage:
 #   ./try-gemma.sh chat                            # interactive multi-turn chat (REPL)
@@ -15,7 +15,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-MODEL="models/gemma-3-4b-it-q8.rllm"
+MODEL="models/gemma-3-4b-it-q8.spsa"
 BIN="target/release/gemma-test"
 
 VERBOSE=0
@@ -33,7 +33,7 @@ done
 if [[ "${1:-}" == "chat" ]]; then
   if [[ ! -x "$BIN" ]] || [[ -n "$(find crates -name '*.rs' -newer "$BIN" -print -quit 2>/dev/null)" ]]; then
     echo "[try-gemma] building release binary..." >&2
-    cargo build --release -p rllm-cli >&2
+    cargo build --release -p spissa-cli >&2
   fi
   exec "$BIN" --model "$MODEL" --fast --interactive --ctx "${2:-1024}"
 fi
@@ -43,14 +43,14 @@ TOKENS="${2:-80}"
 
 if [[ ! -f "$MODEL" ]]; then
   echo "Model not found: $MODEL" >&2
-  echo "Pack it first, or point MODEL= at your .rllm file." >&2
+  echo "Pack it first, or point MODEL= at your .spsa file." >&2
   exit 1
 fi
 
 # Build the release binary if it's missing or older than the sources.
 if [[ ! -x "$BIN" ]] || [[ -n "$(find crates -name '*.rs' -newer "$BIN" -print -quit 2>/dev/null)" ]]; then
   echo "[try-gemma] building release binary..." >&2
-  cargo build --release -p rllm-cli >&2
+  cargo build --release -p spissa-cli >&2
 fi
 
 ENV=()
