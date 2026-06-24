@@ -11,6 +11,10 @@ pub enum ChatTemplateKind {
     Raw,
     Llama3,
     ChatMl,
+    /// Qwen2 / Qwen2.5 ChatML: like `ChatMl` but injects NO default system message (Qwen omits
+    /// it unless the user supplies one) and hides `<think>` reasoning from the visible stream
+    /// (VibeThinker and other Qwen2-family reasoning models).
+    Qwen2,
     Phi,
 }
 
@@ -22,11 +26,22 @@ impl FromStr for ChatTemplateKind {
             "raw" | "none" => Ok(Self::Raw),
             "llama3" | "llama-3" | "llama3-instruct" | "llama-3-instruct" => Ok(Self::Llama3),
             "chatml" | "chat-ml" | "smollm" | "smollm2" => Ok(Self::ChatMl),
+            "qwen2" | "qwen2.5" | "qwen" | "vibethinker" => Ok(Self::Qwen2),
             "phi" | "phi3" | "phi4" => Ok(Self::Phi),
             other => Err(anyhow!(
-                "unknown chat template {other:?}; expected raw, llama3, chatml, or phi"
+                "unknown chat template {other:?}; expected raw, llama3, chatml, qwen2, or phi"
             )),
         }
+    }
+}
+
+impl ChatTemplateKind {
+    /// Reasoning models in the Qwen2 family (VibeThinker) emit `<think>…</think>` before the
+    /// answer; hide it from the visible chat stream. Other templates pass text through verbatim.
+    // Called from the main `spissa` chat binary; the aux dev bins that share this module don't.
+    #[allow(dead_code)]
+    pub fn strips_think(self) -> bool {
+        matches!(self, Self::Qwen2)
     }
 }
 
@@ -57,6 +72,12 @@ pub fn render_interactive_user_turn(
             system_prompt,
             user_text,
         ),
+        ChatTemplateKind::Qwen2 => render_qwen2_user_turn(
+            has_context,
+            previous_assistant_ended,
+            system_prompt,
+            user_text,
+        ),
         ChatTemplateKind::Phi => render_phi_user_turn(
             has_context,
             previous_assistant_ended,
@@ -81,7 +102,7 @@ pub fn stop_token_ids(
             &mut ids,
             tokenizer.token_id_for_raw_token("<|end_of_text|>"),
         );
-    } else if kind == ChatTemplateKind::ChatMl {
+    } else if kind == ChatTemplateKind::ChatMl || kind == ChatTemplateKind::Qwen2 {
         push_unique_token_id(&mut ids, tokenizer.token_id_for_raw_token("<|im_end|>"));
         push_unique_token_id(&mut ids, tokenizer.token_id_for_raw_token("<|endoftext|>"));
     } else if kind == ChatTemplateKind::Phi {
@@ -157,6 +178,33 @@ fn render_chatml_user_turn(
             .unwrap_or("You are a helpful AI assistant named SmolLM, trained by Hugging Face");
         rendered.push_str(system_prompt);
         rendered.push_str("<|im_end|>\n");
+    } else if !previous_assistant_ended {
+        rendered.push_str("<|im_end|>\n");
+    }
+
+    rendered.push_str("<|im_start|>user\n");
+    rendered.push_str(user_text.trim());
+    rendered.push_str("<|im_end|>\n");
+    rendered.push_str("<|im_start|>assistant\n");
+    rendered
+}
+
+/// Qwen2 / Qwen2.5 ChatML turn. Same `<|im_start|>…<|im_end|>` framing as `ChatMl`, but emits a
+/// system block ONLY when the user supplies one (Qwen omits the default "You are a helpful
+/// assistant." rather than inventing a SmolLM identity).
+fn render_qwen2_user_turn(
+    has_context: bool,
+    previous_assistant_ended: bool,
+    system_prompt: Option<&str>,
+    user_text: &str,
+) -> String {
+    let mut rendered = String::new();
+    if !has_context {
+        if let Some(sys) = system_prompt.map(str::trim).filter(|text| !text.is_empty()) {
+            rendered.push_str("<|im_start|>system\n");
+            rendered.push_str(sys);
+            rendered.push_str("<|im_end|>\n");
+        }
     } else if !previous_assistant_ended {
         rendered.push_str("<|im_end|>\n");
     }
@@ -303,5 +351,58 @@ mod tests {
             stop_token_ids(ChatTemplateKind::ChatMl, &tokenizer, None),
             vec![2, 0]
         );
+    }
+
+    #[test]
+    fn qwen2_template_omits_default_system_prompt() {
+        // Unlike ChatMl (which injects a SmolLM identity), Qwen2 emits NO system block when the
+        // user supplies none — the model keeps its own default persona.
+        let rendered =
+            render_interactive_user_turn(ChatTemplateKind::Qwen2, false, true, None, "what is 2+2?");
+        assert_eq!(
+            rendered,
+            "<|im_start|>user\nwhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+
+    #[test]
+    fn qwen2_template_emits_system_block_when_supplied() {
+        let rendered = render_interactive_user_turn(
+            ChatTemplateKind::Qwen2,
+            false,
+            true,
+            Some("You are terse."),
+            "hi",
+        );
+        assert_eq!(
+            rendered,
+            "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nhi<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+
+    #[test]
+    fn qwen2_template_forces_im_end_before_next_user_when_generation_hit_limit() {
+        let rendered =
+            render_interactive_user_turn(ChatTemplateKind::Qwen2, true, false, None, "next");
+        assert_eq!(
+            rendered,
+            "<|im_end|>\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n"
+        );
+    }
+
+    #[test]
+    fn only_qwen2_strips_think_reasoning() {
+        assert!(ChatTemplateKind::Qwen2.strips_think());
+        assert!(!ChatTemplateKind::ChatMl.strips_think());
+        assert!(!ChatTemplateKind::Llama3.strips_think());
+        assert!(!ChatTemplateKind::Phi.strips_think());
+        assert!(!ChatTemplateKind::Raw.strips_think());
+    }
+
+    #[test]
+    fn qwen2_template_aliases_parse() {
+        for alias in ["qwen2", "qwen2.5", "qwen", "vibethinker"] {
+            assert_eq!(alias.parse::<ChatTemplateKind>().unwrap(), ChatTemplateKind::Qwen2);
+        }
     }
 }

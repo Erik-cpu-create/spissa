@@ -213,6 +213,10 @@ fn normalize_architecture_type(value: &str) -> String {
         // "qwen3_5", "qwen3_next", "qwen3_5forconditionalgeneration" → the hybrid
         // Gated-DeltaNet + gated-attention adapter.
         "qwen3".to_string()
+    } else if normalized.contains("qwen2") {
+        // Qwen2 / Qwen2.5 dense decoder (e.g. VibeThinker-3B, "Qwen2ForCausalLM"). Runs on the
+        // LLaMA runtime with added QKV bias + a ChatML template — NOT the qwen3 hybrid path.
+        "qwen2".to_string()
     } else if normalized.contains("qwen") {
         "qwen".to_string()
     } else if normalized.contains("phi3") || normalized.contains("phi4") {

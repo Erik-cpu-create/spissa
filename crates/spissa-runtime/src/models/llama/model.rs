@@ -61,6 +61,12 @@ pub struct OwnedLlamaStreamingBlockTensorNames {
 pub struct OwnedLlamaStreamingBlockParameters {
     pub input_layernorm_weight: Vec<f32>,
     pub post_attention_layernorm_weight: Vec<f32>,
+    /// Qwen2 attention QKV bias (`self_attn.{q,k,v}_proj.bias`), added to the projection
+    /// output before RoPE. `None` for LLaMA/Phi, which have no attention bias. `q_bias` is
+    /// length `num_heads * head_dim`; `k_bias`/`v_bias` are `num_key_value_heads * head_dim`.
+    pub q_bias: Option<Vec<f32>>,
+    pub k_bias: Option<Vec<f32>>,
+    pub v_bias: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone)]

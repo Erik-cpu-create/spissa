@@ -136,6 +136,17 @@ pub fn run(
             params.to_streaming(),
         ),
         "qwen3" | "qwen" => qwen_chat(&mut model, ctx, max_new_tokens, params, system_prompt),
+        // Qwen2 / Qwen2.5 (e.g. VibeThinker-3B) is a dense LLaMA-shaped decoder with attention QKV
+        // bias; it reuses the LLaMA chat path with the ChatML template (and `<think>` stripping for
+        // the reasoning models). The session loads the bias when the `*_proj.bias` tensors exist.
+        "qwen2" => llama_chat(
+            &mut model,
+            ctx,
+            max_new_tokens,
+            "qwen2",
+            system_prompt,
+            params.to_streaming(),
+        ),
         // Phi-3 / Phi-4 reuse the LLaMA decode (split fused tensors + partial RoPE + LongRoPE short
         // factor are wired through it), with the Phi `<|user|>…<|assistant|>` chat template.
         "phi3" | "phi" => llama_chat(
@@ -148,7 +159,7 @@ pub fn run(
         ),
         other => {
             anyhow::bail!(
-                "rllm chat: unsupported architecture {other:?} (supported: gemma3, llama, qwen3, phi3)"
+                "rllm chat: unsupported architecture {other:?} (supported: gemma3, llama, qwen2, qwen3, phi3)"
             )
         }
     }
@@ -320,6 +331,11 @@ fn stream_qwen_turn(
 /// while a `<think>` is still open (no `</think>` yet) hold back everything after it until the
 /// closing tag arrives. Operates on decoded text, so it works even if `<think>` isn't one token.
 fn strip_think_spans(s: &str) -> String {
+    // Opt-in: reveal the `<think>…</think>` reasoning instead of hiding it (useful for reasoning
+    // models like VibeThinker, and for debugging).
+    if std::env::var("SPISSA_SHOW_THINK").is_ok() {
+        return s.to_string();
+    }
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(start) = rest.find("<think>") {
@@ -584,7 +600,7 @@ fn llama_chat(
                 return false;
             }
             reply.push(token);
-            print_reply_suffix(&tokenizer, &reply, &mut shown, false);
+            print_reply_suffix(&tokenizer, &reply, &mut shown, template.strips_think());
             true
         };
         let result = session.generate_turn(&input_tokens, max_new_tokens, &mut budget, &mut on_token);

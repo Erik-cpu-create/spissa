@@ -143,6 +143,20 @@ fn optional_input_tiled_sparse_linear(
     )
 }
 
+/// Add a per-output-channel bias broadcast across every sequence row: for each row,
+/// `out[row*width + c] += bias[c]` where `width = bias.len()`. Used for Qwen2 attention QKV
+/// bias (LLaMA/Phi have none). `out.len()` must be a multiple of `bias.len()`.
+fn add_row_bias(out: &mut [f32], bias: &[f32]) {
+    if bias.is_empty() {
+        return;
+    }
+    for row in out.chunks_mut(bias.len()) {
+        for (value, b) in row.iter_mut().zip(bias) {
+            *value += *b;
+        }
+    }
+}
+
 pub fn streaming_llama_transformer_block(
     model: &mut LazySpissaModel,
     input: &[f32],
@@ -269,6 +283,9 @@ pub fn streaming_llama_transformer_block_with_timing(
             budget,
         )?,
     };
+    if let Some(bias) = params.q_bias.as_deref() {
+        add_row_bias(&mut q, bias);
+    }
     if let Some(timing) = timing.as_deref_mut() {
         timing.q_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
@@ -300,6 +317,9 @@ pub fn streaming_llama_transformer_block_with_timing(
             budget,
         )?,
     };
+    if let Some(bias) = params.k_bias.as_deref() {
+        add_row_bias(&mut k, bias);
+    }
     if let Some(timing) = timing.as_deref_mut() {
         timing.k_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
@@ -320,7 +340,7 @@ pub fn streaming_llama_transformer_block_with_timing(
         budget,
     )?;
     attention_locality_used |= sparse_v.is_some() && attention_locality_selected.is_some();
-    let v = match sparse_v {
+    let mut v = match sparse_v {
         Some(output) => output,
         None => streaming_tile_linear_from_model(
             model,
@@ -331,6 +351,9 @@ pub fn streaming_llama_transformer_block_with_timing(
             budget,
         )?,
     };
+    if let Some(bias) = params.v_bias.as_deref() {
+        add_row_bias(&mut v, bias);
+    }
     if let Some(timing) = timing.as_deref_mut() {
         timing.v_projection_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
@@ -754,4 +777,24 @@ pub fn streaming_llama_transformer_block_with_timing(
     }
 
     Ok(residual)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_row_bias;
+
+    #[test]
+    fn add_row_bias_broadcasts_across_every_sequence_row() {
+        // 3 rows × width-2; the same bias is added to each row (Qwen2 attention QKV bias).
+        let mut out = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        add_row_bias(&mut out, &[10.0, 20.0]);
+        assert_eq!(out, vec![11.0, 22.0, 13.0, 24.0, 15.0, 26.0]);
+    }
+
+    #[test]
+    fn add_row_bias_empty_bias_is_a_noop() {
+        let mut out = vec![1.0, 2.0, 3.0];
+        add_row_bias(&mut out, &[]);
+        assert_eq!(out, vec![1.0, 2.0, 3.0]);
+    }
 }
