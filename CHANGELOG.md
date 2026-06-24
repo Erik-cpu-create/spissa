@@ -9,6 +9,15 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 <!-- BUMP:INSERT -->
 
+## [0.1.2.0] - 2026-06-24
+
+### Features
+- VibeThinker-3B / Qwen2 support via Llama adapter + QKV bias
+
+### Fixes
+- correct f32_to_fp16 subnormal shift overflow that emitted NaN q8 scales
+
+
 ## [0.1.1.0] - 2026-06-24
 
 ### Build & CI
