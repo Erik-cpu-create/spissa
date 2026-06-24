@@ -1,4 +1,4 @@
-# RLLM / RTC — Lossless Runtime-Compressed Local LLM Tool
+# Spissa / RTC — Lossless Runtime-Compressed Local LLM Tool
 
 > Project brief untuk AI agent / coding agent.
 > Goal: membangun tool lokal mirip Ollama, tetapi **from scratch**, dengan fitur utama: **model LLM dapat disimpan dalam format compressed khusus dan dijalankan oleh runtime sendiri tanpa mengubah bobot model secara lossy**.
@@ -18,8 +18,8 @@ Kita ingin membuat tool baru untuk menjalankan LLM secara offline/local. Tool in
 Nama sementara:
 
 ```text
-RLLM = Runtime-compressed Local LLM
-RTC  = RLLM Tensor Codec
+Spissa = Runtime-compressed Local LLM
+RTC  = Rama Tensor Codec
 RAMA = Rama Active Memory Architecture
 ERIK = Episodic Recall Inference Kernel (reserved future subsystem)
 REE  = Rama Erik Esprada kernel lineage
@@ -54,10 +54,10 @@ Kompresi lossless punya batas. Kalau data model sudah sangat padat, hasil kompre
 Klaim yang boleh:
 
 ```text
-RLLM menyimpan bobot model dalam format compressed lossless.
-RLLM dapat memverifikasi bahwa bobot hasil decode identik dengan bobot asli.
-RLLM dapat mengurangi ukuran storage model jika bobot masih memiliki redundansi.
-RLLM dapat mengurangi peak RAM melalui block-wise/tile-wise decoding, tergantung runtime mode.
+Spissa menyimpan bobot model dalam format compressed lossless.
+Spissa dapat memverifikasi bahwa bobot hasil decode identik dengan bobot asli.
+Spissa dapat mengurangi ukuran storage model jika bobot masih memiliki redundansi.
+Spissa dapat mengurangi peak RAM melalui block-wise/tile-wise decoding, tergantung runtime mode.
 ```
 
 ### 1.2 “Tanpa mengurangi kualitas” berarti lossless
@@ -108,9 +108,9 @@ Boleh mempelajari ide umum dari tools lain, tetapi implementasi project harus fr
 Tidak boleh:
 
 ```text
-rllm hanya memanggil ollama run
-rllm hanya membungkus llama.cpp
-rllm hanya rename GGUF menjadi format sendiri
+spissa hanya memanggil ollama run
+spissa hanya membungkus llama.cpp
+spissa hanya rename GGUF menjadi format sendiri
 ```
 
 Boleh:
@@ -123,7 +123,7 @@ menggunakan model kecil/toy model untuk validasi awal
 
 ### 1.5 Kernel runtime wajib punya versioning REE
 
-Setiap kernel eksekusi RLLM yang menjadi kandidat serius harus punya nama
+Setiap kernel eksekusi Spissa yang menjadi kandidat serius harus punya nama
 lineage REE sebelum dilaporkan, di-benchmark, atau di-merge.
 
 Aturan:
@@ -156,31 +156,31 @@ nama REE supaya negative evidence bisa dilacak.
 Command target:
 
 ```bash
-rllm import ./model_dir
-rllm pack ./model_dir --out model.rllm --codec rtc-lossless-v1
-rllm inspect model.rllm
-rllm verify ./model_dir model.rllm
-rllm run model.rllm
+spissa import ./model_dir
+spissa pack ./model_dir --out model.spsa --codec rtc-lossless-v1
+spissa inspect model.spsa
+spissa verify ./model_dir model.spsa
+spissa run model.spsa
 ```
 
 Command tambahan:
 
 ```bash
-rllm unpack model.rllm --out ./restored_model
-rllm benchmark model.rllm
-rllm doctor
+spissa unpack model.spsa --out ./restored_model
+spissa benchmark model.spsa
+spissa doctor
 ```
 
 ### 2.2 Fitur MVP
 
 MVP wajib memiliki:
 
-1. CLI `rllm`.
-2. Format file `.rllm`.
+1. CLI `spissa`.
+2. Format file `.spsa`.
 3. Library `rtc` untuk encode/decode tensor secara lossless.
 4. Import minimal dari format tensor sederhana.
-5. Pack tensor ke `.rllm`.
-6. Unpack `.rllm` kembali ke tensor asli.
+5. Pack tensor ke `.spsa`.
+6. Unpack `.spsa` kembali ke tensor asli.
 7. Verify bit-identical.
 8. Toy inference runtime untuk model kecil.
 
@@ -205,7 +205,7 @@ Setelah MVP stabil:
 ## 3. Arsitektur Sistem
 
 ```text
-rllm CLI
+spissa CLI
 ├── import module
 │   ├── load model metadata
 │   ├── load tokenizer
@@ -214,7 +214,7 @@ rllm CLI
 ├── pack module
 │   ├── split tensors into chunks
 │   ├── encode chunks with RTC
-│   ├── write .rllm container
+│   ├── write .spsa container
 │   └── write checksums
 │
 ├── inspect module
@@ -243,11 +243,11 @@ rllm CLI
 
 ---
 
-## 4. Format File `.rllm`
+## 4. Format File `.spsa`
 
 ### 4.1 Tujuan format
 
-Format `.rllm` harus:
+Format `.spsa` harus:
 
 - Single-file jika memungkinkan.
 - Bisa menyimpan metadata model.
@@ -262,7 +262,7 @@ Format `.rllm` harus:
 ### 4.2 Layout awal
 
 ```text
-.rllm file
+.spsa file
 ├── magic header
 ├── format version
 ├── global metadata length
@@ -281,11 +281,11 @@ Format `.rllm` harus:
 Contoh field header:
 
 ```text
-magic:      "RLLM"
+magic:      "SPSA"
 version:    1
 endian:     little
-created_by: rllm
-container:  rllm-v1
+created_by: spissa
+container:  spissa-v1
 ```
 
 ### 4.4 Global metadata
@@ -302,7 +302,7 @@ Contoh:
   "lossless": true,
   "default_context_length": 2048,
   "tokenizer_type": "sentencepiece-or-bpe",
-  "created_by": "rllm-pack",
+  "created_by": "spissa-pack",
   "codec": "rtc-lossless-v1"
 }
 ```
@@ -394,7 +394,7 @@ MVP bisa mulai dari:
 
 ---
 
-## 5. RTC: RLLM Tensor Codec
+## 5. RTC: Rama Tensor Codec
 
 ### 5.1 Tujuan RTC
 
@@ -503,7 +503,7 @@ Jika tidak sama, codec candidate ditolak.
 
 ### 6.1 Runtime goals
 
-Runtime harus bisa menjalankan model dari `.rllm` tanpa unpack penuh ke file asli.
+Runtime harus bisa menjalankan model dari `.spsa` tanpa unpack penuh ke file asli.
 
 Runtime mode:
 
@@ -519,7 +519,7 @@ fused-decode-matmul    = decode dan multiply langsung, target jangka panjang
 MVP runtime boleh sederhana:
 
 ```text
-load .rllm
+load .spsa
 full decode tensor model kecil ke RAM
 run toy transformer inference
 verify output deterministic
@@ -566,9 +566,9 @@ configurable max memory
 CLI example:
 
 ```bash
-rllm run model.rllm --cache 512mb
-rllm run model.rllm --mode layer-decode
-rllm run model.rllm --mode tile-decode --cache 256mb
+spissa run model.spsa --cache 512mb
+spissa run model.spsa --mode layer-decode
+spissa run model.spsa --mode tile-decode --cache 256mb
 ```
 
 ### 6.5 Expected trade-off
@@ -586,10 +586,10 @@ Jangan klaim selalu lebih cepat.
 
 ## 7. CLI Specification
 
-### 7.1 `rllm pack`
+### 7.1 `spissa pack`
 
 ```bash
-rllm pack ./model_dir --out model.rllm --codec rtc-lossless-v1
+spissa pack ./model_dir --out model.spsa --codec rtc-lossless-v1
 ```
 
 Output contoh:
@@ -601,7 +601,7 @@ Original size: 7.60 GB
 Compressed size: 6.92 GB
 Ratio: 91.0%
 Lossless verification: passed
-Output: model.rllm
+Output: model.spsa
 ```
 
 Options:
@@ -615,17 +615,17 @@ Options:
 --compression-level 1..9
 ```
 
-### 7.2 `rllm inspect`
+### 7.2 `spissa inspect`
 
 ```bash
-rllm inspect model.rllm
+spissa inspect model.spsa
 ```
 
 Output:
 
 ```text
-File: model.rllm
-Format: RLLM v1
+File: model.spsa
+Format: Spissa v1
 Lossless: true
 Architecture: decoder-only-transformer
 Tensors: 291
@@ -637,10 +637,10 @@ Codec: rtc-lossless-v1
 Tokenizer: included
 ```
 
-### 7.3 `rllm verify`
+### 7.3 `spissa verify`
 
 ```bash
-rllm verify ./model_dir model.rllm
+spissa verify ./model_dir model.spsa
 ```
 
 Output:
@@ -654,10 +654,10 @@ Verifying tensors...
 Status: LOSSLESS VERIFIED
 ```
 
-### 7.4 `rllm unpack`
+### 7.4 `spissa unpack`
 
 ```bash
-rllm unpack model.rllm --out ./restored_model
+spissa unpack model.spsa --out ./restored_model
 ```
 
 Output:
@@ -667,10 +667,10 @@ Decoded model written to ./restored_model
 Verification: passed
 ```
 
-### 7.5 `rllm run`
+### 7.5 `spissa run`
 
 ```bash
-rllm run model.rllm
+spissa run model.spsa
 ```
 
 Options:
@@ -693,24 +693,24 @@ Options:
 Suggested monorepo:
 
 ```text
-rllm/
+spissa/
 ├── README.md
 ├── docs/
-│   ├── format-rllm-v1.md
+│   ├── format-spissa-v1.md
 │   ├── codec-rtc-v1.md
 │   ├── runtime-design.md
 │   └── roadmap.md
 │
 ├── crates/
-│   ├── rllm-cli/
-│   ├── rllm-container/
+│   ├── spissa-cli/
+│   ├── spissa-container/
 │   ├── rtc-codec/
-│   ├── rllm-runtime/
-│   ├── rllm-tokenizer/
-│   └── rllm-kernels/
+│   ├── spissa-runtime/
+│   ├── spissa-tokenizer/
+│   └── spissa-kernels/
 │
 ├── python/
-│   └── rllm/
+│   └── spissa/
 │
 ├── tests/
 │   ├── golden/
@@ -755,10 +755,10 @@ basic docs
 Commands should exist:
 
 ```bash
-rllm --help
-rllm pack --help
-rllm inspect --help
-rllm verify --help
+spissa --help
+spissa pack --help
+spissa inspect --help
+spissa verify --help
 ```
 
 Acceptance criteria:
@@ -771,17 +771,17 @@ No model support needed yet.
 
 ---
 
-### Phase 1 — RLLM container v1
+### Phase 1 — Spissa container v1
 
 Deliverables:
 
 ```text
-write .rllm header
+write .spsa header
 write metadata
 write tensor directory
 write chunk directory
 write raw chunks
-read .rllm back
+read .spsa back
 inspect command
 ```
 
@@ -790,7 +790,7 @@ Use fake tensor input first.
 Acceptance criteria:
 
 ```text
-Can create .rllm file from sample tensors.
+Can create .spsa file from sample tensors.
 Can inspect file.
 Can list tensors and chunks.
 Can decode raw chunks.
@@ -835,9 +835,9 @@ small int4-packed-like bytes
 Deliverables:
 
 ```text
-rllm pack sample_tensor_dir --out model.rllm
-rllm unpack model.rllm --out restored_tensor_dir
-rllm verify original restored/model.rllm
+spissa pack sample_tensor_dir --out model.spsa
+spissa unpack model.spsa --out restored_tensor_dir
+spissa verify original restored/model.spsa
 ```
 
 Acceptance criteria:
@@ -856,7 +856,7 @@ Deliverables:
 ```text
 read safetensors metadata
 read tensor bytes
-pack safetensors into .rllm
+pack safetensors into .spsa
 unpack back to safetensors-compatible layout
 verify hashes
 ```
@@ -888,7 +888,7 @@ Start with a tiny custom transformer, not a production LLM.
 Acceptance criteria:
 
 ```text
-Same prompt + same seed produces same tokens in original runtime and RLLM runtime.
+Same prompt + same seed produces same tokens in original runtime and Spissa runtime.
 ```
 
 ---
@@ -898,7 +898,7 @@ Same prompt + same seed produces same tokens in original runtime and RLLM runtim
 Deliverables:
 
 ```text
-runtime reads compressed .rllm
+runtime reads compressed .spsa
 only decodes needed layer weights
 releases weights after layer
 tracks peak memory
@@ -918,7 +918,7 @@ Output identical to full decode mode.
 Current status:
 
 ```text
-partial complete: fused tile-linear primitive bounds f32 scratch to a tile while preserving chunk-level decode correctness; streaming MLP/attention/transformer blocks and tiny/RAMA/GPT-NeoX generation projections now route through that tiled linear path; local Pythia-70M release benchmark matrix completed with 88.62–94.62 MiB max RSS under a 100mb internal budget; fixed-token HF/PyTorch logits comparison now passes top-1/top-10 on tested prompts after GPT-NeoX parallel residual metadata and per-head QKV split fixes; Phase 7.8A/B/C/D range-decode, per-range checksum metadata, opt-in raw pack range metadata, and pack-time tile/block chunk alignment foundation is implemented; real local Pythia-70M tile-block artifact benchmark completed at 18.39–22.64 MiB RSS with 386 KiB tracked transient peak while preserving tested HF logits parity; Phase 7.9A RAMA trace profiler is implemented with `rllm run --rama-trace`, and measured one-token Pythia trace showed chunk decode dominated recorded time (~3716 ms) while disk read was small (~32 ms); Phase 7.9B selective embedding row recall is implemented, reducing `gpt_neox.embed_in.weight` trace events from 1,965 to 5 and improving the 12-row tile-block matrix from 5.07 to 2.93 average seconds/token (~1.73× average speedup) with max RSS 22.28 MiB; Phase 7.9C low-ram-fast raw/tile-block profile is implemented with explicit `rllm pack --codec`, `rllm run --rama-integrity strict|verify-once`, and a reproducible benchmark harness; local Pythia-70M raw/tile-block artifact verifies losslessly, preserves tested HF top-1 parity, and reaches 0.35 average seconds/token / 3.26 average tok/s / 4.35 best tok/s while RSS stays 19.17–23.36 MiB for short prompts; Phase 7.9D real long-prompt benchmark is implemented with deterministic `--token-ids` input lengths 1/128/512/1024 under `ctx=2048`, showing short prompt + 16 generated tokens at 4.301 tok/s / 20.67 MiB RSS but 512-token and 1024-token prompts dropping to 0.300 tok/s / 44.98 MiB RSS and 0.148 tok/s / 70.84 MiB RSS; long-prompt HF parity passes top-1/top-10 for 128-token and 512-token fixed prompts; Phase 7.9E RAMA chunked prefill/timing is implemented with `rllm run --rama-timing` and `--rama-prefill-chunk-tokens`, improving 512-token + 16 generated from 56.43s / 0.284 tok/s / 46.22 MiB RSS to 35.20s / 0.455 tok/s / 34.05 MiB RSS and 1024-token + 16 generated from 110.29s / 0.145 tok/s / 70.55 MiB RSS to 63.84s / 0.251 tok/s / 44.98 MiB RSS while preserving tested 512-token HF top-1/top-10 parity; Phase 7.10A row-span linear accumulation optimizes the tiled-linear hot loop without changing format or logits semantics, improving short prompt + 16 generated from 4.39s / 3.647 tok/s to 2.25s / 7.101 tok/s, 512-token chunked prefill from 35.20s / 0.455 tok/s to 7.08s / 2.259 tok/s, and 1024-token chunked prefill from 63.84s / 0.251 tok/s to 12.76s / 1.254 tok/s while preserving tested 512-token HF top-1/top-10 parity; Phase 7.10B RAMA prefill homeostasis completes the broader post-rowspan matrix and sets the measured 32-token prefill window as the CLI default, reaching 9.756 tok/s for short prompt + 16 generated, 2.3495 tok/s / 32.77 MiB RSS for 512-token + 16, and 1.1653 tok/s / 44.91 MiB RSS for 1024-token + 16; Phase 7.10C deep prefill timing is implemented and shows the next measured bottleneck is RAMA prefill MLP compute (57.7–61.4% of prefill) with attention second (33.8–39.8%) and layer-param recall tiny (~0.2%); Phase 7.10D splits MLP into input projection/GELU/output projection, rejects measured regressions from larger MLP tiles and single-row dot unroll, and accepts four-prompt-row accumulation reuse, improving 512-token + 16 from 7.56s / 2.116 tok/s to 5.25s / 3.048 tok/s and 1024-token + 16 from 13.95s / 1.147 tok/s to 9.12s / 1.754 tok/s while preserving saved default-32 RLLM logits exactly; Phase 7.10E splits attention into QKV projection, QKV split, rotary, score/context, output projection, and KV append, rejects measured in-place softmax regression, and accepts K/V row-slice score/context optimization, improving 512-token + 16 from 4.95s / 3.232 tok/s to 4.56s / 3.509 tok/s and 1024-token + 16 from 8.63s / 1.854 tok/s to 7.12s / 2.247 tok/s while keeping RSS effectively bounded; Phase 7.11A validates the same generic GPT-NeoX/Pythia path on Pythia-160M without model-specific code: raw/tile-block pack emits 184 tensors / 3366 chunks / 367 MiB, verify passes 374,977,752 bytes losslessly, token `[12092]` generates `Hello!`, HF/PyTorch top-k parity passes (`top1_match=true`, top-10 overlap 10/10, max abs diff 0.02246094), and the 1/128/512/1024 × 1/4/16 matrix completes with 1024 + 16 at 31.08s / 0.515 tok/s / 99.47 MiB RSS / 1.04 MiB tracked transient; Phase 7.11B sweeps Pythia-160M prefill windows 8/16/32/64/128/256 and transient budget thresholds: for 1024 + 16, chunk=64 improves over default-32 from 31.23s / 0.512 tok/s to 28.22s / 0.567 tok/s at 99.02 MiB RSS, chunk=128 reaches 26.65s / 0.600 tok/s at ~100.06 MiB RSS but needs just under 4 MiB tracked transient, and chunk=256 barely improves speed while jumping to 107.20 MiB RSS
+partial complete: fused tile-linear primitive bounds f32 scratch to a tile while preserving chunk-level decode correctness; streaming MLP/attention/transformer blocks and tiny/RAMA/GPT-NeoX generation projections now route through that tiled linear path; local Pythia-70M release benchmark matrix completed with 88.62–94.62 MiB max RSS under a 100mb internal budget; fixed-token HF/PyTorch logits comparison now passes top-1/top-10 on tested prompts after GPT-NeoX parallel residual metadata and per-head QKV split fixes; Phase 7.8A/B/C/D range-decode, per-range checksum metadata, opt-in raw pack range metadata, and pack-time tile/block chunk alignment foundation is implemented; real local Pythia-70M tile-block artifact benchmark completed at 18.39–22.64 MiB RSS with 386 KiB tracked transient peak while preserving tested HF logits parity; Phase 7.9A RAMA trace profiler is implemented with `spissa run --rama-trace`, and measured one-token Pythia trace showed chunk decode dominated recorded time (~3716 ms) while disk read was small (~32 ms); Phase 7.9B selective embedding row recall is implemented, reducing `gpt_neox.embed_in.weight` trace events from 1,965 to 5 and improving the 12-row tile-block matrix from 5.07 to 2.93 average seconds/token (~1.73× average speedup) with max RSS 22.28 MiB; Phase 7.9C low-ram-fast raw/tile-block profile is implemented with explicit `spissa pack --codec`, `spissa run --rama-integrity strict|verify-once`, and a reproducible benchmark harness; local Pythia-70M raw/tile-block artifact verifies losslessly, preserves tested HF top-1 parity, and reaches 0.35 average seconds/token / 3.26 average tok/s / 4.35 best tok/s while RSS stays 19.17–23.36 MiB for short prompts; Phase 7.9D real long-prompt benchmark is implemented with deterministic `--token-ids` input lengths 1/128/512/1024 under `ctx=2048`, showing short prompt + 16 generated tokens at 4.301 tok/s / 20.67 MiB RSS but 512-token and 1024-token prompts dropping to 0.300 tok/s / 44.98 MiB RSS and 0.148 tok/s / 70.84 MiB RSS; long-prompt HF parity passes top-1/top-10 for 128-token and 512-token fixed prompts; Phase 7.9E RAMA chunked prefill/timing is implemented with `spissa run --rama-timing` and `--rama-prefill-chunk-tokens`, improving 512-token + 16 generated from 56.43s / 0.284 tok/s / 46.22 MiB RSS to 35.20s / 0.455 tok/s / 34.05 MiB RSS and 1024-token + 16 generated from 110.29s / 0.145 tok/s / 70.55 MiB RSS to 63.84s / 0.251 tok/s / 44.98 MiB RSS while preserving tested 512-token HF top-1/top-10 parity; Phase 7.10A row-span linear accumulation optimizes the tiled-linear hot loop without changing format or logits semantics, improving short prompt + 16 generated from 4.39s / 3.647 tok/s to 2.25s / 7.101 tok/s, 512-token chunked prefill from 35.20s / 0.455 tok/s to 7.08s / 2.259 tok/s, and 1024-token chunked prefill from 63.84s / 0.251 tok/s to 12.76s / 1.254 tok/s while preserving tested 512-token HF top-1/top-10 parity; Phase 7.10B RAMA prefill homeostasis completes the broader post-rowspan matrix and sets the measured 32-token prefill window as the CLI default, reaching 9.756 tok/s for short prompt + 16 generated, 2.3495 tok/s / 32.77 MiB RSS for 512-token + 16, and 1.1653 tok/s / 44.91 MiB RSS for 1024-token + 16; Phase 7.10C deep prefill timing is implemented and shows the next measured bottleneck is RAMA prefill MLP compute (57.7–61.4% of prefill) with attention second (33.8–39.8%) and layer-param recall tiny (~0.2%); Phase 7.10D splits MLP into input projection/GELU/output projection, rejects measured regressions from larger MLP tiles and single-row dot unroll, and accepts four-prompt-row accumulation reuse, improving 512-token + 16 from 7.56s / 2.116 tok/s to 5.25s / 3.048 tok/s and 1024-token + 16 from 13.95s / 1.147 tok/s to 9.12s / 1.754 tok/s while preserving saved default-32 Spissa logits exactly; Phase 7.10E splits attention into QKV projection, QKV split, rotary, score/context, output projection, and KV append, rejects measured in-place softmax regression, and accepts K/V row-slice score/context optimization, improving 512-token + 16 from 4.95s / 3.232 tok/s to 4.56s / 3.509 tok/s and 1024-token + 16 from 8.63s / 1.854 tok/s to 7.12s / 2.247 tok/s while keeping RSS effectively bounded; Phase 7.11A validates the same generic GPT-NeoX/Pythia path on Pythia-160M without model-specific code: raw/tile-block pack emits 184 tensors / 3366 chunks / 367 MiB, verify passes 374,977,752 bytes losslessly, token `[12092]` generates `Hello!`, HF/PyTorch top-k parity passes (`top1_match=true`, top-10 overlap 10/10, max abs diff 0.02246094), and the 1/128/512/1024 × 1/4/16 matrix completes with 1024 + 16 at 31.08s / 0.515 tok/s / 99.47 MiB RSS / 1.04 MiB tracked transient; Phase 7.11B sweeps Pythia-160M prefill windows 8/16/32/64/128/256 and transient budget thresholds: for 1024 + 16, chunk=64 improves over default-32 from 31.23s / 0.512 tok/s to 28.22s / 0.567 tok/s at 99.02 MiB RSS, chunk=128 reaches 26.65s / 0.600 tok/s at ~100.06 MiB RSS but needs just under 4 MiB tracked transient, and chunk=256 barely improves speed while jumping to 107.20 MiB RSS
 remaining: generic shape/budget-aware prefill policy is implemented in Phase 7.12A, and generic eight-row projection reuse is implemented in Phase 7.12B; next either pursue another measured dense-projection slice if fresh timing identifies a safe generic candidate, or start Phase 8 LLaMA-family architecture expansion with a new adapter rather than model-size-specific hacks; keep further MLP/QKV/decode/lm-head work evidence-driven; consider low-RAM parallel row-span accumulation only if short-prompt decode/lm-head becomes the priority; evaluate true intra-chunk compressed range decode only when measured trade-offs justify it
 ```
 
@@ -963,7 +963,7 @@ TinyLlama-class model only after toy runtime works
 Acceptance criteria:
 
 ```text
-Can run a real small model from .rllm.
+Can run a real small model from .spsa.
 Can verify decoded weights.
 Can compare logits with reference implementation within exact/numeric tolerance.
 ```
@@ -1071,12 +1071,12 @@ README harus jujur dan kuat.
 Suggested README intro:
 
 ```markdown
-# RLLM
+# Spissa
 
-RLLM is an experimental local LLM runtime built around lossless compressed model storage.
+Spissa is an experimental local LLM runtime built around lossless compressed model storage.
 It stores model tensors in a chunked compressed container and aims to run inference by decoding only the tensor blocks needed at runtime.
 
-RLLM does not claim magical compression. It preserves model weights exactly. If a model is already highly compressed or quantized, storage gains may be small. The long-term goal is lower peak memory through block-wise and tile-wise decoding.
+Spissa does not claim magical compression. It preserves model weights exactly. If a model is already highly compressed or quantized, storage gains may be small. The long-term goal is lower peak memory through block-wise and tile-wise decoding.
 ```
 
 Forbidden README claims:
@@ -1218,10 +1218,10 @@ function pack_model(input_model, output_file):
 ```text
 function verify(original_model, compressed_file):
     original = read_model(original_model)
-    rllm = RllmReader.open(compressed_file)
+    spissa = RllmReader.open(compressed_file)
 
     for original_tensor in original.tensors:
-        decoded = rllm.decode_tensor(original_tensor.name)
+        decoded = spissa.decode_tensor(original_tensor.name)
 
         if decoded.bytes != original_tensor.bytes:
             return FAIL
@@ -1333,11 +1333,11 @@ then compare deterministic token generation in controlled runtime
 Project is successful if:
 
 ```text
-1. It packs model tensors into .rllm.
+1. It packs model tensors into .spsa.
 2. It unpacks them exactly.
 3. It verifies bit-identical weights.
 4. It shows honest compression metrics.
-5. It runs a tiny model from .rllm.
+5. It runs a tiny model from .spsa.
 6. It supports at least full-decode runtime.
 ```
 
@@ -1370,15 +1370,15 @@ Project becomes genuinely unique if:
 Start with this exact task:
 
 ```text
-Create a Rust workspace for RLLM with these crates:
-- rllm-cli
-- rllm-container
+Create a Rust workspace for Spissa with these crates:
+- spissa-cli
+- spissa-container
 - rtc-codec
 
 Implement:
 1. CLI skeleton with clap.
-2. `rllm pack`, `rllm inspect`, `rllm unpack`, `rllm verify` command stubs.
-3. RLLM header struct.
+2. `spissa pack`, `spissa inspect`, `spissa unpack`, `spissa verify` command stubs.
+3. Spissa header struct.
 4. TensorMeta and ChunkMeta structs.
 5. rtc-raw-v1 codec.
 6. Unit test proving decode(encode(bytes)) == bytes.

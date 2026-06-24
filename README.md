@@ -24,7 +24,7 @@ RAMA frames Spissa as a memory-first runtime:
 
 The future focused recall subsystem name is reserved as **ERIK**: **Episodic Recall Inference Kernel**.
 
-See [`docs/rllm-rama-architecture.md`](docs/rllm-rama-architecture.md) for the Phase 5D.5 architecture boundary, originality doctrine, and RAMA/ERIK naming contract. The previous ECHO/EMBER doc is retained only as a superseded compatibility pointer.
+See [`docs/spissa-rama-architecture.md`](docs/spissa-rama-architecture.md) for the Phase 5D.5 architecture boundary, originality doctrine, and RAMA/ERIK naming contract. The previous ECHO/EMBER doc is retained only as a superseded compatibility pointer.
 
 ## What Spissa Does
 
@@ -329,10 +329,10 @@ spissa/
 │   │       └── validation.rs  # shape/config validation
 │   └── rtc-codec/       # In-house lossless tensor compression codecs
 ├── docs/
-│   ├── format-rllm-v1.md
+│   ├── format-spissa-v1.md
 │   ├── codec-rtc-v1.md
 │   └── roadmap.md
-└── rllm_ai_agent_spec.md
+└── spissa_ai_agent_spec.md
 ```
 
 ### Components
@@ -355,7 +355,7 @@ The `.spsa` format is a single-file container with:
 - **Tensor directory** — tensor metadata: name, shape, dtype, checksums
 - **Chunk directory** — chunk metadata: offsets, sizes, codec ID, checksums
 
-See [docs/format-rllm-v1.md](docs/format-rllm-v1.md) for the full specification.
+See [docs/format-spissa-v1.md](docs/format-spissa-v1.md) for the full specification.
 
 ## Codecs
 
