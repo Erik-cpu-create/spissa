@@ -2,6 +2,9 @@
 
 > **compressed · local · yours**
 
+[![CI](https://github.com/Erik-cpu-create/spissa/actions/workflows/ci.yml/badge.svg)](https://github.com/Erik-cpu-create/spissa/actions/workflows/ci.yml)
+[![Release](https://github.com/Erik-cpu-create/spissa/actions/workflows/release.yml/badge.svg)](https://github.com/Erik-cpu-create/spissa/actions/workflows/release.yml)
+
 Brain-inspired compressed runtime for local LLMs, guided by RAMA: Rama Active Memory Architecture.
 
 Spissa is a from-scratch local LLM runtime built around **runtime-compressed model storage** — **lossless by default** (rANS / bit-plane), with optional lossy quantization (q8 / q4). It stores model tensors in a chunked compressed container (`.spsa`) and runs inference by decoding only the tensor blocks needed at runtime. One self-contained binary, no dependencies, runs on any device.
@@ -417,12 +420,32 @@ cargo run -- --help
 cargo run -- pack --help
 ```
 
-Before committing:
+Before committing, follow the **mandatory** process in
+[`CONTRIBUTING.md`](CONTRIBUTING.md) (Conventional Commits drive the automatic
+versioning + changelog):
 
 ```bash
+cargo fmt --all
 git diff --check
-cargo test
+cargo build --workspace
+cargo test --workspace
 ```
+
+## Versioning & Releases
+
+Spissa is versioned automatically. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for
+the full rules.
+
+- **Scheme:** four-part `A.B.C.D` (`MAJOR.MINOR.PATCH.REVISION`); the single
+  source of truth is [`VERSION`](VERSION). A normal change advances the patch
+  part (`0.0.1.0 → 0.0.2.0`).
+- **Automatic on every push to `main`** (`.github/workflows/release.yml`): the
+  version + [`CHANGELOG.md`](CHANGELOG.md) are bumped from the commit messages,
+  tagged `vA.B.C.D`, and a GitHub Release is published.
+- **Android binaries:** each release cross-compiles the `spissa` CLI for
+  `arm64-v8a`, `armeabi-v7a`, and `x86_64` (minSdk 24) and attaches them to the
+  release. Continuous integration (`ci.yml`) builds and tests every push/PR;
+  `android.yml` also build-checks the cross-compile on PRs.
 
 ## Design Principles
 

@@ -1,0 +1,78 @@
+name: Android
+
+# Cross-compiles the `spissa` CLI for Android and uploads one binary per ABI.
+# Reusable (workflow_call) so the release pipeline can build the tagged commit;
+# also runs build-only on PRs that touch the runtime and on manual dispatch.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to build (defaults to the triggering ref)
+        type: string
+        required: false
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/android.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            triple: aarch64-linux-android
+          - abi: armeabi-v7a
+            triple: armv7-linux-androideabi
+          - abi: x86_64
+            triple: x86_64-linux-android
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.triple }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: android-${{ matrix.triple }}
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version "^3" --locked
+
+      - name: Point cargo-ndk at the runner NDK
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+
+      - name: Cross-compile spissa (release, minSdk 24)
+        run: cargo ndk -t ${{ matrix.abi }} -p 24 build --release -p spissa-cli --bin spissa
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.triple }}/release/spissa" "dist/spissa-android-${{ matrix.abi }}"
+          ( cd dist && sha256sum "spissa-android-${{ matrix.abi }}" > "spissa-android-${{ matrix.abi }}.sha256" )
+          ls -l dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spissa-android-${{ matrix.abi }}
+          path: dist/spissa-android-${{ matrix.abi }}*
+          if-no-files-found: error
