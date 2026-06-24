@@ -3,7 +3,7 @@ name = "spissa-container"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "RLLM binary container format (.rllm) parser and writer"
+description = "Spissa binary container format (.spsa) parser and writer"
 
 [dependencies]
 serde = { workspace = true }

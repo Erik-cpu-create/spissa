@@ -167,7 +167,7 @@
 - [x] Rotary Q/K values match an independent GPT-NeoX-style baseline and preserve non-rotary tail dims
 - [x] Cached next-token attention matches the last row of full causal attention
 - [x] Streaming attention can apply rotary, attend over past KV cache, append current K/V, and match full-decode last-token baseline
-- [x] `docs/rllm-rama-architecture.md` defines originality rules, RAMA/ERIK naming, and the memory-first runtime boundary; the previous ECHO/EMBER doc is superseded
+- [x] `docs/spissa-rama-architecture.md` defines originality rules, RAMA/ERIK naming, and the memory-first runtime boundary; the previous ECHO/EMBER doc is superseded
 - [x] Tiny prefill path fills ContextEcho KV-cache and matches full-context rotary baseline
 - [x] Tiny decode-step path consumes one generated token, advances rotary position, appends K/V, and matches full-context recompute
 - [x] Tiny multi-step generation returns deterministic generated token IDs, step logits, and resident ContextEcho bytes
