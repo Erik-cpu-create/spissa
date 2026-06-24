@@ -289,11 +289,13 @@ fn map_tensor_names(raw: &[String], architecture: &str) -> Vec<(String, String)>
             .collect();
         mapped.sort();
         mapped
-    } else if architecture.starts_with("qwen") {
+    } else if architecture.starts_with("qwen") && architecture != "qwen2" {
         // Qwen3.5 (`Qwen3_5ForConditionalGeneration`) nests the text decoder under
         // `model.language_model.*`. Keep only that, rewrite the prefix to the standard
         // `model.*` convention, and DROP the vision tower (`model.visual.*`) and the
-        // multi-token-prediction head (`mtp.*`) — this is the text-only adapter.
+        // multi-token-prediction head (`mtp.*`) — this is the text-only adapter. Qwen2
+        // (`qwen2`, e.g. VibeThinker-3B) is a flat `model.*` checkpoint with no such nesting,
+        // so it falls through to the identity pass-through below (NOT this filter).
         const QPREFIX: &str = "model.language_model.";
         let mut mapped: Vec<(String, String)> = raw
             .iter()

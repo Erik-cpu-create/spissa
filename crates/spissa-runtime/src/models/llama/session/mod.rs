@@ -3,7 +3,7 @@
 // distribution of this file, via any medium, is strictly prohibited.
 
 use crate::models::llama::api::{
-    decode_vector_tensor, require_config_usize, require_model_config, validate_llama_shape,
+    decode_llama_layer_params, require_config_usize, require_model_config, validate_llama_shape,
 };
 use crate::models::llama::generate::{
     streaming_llama_transformer_block_with_timing, LlamaStreamingBlockConfig,
@@ -127,20 +127,17 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
         // what pushed Phi past 8 GB into swap (4.7 GB/s effective vs Qwen's 21.9). The
         // gather now streams rows straight from the cache (`embed_gather`), so the only
         // resident copy of the embedding is the bf16 chunk cache the LM head already uses.
+        let q_width = prepared.config.num_heads * head_dim;
+        let kv_width = prepared.config.num_key_value_heads * head_dim;
         let mut layer_norms = Vec::with_capacity(prepared.layers.len());
         for i in 0..prepared.layers.len() {
-            layer_norms.push(OwnedLlamaStreamingBlockParameters {
-                input_layernorm_weight: decode_vector_tensor(
-                    model,
-                    &format!("model.layers.{i}.input_layernorm.weight"),
-                    hidden_size,
-                )?,
-                post_attention_layernorm_weight: decode_vector_tensor(
-                    model,
-                    &format!("model.layers.{i}.post_attention_layernorm.weight"),
-                    hidden_size,
-                )?,
-            });
+            layer_norms.push(decode_llama_layer_params(
+                model,
+                i,
+                hidden_size,
+                q_width,
+                kv_width,
+            )?);
         }
 
         let mut caches = Vec::with_capacity(prepared.layers.len());
@@ -247,8 +244,10 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
     /// Gather embedding rows for `token_ids` by decoding ONLY the chunk(s) that hold them
     /// (a cache hit in decode-once mode — the LM head already keeps these bf16 chunks
     /// resident). Replaces the 2.46 GB resident f32 table; peak resident drops by the full
-    /// table for big-vocab models. The packer pads each chunk to a whole number of rows, so
-    /// a row never straddles a chunk boundary. bf16 embedding only (Llama/Phi tied tables).
+    /// table for big-vocab models. A row may straddle a chunk boundary (when the chunk size is
+    /// not a multiple of the bf16 row width — e.g. Phi-4's 6144-byte rows under a 1 MiB chunk),
+    /// so each row is accumulated from every overlapping chunk rather than assuming it lives in
+    /// one. bf16 embedding only (Llama / Phi / Qwen2 tied tables).
     fn embed_gather(&mut self, token_ids: &[usize], budget: &mut MemoryBudget) -> Result<Vec<f32>> {
         let hidden = self.hidden_size;
         let vocab = self.vocab_size;
@@ -261,7 +260,8 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             }
         }
         let tensor_id = self.model.tensor(&self.prepared.embedding_weight)?.tensor_id;
-        let mut out = vec![0.0f32; token_ids.len() * hidden];
+        // Each token's raw bf16 row bytes, filled from however many chunks the row overlaps.
+        let mut row_buffers = vec![vec![0u8; row_bytes]; token_ids.len()];
         let mut chunks = self.model.chunks_for_tensor(tensor_id).to_vec();
         chunks.sort_by_key(|chunk| chunk.chunk_offset_in_tensor);
         let mut byte_offset = 0usize;
@@ -270,13 +270,15 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             let chunk_len = chunk.uncompressed_size as usize;
             byte_offset += chunk_len;
             let chunk_end = chunk_start + chunk_len;
-            let hits: Vec<(usize, usize)> = token_ids
+            // (token index, row byte span) for every row whose bytes overlap this chunk.
+            let hits: Vec<(usize, usize, usize)> = token_ids
                 .iter()
                 .enumerate()
                 .filter_map(|(i, &row)| {
                     let row_start = row.checked_mul(row_bytes)?;
-                    (row_start >= chunk_start && row_start + row_bytes <= chunk_end)
-                        .then_some((i, row_start - chunk_start))
+                    let row_end = row_start + row_bytes;
+                    (row_start < chunk_end && row_end > chunk_start)
+                        .then_some((i, row_start, row_end))
                 })
                 .collect();
             if hits.is_empty() {
@@ -284,16 +286,25 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
             }
             self.model
                 .with_decoded_chunk(chunk.chunk_id, budget, |bytes, _budget| {
-                    for (out_idx, local) in &hits {
-                        let dst = &mut out[out_idx * hidden..(out_idx + 1) * hidden];
-                        for (h, value) in dst.iter_mut().enumerate() {
-                            let lo = bytes[local + 2 * h];
-                            let hi = bytes[local + 2 * h + 1];
-                            *value = f32::from_bits((u16::from_le_bytes([lo, hi]) as u32) << 16);
-                        }
+                    for &(i, row_start, row_end) in &hits {
+                        let copy_start = row_start.max(chunk_start);
+                        let copy_end = row_end.min(chunk_end);
+                        row_buffers[i][copy_start - row_start..copy_end - row_start]
+                            .copy_from_slice(
+                                &bytes[copy_start - chunk_start..copy_end - chunk_start],
+                            );
                     }
                     Ok(())
                 })?;
+        }
+        let mut out = vec![0.0f32; token_ids.len() * hidden];
+        for (i, buffer) in row_buffers.iter().enumerate() {
+            let dst = &mut out[i * hidden..(i + 1) * hidden];
+            for (h, value) in dst.iter_mut().enumerate() {
+                let lo = buffer[2 * h];
+                let hi = buffer[2 * h + 1];
+                *value = f32::from_bits((u16::from_le_bytes([lo, hi]) as u32) << 16);
+            }
         }
         Ok(out)
     }

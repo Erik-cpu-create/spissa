@@ -81,6 +81,49 @@ pub(crate) fn decode_vector_tensor(
     Ok(tensor.data)
 }
 
+/// Decode a 1-D tensor if it exists, otherwise `None`. Used for the optional Qwen2 attention
+/// QKV bias: present on Qwen2/Qwen2.5 checkpoints, absent on LLaMA/Phi (no attention bias).
+pub(crate) fn optional_bias_tensor(
+    model: &mut LazySpissaModel,
+    name: &str,
+    expected_len: usize,
+) -> Result<Option<Vec<f32>>> {
+    if model.tensor(name).is_ok() {
+        Ok(Some(decode_vector_tensor(model, name, expected_len)?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Decode one decoder layer's small pinned parameters: the two RMSNorm weights plus the
+/// optional Qwen2 attention QKV biases. Shared by the chat session and the `run` text path so
+/// both apply attention bias identically. `q_width = num_heads * head_dim`, `kv_width =
+/// num_key_value_heads * head_dim`.
+pub(crate) fn decode_llama_layer_params(
+    model: &mut LazySpissaModel,
+    layer_index: usize,
+    hidden_size: usize,
+    q_width: usize,
+    kv_width: usize,
+) -> Result<OwnedLlamaStreamingBlockParameters> {
+    let name = |suffix: &str| format!("model.layers.{layer_index}.{suffix}");
+    Ok(OwnedLlamaStreamingBlockParameters {
+        input_layernorm_weight: decode_vector_tensor(
+            model,
+            &name("input_layernorm.weight"),
+            hidden_size,
+        )?,
+        post_attention_layernorm_weight: decode_vector_tensor(
+            model,
+            &name("post_attention_layernorm.weight"),
+            hidden_size,
+        )?,
+        q_bias: optional_bias_tensor(model, &name("self_attn.q_proj.bias"), q_width)?,
+        k_bias: optional_bias_tensor(model, &name("self_attn.k_proj.bias"), kv_width)?,
+        v_bias: optional_bias_tensor(model, &name("self_attn.v_proj.bias"), kv_width)?,
+    })
+}
+
 pub fn prepare_llama_rama_layer_decode_transformer_from_metadata(
     model: &mut LazySpissaModel,
     generation: LlamaRamaGenerationConfig,
@@ -218,19 +261,17 @@ pub fn rama_layer_decoded_llama_transformer_generate_from_model(
         .data;
     let vocab_size = embedding_data.len() / hidden_size;
 
-    let mut layer_norms = Vec::new();
+    let q_width = prepared.config.num_heads * head_dim;
+    let kv_width = prepared.config.num_key_value_heads * head_dim;
+    let mut layer_params = Vec::new();
     for i in 0..prepared.layers.len() {
-        let input_layernorm_weight = decode_vector_tensor(
+        layer_params.push(decode_llama_layer_params(
             model,
-            &format!("model.layers.{i}.input_layernorm.weight"),
+            i,
             hidden_size,
-        )?;
-        let post_attention_layernorm_weight = decode_vector_tensor(
-            model,
-            &format!("model.layers.{i}.post_attention_layernorm.weight"),
-            hidden_size,
-        )?;
-        layer_norms.push((input_layernorm_weight, post_attention_layernorm_weight));
+            q_width,
+            kv_width,
+        )?);
     }
 
     // Decode LM head weight ONCE
@@ -254,11 +295,7 @@ pub fn rama_layer_decoded_llama_transformer_generate_from_model(
 
         // 2. Layers
         for (i, layer_names) in prepared.layers.iter().enumerate() {
-            let (input_ln_weight, post_attn_ln_weight) = &layer_norms[i];
-            let params = OwnedLlamaStreamingBlockParameters {
-                input_layernorm_weight: input_ln_weight.clone(),
-                post_attention_layernorm_weight: post_attn_ln_weight.clone(),
-            };
+            let params = layer_params[i].clone();
             let config = LlamaStreamingBlockConfig {
                 seq_len,
                 hidden_size,
