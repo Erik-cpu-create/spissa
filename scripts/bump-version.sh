@@ -42,26 +42,14 @@ mapfile -t SUBJECTS < <(git log "$RANGE" --no-merges --pretty=format:'%s' 2>/dev
   | grep -vE '^chore\(release\):' || true)
 
 # ---- decide bump level -----------------------------------------------------
-META_RE='^(docs|chore|ci|style|test|build)(\([^)]*\))?!?:'
+# Policy: every push advances the PATCH segment (the 3rd part), e.g.
+#   0.0.1.0 -> 0.0.2.0. An explicit marker in the HEAD commit message overrides
+# this for the rare minor/major/revision bump.
+HEAD_MSG="$(git log -1 --pretty=format:'%B' 2>/dev/null || true)"
 level="patch"
-has_change=false
-has_feat=false
-all_meta=true
-for s in "${SUBJECTS[@]:-}"; do
-  [[ -z "$s" ]] && continue
-  has_change=true
-  if [[ "$s" =~ ^[a-z]+(\([^\)]*\))?!: ]] || [[ "$s" == *"BREAKING CHANGE"* ]]; then
-    level="major"; break
-  fi
-  [[ "$s" =~ ^feat(\([^\)]*\))?: ]] && has_feat=true
-  [[ "$s" =~ $META_RE ]] || all_meta=false
-done
-
-if [[ "$level" != "major" ]]; then
-  if   [[ "$has_feat" == true ]];                         then level="minor"
-  elif [[ "$has_change" == true && "$all_meta" == true ]]; then level="revision"
-  else                                                         level="patch"
-  fi
+if   [[ "$HEAD_MSG" == *"[major]"* ]] || [[ "$HEAD_MSG" == *"BREAKING CHANGE"* ]]; then level="major"
+elif [[ "$HEAD_MSG" == *"[minor]"* ]];    then level="minor"
+elif [[ "$HEAD_MSG" == *"[revision]"* ]]; then level="revision"
 fi
 
 case "$level" in

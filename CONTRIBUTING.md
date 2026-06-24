@@ -15,21 +15,24 @@ cross-compile artifacts).
 
 Spissa uses a **four-part** version: `MAJOR.MINOR.PATCH.REVISION`.
 
-| Part | Name | Bumped when… |
-|------|------|--------------|
-| `A` | **MAJOR** | a breaking change (format/API/runtime incompatibility) |
-| `B` | **MINOR** | a new backward-compatible feature |
-| `C` | **PATCH** | a bug fix or any normal change |
-| `D` | **REVISION** | docs/CI/chore-only changes (no code behaviour change) |
+| Part | Name | When it advances |
+|------|------|------------------|
+| `A` | **MAJOR** | breaking change — only with an explicit `[major]` marker (or `BREAKING CHANGE`) |
+| `B` | **MINOR** | new feature — only with an explicit `[minor]` marker |
+| `C` | **PATCH** | **the default — every push to `main` advances this** |
+| `D` | **REVISION** | docs/CI-only touch-up — only with an explicit `[revision]` marker |
 
-When a higher part is bumped, every lower part resets to `0`
-(e.g. a feature bump takes `0.1.4.2` → `0.2.0.0`).
+When a higher part advances, every lower part resets to `0`
+(e.g. a `[minor]` bump takes `0.1.4.2` → `0.2.0.0`).
 
-**A normal change advances the patch part**, exactly as requested:
+**Every push to `main` advances the patch part by default**, exactly as required:
 
 ```
-0.0.1.0  →  (new change)  →  0.0.2.0
+0.0.1.0  →  (any push)  →  0.0.2.0
 ```
+
+Need a different bump? Put a marker anywhere in the latest commit message:
+`[major]`, `[minor]`, or `[revision]`.
 
 The single source of truth is the [`VERSION`](VERSION) file. The first three
 parts (`A.B.C`) are mirrored into `Cargo.toml` (`[workspace.package].version`)
@@ -41,37 +44,38 @@ release workflow does it for you on every push to `main` (see §4).
 
 ---
 
-## 2. Commit messages — Conventional Commits (REQUIRED)
+## 2. Commit messages — Conventional Commits (recommended)
 
-The automatic version bump and the changelog are generated **from your commit
-messages**, so they must follow [Conventional Commits](https://www.conventionalcommits.org/):
+The **changelog** is generated from your commit messages, so following
+[Conventional Commits](https://www.conventionalcommits.org/) keeps it tidy. The
+commit type does **not** decide the version — the push policy in §1 does. The
+type only decides which changelog section the commit lands in:
 
 ```
 <type>(<optional scope>): <summary>
 ```
 
-| `type`   | Effect on version | Changelog section |
-|----------|-------------------|-------------------|
-| `feat`   | MINOR (`B`)       | Features |
-| `fix`    | PATCH (`C`)       | Fixes |
-| `perf`   | PATCH (`C`)       | Performance |
-| `refactor` | PATCH (`C`)     | Refactor |
-| `docs`   | REVISION (`D`)*   | Documentation |
-| `build` / `ci` | REVISION (`D`)* | Build & CI |
-| `chore` / `style` / `test` | REVISION (`D`)* | (not listed) |
-| any `type!:` or body `BREAKING CHANGE:` | MAJOR (`A`) | Features (marked breaking) |
+| `type` | Changelog section |
+|--------|-------------------|
+| `feat` | Features |
+| `fix` | Fixes |
+| `perf` | Performance |
+| `refactor` | Refactor |
+| `docs` | Documentation |
+| `build` / `ci` | Build & CI |
+| anything else | Other |
 
-\* A push is a REVISION bump **only if every** commit since the last release is
-docs/CI/chore-class. If any commit is `feat`/`fix`/`perf`/`refactor`, that wins.
+To override the default patch bump, add `[minor]`, `[major]`, or `[revision]`
+anywhere in the commit message (see §1).
 
 Examples:
 
 ```
-feat(codec): add rtc-delta-v1 base-exponent coder
-fix(tokenizer): group digits in runs of <=3
-perf(llama): stream tied-embedding rows from cache
-docs: reconcile RLLM->Spissa naming
-feat(format)!: bump .spsa container to v2   # MAJOR
+fix(tokenizer): group digits in runs of <=3        # patch (default)
+perf(llama): stream tied-embedding rows from cache  # patch (default)
+feat(codec): add rtc-delta-v1 coder [minor]         # minor bump
+feat(format): bump .spsa container to v2 [major]    # major bump
+docs: fix a typo [revision]                         # revision bump
 ```
 
 ---
@@ -93,22 +97,24 @@ CI (`.github/workflows/ci.yml`) re-runs build + test on every push and PR.
 
 On every push to **`main`** (`.github/workflows/release.yml`):
 
-1. **Version** — `scripts/bump-version.sh` reads the commits since the last
-   `v*` tag, decides the bump level (§1–§2), and rewrites `VERSION`,
-   `Cargo.toml`, `Cargo.lock`, and prepends a new `CHANGELOG.md` section.
+1. **Version** — `scripts/bump-version.sh` advances the patch part by default
+   (or the `[minor]`/`[major]`/`[revision]` marker level, §1), then rewrites
+   `VERSION`, `Cargo.toml`, `Cargo.lock`, and prepends a new `CHANGELOG.md`
+   section built from the commits since the last `v*` tag.
 2. The bot commits this as `chore(release): vA.B.C.D [skip ci]` and pushes a
    matching annotated git tag `vA.B.C.D`.
-3. **Android build** — the runtime is cross-compiled for Android
-   (`arm64-v8a`, `armeabi-v7a`, `x86_64`) and the `spissa` binary is collected.
+3. **Binaries** — the `spissa` CLI is cross-compiled for Android
+   (`arm64-v8a`, `x86_64`) and built natively for Linux (`x86_64`).
 4. **Release** — a GitHub Release is created for the tag, with the generated
-   changelog as its notes and the Android binaries attached as assets.
+   changelog as its notes and the Android + Linux binaries (each with a
+   `.sha256`) attached as assets.
 
 Because the release commit carries `[skip ci]`, it does not trigger another
 release run (no infinite loop).
 
-> Releases are produced from `main`. Feature branches and PRs only run CI and a
-> build-only Android job (`.github/workflows/android.yml`); they do not bump the
-> version or publish a release.
+> Releases are produced from `main`. Feature branches and PRs only run CI and
+> build-only Android/Linux jobs (`.github/workflows/android.yml`, `linux.yml`);
+> they do not bump the version or publish a release.
 
 ---
 
@@ -117,10 +123,10 @@ release run (no infinite loop).
 The CI uses [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) + the Android NDK:
 
 ```bash
-rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+rustup target add aarch64-linux-android x86_64-linux-android
 cargo install cargo-ndk --locked
 export ANDROID_NDK_HOME=/path/to/android-ndk
-cargo ndk -t arm64-v8a -p 24 build --release -p spissa-cli --bin spissa
+cargo ndk -t arm64-v8a -t x86_64 -p 24 build --release -p spissa-cli --bin spissa
 # output: target/aarch64-linux-android/release/spissa
 ```
 

@@ -35,8 +35,6 @@ jobs:
         include:
           - abi: arm64-v8a
             triple: aarch64-linux-android
-          - abi: armeabi-v7a
-            triple: armv7-linux-androideabi
           - abi: x86_64
             triple: x86_64-linux-android
     steps:
