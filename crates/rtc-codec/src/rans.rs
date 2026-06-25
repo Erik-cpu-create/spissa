@@ -234,6 +234,80 @@ pub fn rans_decode_interleaved4_into(
     }
 }
 
+/// Interleaved 8-lane rANS encode — same construction as [`rans_encode_interleaved4`]
+/// but 8 independent streams. More lanes = more independent state chains for a wide
+/// out-of-order core to overlap on decode (the REEBORN edge-decode lever the project
+/// flagged at R152/R153 but had not pushed past 4 lanes).
+pub fn rans_encode_interleaved8(symbols: &[u8], freq: &[u32; 256]) -> [Vec<u8>; 8] {
+    core::array::from_fn(|j| {
+        let sub: Vec<u8> = symbols.iter().skip(j).step_by(8).copied().collect();
+        rans_encode(&sub, freq)
+    })
+}
+
+/// Decode `n` symbols from an 8-lane interleaved stream into `out` using precomputed
+/// `tables`. The eight lane states live in separate locals (own register chains) and are
+/// stepped per iteration, so a wide core overlaps more independent work than the 4-lane
+/// body — the throughput lever for lossless decode in the model>RAM streaming regime.
+pub fn rans_decode_interleaved8_into(
+    streams: [&[u8]; 8],
+    n: usize,
+    tables: &RansDecodeTables,
+    out: &mut [u8],
+) {
+    let freq = &tables.freq;
+    let cum = &tables.cum;
+    let slot2sym = &tables.slot2sym;
+    let mask = M - 1;
+    let init = |s: &[u8]| -> u32 {
+        (s[0] as u32) | (s[1] as u32) << 8 | (s[2] as u32) << 16 | (s[3] as u32) << 24
+    };
+    let (mut x0, mut x1, mut x2, mut x3, mut x4, mut x5, mut x6, mut x7) = (
+        init(streams[0]), init(streams[1]), init(streams[2]), init(streams[3]),
+        init(streams[4]), init(streams[5]), init(streams[6]), init(streams[7]),
+    );
+    let (mut p0, mut p1, mut p2, mut p3, mut p4, mut p5, mut p6, mut p7) =
+        (4usize, 4usize, 4usize, 4usize, 4usize, 4usize, 4usize, 4usize);
+    let (s0, s1, s2, s3, s4, s5, s6, s7) = (
+        streams[0], streams[1], streams[2], streams[3],
+        streams[4], streams[5], streams[6], streams[7],
+    );
+    macro_rules! step {
+        ($x:ident, $p:ident, $s:ident, $idx:expr) => {
+            if $idx < n {
+                let sl = $x & mask;
+                let sym = slot2sym[sl as usize];
+                out[$idx] = sym;
+                $x = freq[sym as usize] * ($x >> SCALE_BITS) + sl - cum[sym as usize];
+                while $x < RANS_L {
+                    $x = ($x << 8) | $s[$p] as u32;
+                    $p += 1;
+                }
+            }
+        };
+    }
+    let mut base = 0usize;
+    while base < n {
+        step!(x0, p0, s0, base);
+        step!(x1, p1, s1, base + 1);
+        step!(x2, p2, s2, base + 2);
+        step!(x3, p3, s3, base + 3);
+        step!(x4, p4, s4, base + 4);
+        step!(x5, p5, s5, base + 5);
+        step!(x6, p6, s6, base + 6);
+        step!(x7, p7, s7, base + 7);
+        base += 8;
+    }
+}
+
+/// Convenience: build tables + decode an 8-lane interleaved stream.
+pub fn rans_decode_interleaved8(streams: [&[u8]; 8], n: usize, freq: &[u32; 256]) -> Vec<u8> {
+    let t = rans_build_tables(freq);
+    let mut out = vec![0u8; n];
+    rans_decode_interleaved8_into(streams, n, &t, &mut out);
+    out
+}
+
 /// Parallel 4-lane interleaved decode: each lane (an independent rANS stream) is
 /// decoded on its OWN thread, then the four subsequences are interleaved. ~4× the
 /// single-thread `rans_decode_interleaved4` on large chunks — the container decode
@@ -512,5 +586,90 @@ mod tests {
         let enc = RansCodec.encode(&bytes, &meta).unwrap();
         let dmeta = DecodeMeta { codec_id: "rtc-rans-v1".into(), uncompressed_size: bytes.len() as u64 };
         assert_eq!(RansCodec.decode(&enc.data, &dmeta).unwrap(), bytes, "raw-fallback roundtrip must be bit-exact");
+    }
+
+    #[test]
+    fn rans_interleaved8_roundtrip_matches() {
+        for &len in &[1usize, 2, 7, 8, 9, 15, 16, 17, 1000, 10003] {
+            let mut state = 0x0BAD_F00Du32;
+            let syms: Vec<u8> = (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    (96 + (state % 34)) as u8
+                })
+                .collect();
+            let freq = normalize_freqs(&count_symbols(&syms));
+            let streams = rans_encode_interleaved8(&syms, &freq);
+            let sl = [
+                &streams[0][..], &streams[1][..], &streams[2][..], &streams[3][..],
+                &streams[4][..], &streams[5][..], &streams[6][..], &streams[7][..],
+            ];
+            let decoded = rans_decode_interleaved8(sl, syms.len(), &freq);
+            assert_eq!(decoded, syms, "interleaved-8 roundtrip must be bit-exact (len={len})");
+        }
+    }
+
+    // REEBORN edge-decode lever: does going 4 -> 8 lanes lift single-core rANS decode
+    // throughput on this machine? Run: cargo test -p rtc-codec reeborn_edge_lane_bench
+    // -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn reeborn_edge_lane_bench() {
+        use std::time::Instant;
+        let n = 40_000_000usize; // 40M exponents (~one big tensor's worth)
+        let mut state = 0x2468_ACE0u32;
+        let syms: Vec<u8> = (0..n)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                // realistic bf16 exponent peak: ~70% on 118..120, rest spread 104..127
+                if state % 100 < 70 { (118 + (state % 3)) as u8 } else { (104 + (state % 24)) as u8 }
+            })
+            .collect();
+        let freq = normalize_freqs(&count_symbols(&syms));
+        let s1 = rans_encode(&syms, &freq);
+        let s4 = rans_encode_interleaved4(&syms, &freq);
+        let s8 = rans_encode_interleaved8(&syms, &freq);
+        let t = rans_build_tables(&freq);
+        let mut out = vec![0u8; n];
+        let reps = 3usize;
+        let gw = |secs: f64| (n as f64 * reps as f64 / 1e9) / secs;
+
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            let d = rans_decode(&s1, n, &freq);
+            std::hint::black_box(&d);
+        }
+        let scalar = gw(t0.elapsed().as_secs_f64());
+
+        let sl4 = [&s4[0][..], &s4[1][..], &s4[2][..], &s4[3][..]];
+        let t1 = Instant::now();
+        for _ in 0..reps {
+            rans_decode_interleaved4_into(sl4, n, &t, &mut out);
+            std::hint::black_box(&out);
+        }
+        let l4 = gw(t1.elapsed().as_secs_f64());
+
+        let sl8 = [
+            &s8[0][..], &s8[1][..], &s8[2][..], &s8[3][..],
+            &s8[4][..], &s8[5][..], &s8[6][..], &s8[7][..],
+        ];
+        let t2 = Instant::now();
+        for _ in 0..reps {
+            rans_decode_interleaved8_into(sl8, n, &t, &mut out);
+            std::hint::black_box(&out);
+        }
+        let l8 = gw(t2.elapsed().as_secs_f64());
+        assert_eq!(&out[..n], &syms[..], "8-lane decode must stay bit-exact in the bench");
+
+        let bits = (s1.len() as f64 * 8.0) / n as f64;
+        eprintln!("\n########## REEBORN edge lane bench ({n} exp symbols, {bits:.3} bits/sym) ##########");
+        eprintln!("  scalar   (1 lane)  = {scalar:.3} Gweight/s/core");
+        eprintln!("  interleaved4       = {l4:.3} Gweight/s/core  ({:.2}x vs scalar)", l4 / scalar);
+        eprintln!("  interleaved8       = {l8:.3} Gweight/s/core  ({:.2}x vs scalar, {:.2}x vs 4-lane)", l8 / scalar, l8 / l4);
+        eprintln!("##########");
     }
 }
