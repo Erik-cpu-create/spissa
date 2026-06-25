@@ -9,6 +9,15 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 <!-- BUMP:INSERT -->
 
+## [0.1.3.0] - 2026-06-25
+
+### Features
+- REEBORN edge codec — coderless FOR exponent + 8-lane rANS probe
+
+### Other
+- research(reeborn): REEBORN lossless-codec investigation E0-E8 + prior-art survey
+
+
 ## [0.1.2.0] - 2026-06-24
 
 ### Features
