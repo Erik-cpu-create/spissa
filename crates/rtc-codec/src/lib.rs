@@ -47,3 +47,8 @@ pub const CODEC_BITPLANE_V1: &str = "rtc-bitplane-v1";
 
 /// Codec ID for the rANS lossless bf16 codec (at the entropy floor, ~10.5 bits/weight)
 pub const CODEC_RANS_V1: &str = "rtc-rans-v1";
+
+/// Codec ID for the REEBORN coderless FOR bf16 codec — raw significand + per-tensor
+/// fixed-width exponent. Larger (~13 bits/weight) but branch-free, ~6× faster decode;
+/// wins in the model>RAM streaming regime where decode bandwidth is the wall.
+pub const CODEC_REEBORN_FOR_V1: &str = "rtc-reeborn-for-v1";
