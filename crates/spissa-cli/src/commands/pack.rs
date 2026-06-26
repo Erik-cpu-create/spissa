@@ -12,8 +12,9 @@ use spissa_import::{
     ShardedSafetensorsReader,
 };
 use rtc_codec::{
-    BitplaneCodec, EncodeMeta, HuffmanCodec, RansCodec, RawCodec, RleCodec, TensorCodec,
-    CODEC_BITPLANE_V1, CODEC_HUFF_V1, CODEC_RANS_V1, CODEC_RAW_V1, CODEC_RLE_V1,
+    BitplaneCodec, EncodeMeta, HuffmanCodec, RansCodec, RawCodec, ReebornForCodec, RleCodec,
+    TensorCodec, CODEC_BITPLANE_V1, CODEC_HUFF_V1, CODEC_RANS_V1, CODEC_RAW_V1,
+    CODEC_REEBORN_FOR_V1, CODEC_RLE_V1,
 };
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ enum PackCodecPolicy {
     Huff,
     Rans,
     Bitplane,
+    ReebornFor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,8 +55,9 @@ impl PackCodecPolicy {
             "huff" | "huffman" | CODEC_HUFF_V1 => Ok(Self::Huff),
             "rans" | CODEC_RANS_V1 => Ok(Self::Rans),
             "bitplane" | CODEC_BITPLANE_V1 => Ok(Self::Bitplane),
+            "reeborn-for" | "for" | CODEC_REEBORN_FOR_V1 => Ok(Self::ReebornFor),
             other => anyhow::bail!(
-                "unsupported --codec {other:?}; expected one of: auto, raw, rle, huff, rans, bitplane"
+                "unsupported --codec {other:?}; expected one of: auto, raw, rle, huff, rans, bitplane, reeborn-for"
             ),
         }
     }
@@ -67,6 +70,7 @@ impl PackCodecPolicy {
             Self::Huff => CODEC_HUFF_V1,
             Self::Rans => CODEC_RANS_V1,
             Self::Bitplane => CODEC_BITPLANE_V1,
+            Self::ReebornFor => CODEC_REEBORN_FOR_V1,
         }
     }
 
@@ -86,6 +90,8 @@ impl PackCodecPolicy {
             Self::Rans => vec![Box::new(RansCodec), Box::new(RawCodec)],
             // bit-plane for bf16 (fast NEON decode), raw fallback for non-bf16 chunks.
             Self::Bitplane => vec![Box::new(BitplaneCodec), Box::new(RawCodec)],
+            // REEBORN coderless FOR for bf16 (fastest edge / >RAM decode), raw fallback otherwise.
+            Self::ReebornFor => vec![Box::new(ReebornForCodec), Box::new(RawCodec)],
         }
     }
 }

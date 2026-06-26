@@ -5,7 +5,10 @@
 use anyhow::{Context, Result};
 use spissa_container::SpissaReader;
 use spissa_import::SafetensorsReader;
-use rtc_codec::{BitplaneCodec, DecodeMeta, HuffmanCodec, RansCodec, RawCodec, RleCodec, TensorCodec};
+use rtc_codec::{
+    BitplaneCodec, DecodeMeta, HuffmanCodec, RansCodec, RawCodec, ReebornForCodec, RleCodec,
+    TensorCodec,
+};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -16,6 +19,7 @@ fn get_codec(codec_id: &str) -> Result<Box<dyn TensorCodec>> {
         "rtc-huff-v1" => Ok(Box::new(HuffmanCodec)),
         "rtc-rans-v1" => Ok(Box::new(RansCodec)),
         "rtc-bitplane-v1" => Ok(Box::new(BitplaneCodec)),
+        "rtc-reeborn-for-v1" => Ok(Box::new(ReebornForCodec)),
         _ => anyhow::bail!("Unknown codec: {}", codec_id),
     }
 }
