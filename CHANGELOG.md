@@ -9,6 +9,12 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 <!-- BUMP:INSERT -->
 
+## [0.1.4.0] - 2026-06-26
+
+### Features
+- wire REEBORN-FOR edge codec into CLI + runtime registries
+
+
 ## [0.1.3.0] - 2026-06-25
 
 ### Features
