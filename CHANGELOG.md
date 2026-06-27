@@ -9,6 +9,12 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 <!-- BUMP:INSERT -->
 
+## [0.1.5.0] - 2026-06-27
+
+### Fixes
+- gate unix-only mmap advise/lock behind cfg(unix)
+
+
 ## [0.1.4.0] - 2026-06-26
 
 ### Features
