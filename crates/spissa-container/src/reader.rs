@@ -82,6 +82,9 @@ impl SpissaReader {
         // kernel to read the mapping ahead so the weights land resident up
         // front; it is a pure hint with no correctness impact, so we always
         // issue it and ignore failures (unsupported platforms / large maps).
+        // `advise`/`Advice` are `#[cfg(unix)]` in memmap2; on other platforms
+        // (e.g. Windows) the hint is simply skipped.
+        #[cfg(unix)]
         let _ = mmap.advise(memmap2::Advice::WillNeed);
 
         // Opt-in hard residency: mlock pins the whole mapping so the OS cannot
@@ -89,11 +92,19 @@ impl SpissaReader {
         // resident behaviour of llama.cpp's --mlock) at the risk of OOM when
         // the working set exceeds physical RAM, so it is gated behind an env
         // flag and failures are tolerated rather than fatal.
+        // `Mmap::lock` is `#[cfg(unix)]`; on non-unix targets we report the
+        // unsupported request and continue (the mapping still works, just
+        // without hard residency).
         if std::env::var("SPISSA_MLOCK").map(|v| v == "1").unwrap_or(false) {
+            #[cfg(unix)]
             match mmap.lock() {
                 Ok(()) => {}
                 Err(e) => eprintln!("[rllm] SPISSA_MLOCK=1 requested but mlock failed: {e}"),
             }
+            #[cfg(not(unix))]
+            eprintln!(
+                "[rllm] SPISSA_MLOCK=1 requested but mlock is not supported on this platform; ignoring"
+            );
         }
 
         Ok(Self {
