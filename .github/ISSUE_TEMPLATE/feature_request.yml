@@ -28,4 +28,3 @@ body:
       description: Spissa keeps a few hard rules (see CONTRIBUTING.md §6).
       options:
         - label: This proposal stays lossless by default (or is clearly labeled lossy)
-        - label: This proposal does not wrap Ollama/llama.cpp or another runtime
