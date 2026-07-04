@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::speed::{
     RamaAipPolicyKind, RamaAipProjectionDecision, RamaAipProjectionKind,
@@ -131,7 +130,7 @@ impl RamaExperimentalSpeedConfig {
         if periodic_layers == 0 {
             return false;
         }
-        layer_index % periodic_layers == 0
+        layer_index.is_multiple_of(periodic_layers)
     }
 
     pub fn attention_locality_enabled_for_layer(

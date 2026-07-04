@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! rtc-reeborn-for: frame-of-reference fixed-width exponent codec (coderless).
 //!
@@ -24,7 +23,10 @@ pub fn for_encode(symbols: &[u8], base: u8, width: u32) -> Vec<u8> {
     let mut acc: u64 = 0;
     let mut nbits: u32 = 0;
     for &s in symbols {
-        debug_assert!(s >= base && ((s - base) as u16) < (1u16 << width), "symbol out of FOR range");
+        debug_assert!(
+            s >= base && ((s - base) as u16) < (1u16 << width),
+            "symbol out of FOR range"
+        );
         acc = (acc << width) | (s - base) as u64;
         nbits += width;
         while nbits >= 8 {
@@ -148,7 +150,11 @@ pub fn for_escape_decode_into(stream: &[u8], n: usize, base: u8, width: u32, out
     }
     for o in out.iter_mut().take(n) {
         let code = get!(width);
-        *o = if code == span { get!(8u32) as u8 } else { base.wrapping_add(code as u8) };
+        *o = if code == span {
+            get!(8u32) as u8
+        } else {
+            base.wrapping_add(code as u8)
+        };
     }
 }
 
@@ -185,7 +191,7 @@ impl TensorCodec for ReebornForCodec {
         // bit patterns — split_bf16 is bijective on any u16, so this stays lossless for ANY tensor
         // (dtype-string independent, like rtc-rans-v1); the smallest-lossless picker keeps RawCodec
         // when FOR does not shrink the chunk.
-        if input.len() % 2 != 0 {
+        if !input.len().is_multiple_of(2) {
             let mut data = Vec::with_capacity(1 + input.len());
             data.push(Self::FLAG_RAW);
             data.extend_from_slice(input);
@@ -214,7 +220,11 @@ impl TensorCodec for ReebornForCodec {
         data.extend_from_slice(&(stream.len() as u64).to_le_bytes());
         data.extend_from_slice(&stream);
         data.extend_from_slice(&residuals);
-        Ok(EncodedChunk { codec_id: Self::ID.to_string(), data, original_size: input.len() as u64 })
+        Ok(EncodedChunk {
+            codec_id: Self::ID.to_string(),
+            data,
+            original_size: input.len() as u64,
+        })
     }
 
     fn decode(&self, encoded: &[u8], _meta: &DecodeMeta) -> Result<Vec<u8>> {
@@ -231,7 +241,9 @@ impl TensorCodec for ReebornForCodec {
         let base = body[8];
         let width = body[9] as u32;
         if !(1..=8).contains(&width) {
-            return Err(CodecError::InvalidData("rtc-reeborn-for-v1: bad width".into()));
+            return Err(CodecError::InvalidData(
+                "rtc-reeborn-for-v1: bad width".into(),
+            ));
         }
         let slen = u64::from_le_bytes(body[10..18].try_into().unwrap()) as usize;
         if slen < (n * width as usize).div_ceil(8) {
@@ -256,7 +268,7 @@ mod tests {
     #[test]
     fn for_roundtrip_fixed_width() {
         for &(base, width) in &[(104u8, 5u32), (96, 6), (0, 8), (120, 3)] {
-            let span = (1u32 << width) as u32;
+            let span = 1u32 << width;
             let mut state = 0x1111_2222u32;
             let syms: Vec<u8> = (0..5000)
                 .map(|_| {
@@ -269,7 +281,10 @@ mod tests {
             let enc = for_encode(&syms, base, width);
             let mut out = vec![0u8; syms.len()];
             for_decode_into(&enc, syms.len(), base, width, &mut out);
-            assert_eq!(out, syms, "FOR roundtrip must be bit-exact (base={base}, width={width})");
+            assert_eq!(
+                out, syms,
+                "FOR roundtrip must be bit-exact (base={base}, width={width})"
+            );
         }
     }
 
@@ -292,8 +307,14 @@ mod tests {
                 let mut b = vec![0u8; len];
                 for_decode_into(&enc, len, base, width, &mut a);
                 for_decode8_into(&enc, len, base, width, &mut b);
-                assert_eq!(a, syms, "scalar decode wrong (base={base},width={width},len={len})");
-                assert_eq!(b, syms, "decode8 wrong (base={base},width={width},len={len})");
+                assert_eq!(
+                    a, syms,
+                    "scalar decode wrong (base={base},width={width},len={len})"
+                );
+                assert_eq!(
+                    b, syms,
+                    "decode8 wrong (base={base},width={width},len={len})"
+                );
             }
         }
     }
@@ -333,7 +354,10 @@ mod tests {
         assert_eq!(&out[..n], &syms[..]);
         eprintln!("\n########## REEBORN-FOR decode8 ({n} exp, w={width}) ##########");
         eprintln!("  for_decode_into  (per-code) = {scalar:.3} Gweight/s/core");
-        eprintln!("  for_decode8_into (group-8)  = {d8:.3} Gweight/s/core  ({:.2}x)", d8 / scalar);
+        eprintln!(
+            "  for_decode8_into (group-8)  = {d8:.3} Gweight/s/core  ({:.2}x)",
+            d8 / scalar
+        );
         eprintln!("##########");
     }
 
@@ -352,7 +376,10 @@ mod tests {
             let enc = for_escape_encode(&syms, base, width);
             let mut out = vec![0u8; syms.len()];
             for_escape_decode_into(&enc, syms.len(), base, width, &mut out);
-            assert_eq!(out, syms, "FOR-escape roundtrip must be bit-exact (base={base}, width={width})");
+            assert_eq!(
+                out, syms,
+                "FOR-escape roundtrip must be bit-exact (base={base}, width={width})"
+            );
         }
     }
 
@@ -369,7 +396,11 @@ mod tests {
                 state ^= state << 13;
                 state ^= state >> 17;
                 state ^= state << 5;
-                if state % 100 < 70 { (118 + (state % 3)) as u8 } else { (104 + (state % 24)) as u8 }
+                if state % 100 < 70 {
+                    (118 + (state % 3)) as u8
+                } else {
+                    (104 + (state % 24)) as u8
+                }
             })
             .collect();
         let (base, width) = (112u8, 4u32); // window [112,126]
@@ -379,7 +410,10 @@ mod tests {
         let enc = for_escape_encode(&syms, base, width);
         let bits = (enc.len() as f64 * 8.0) / n as f64;
         let span = (1u32 << width) - 1;
-        let esc = syms.iter().filter(|&&s| (s.wrapping_sub(base) as u32) >= span).count();
+        let esc = syms
+            .iter()
+            .filter(|&&s| (s.wrapping_sub(base) as u32) >= span)
+            .count();
         let t0 = Instant::now();
         for _ in 0..reps {
             for_escape_decode_into(&enc, n, base, width, &mut out);
@@ -411,7 +445,11 @@ mod tests {
                 state ^= state << 13;
                 state ^= state >> 17;
                 state ^= state << 5;
-                if state % 100 < 70 { (118 + (state % 3)) as u8 } else { (104 + (state % 24)) as u8 }
+                if state % 100 < 70 {
+                    (118 + (state % 3)) as u8
+                } else {
+                    (104 + (state % 24)) as u8
+                }
             })
             .collect();
         let (base, width) = (104u8, 5u32); // covers 104..135
@@ -444,7 +482,11 @@ mod tests {
         eprintln!("\n########## REEBORN-FOR vs rANS decode ({n} exp symbols) ##########");
         eprintln!("  FOR  (coderless, {width}-bit): {for_bits:.2} bits/exp, decode {for_gw:.3} Gweight/s/core");
         eprintln!("  rANS (4-lane)               : {rans_bits:.2} bits/exp, decode {rans_gw:.3} Gweight/s/core");
-        eprintln!("  -> FOR decodes {:.2}x faster, at {:.2}x the exponent bits", for_gw / rans_gw, for_bits / rans_bits);
+        eprintln!(
+            "  -> FOR decodes {:.2}x faster, at {:.2}x the exponent bits",
+            for_gw / rans_gw,
+            for_bits / rans_bits
+        );
         eprintln!("##########");
     }
 
@@ -461,25 +503,54 @@ mod tests {
             let bits = (((state >> 31) & 1) as u16) << 15 | (exp << 7) | (state & 0x7F) as u16;
             bytes.extend_from_slice(&bits.to_le_bytes());
         }
-        let meta = EncodeMeta { name: "w".into(), shape: vec![n as u64], dtype: "bf16".into() };
+        let meta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![n as u64],
+            dtype: "bf16".into(),
+        };
         let enc = ReebornForCodec.encode(&bytes, &meta).unwrap();
         assert_eq!(enc.codec_id, "rtc-reeborn-for-v1");
-        assert!(enc.data.len() < bytes.len(), "must compress: {} >= {}", enc.data.len(), bytes.len());
-        let dmeta = DecodeMeta { codec_id: enc.codec_id.clone(), uncompressed_size: bytes.len() as u64 };
-        assert_eq!(ReebornForCodec.decode(&enc.data, &dmeta).unwrap(), bytes, "bf16 roundtrip must be bit-exact");
+        assert!(
+            enc.data.len() < bytes.len(),
+            "must compress: {} >= {}",
+            enc.data.len(),
+            bytes.len()
+        );
+        let dmeta = DecodeMeta {
+            codec_id: enc.codec_id.clone(),
+            uncompressed_size: bytes.len() as u64,
+        };
+        assert_eq!(
+            ReebornForCodec.decode(&enc.data, &dmeta).unwrap(),
+            bytes,
+            "bf16 roundtrip must be bit-exact"
+        );
     }
 
     #[test]
     fn reeborn_for_codec_constant_and_empty() {
-        let mk = |n: u64| EncodeMeta { name: "w".into(), shape: vec![n], dtype: "bf16".into() };
+        let mk = |n: u64| EncodeMeta {
+            name: "w".into(),
+            shape: vec![n],
+            dtype: "bf16".into(),
+        };
         let mut constant = Vec::new();
         for _ in 0..1000 {
             constant.extend_from_slice(&0x3F80u16.to_le_bytes()); // 1.0, single exponent (width 1)
         }
         for bytes in [Vec::<u8>::new(), constant] {
-            let enc = ReebornForCodec.encode(&bytes, &mk((bytes.len() / 2) as u64)).unwrap();
-            let dmeta = DecodeMeta { codec_id: enc.codec_id.clone(), uncompressed_size: bytes.len() as u64 };
-            assert_eq!(ReebornForCodec.decode(&enc.data, &dmeta).unwrap(), bytes, "constant/empty roundtrip");
+            let enc = ReebornForCodec
+                .encode(&bytes, &mk((bytes.len() / 2) as u64))
+                .unwrap();
+            let dmeta = DecodeMeta {
+                codec_id: enc.codec_id.clone(),
+                uncompressed_size: bytes.len() as u64,
+            };
+            assert_eq!(
+                ReebornForCodec.decode(&enc.data, &dmeta).unwrap(),
+                bytes,
+                "constant/empty roundtrip"
+            );
         }
     }
 
@@ -487,9 +558,20 @@ mod tests {
     fn reeborn_for_codec_raw_fallback_roundtrip() {
         // non-bf16 (u8) and odd-length chunks must round-trip via the raw fallback.
         let bytes: Vec<u8> = (0..1235u32).map(|x| (x * 7) as u8).collect();
-        let meta = EncodeMeta { name: "idx".into(), shape: vec![bytes.len() as u64], dtype: "u8".into() };
+        let meta = EncodeMeta {
+            name: "idx".into(),
+            shape: vec![bytes.len() as u64],
+            dtype: "u8".into(),
+        };
         let enc = ReebornForCodec.encode(&bytes, &meta).unwrap();
-        let dmeta = DecodeMeta { codec_id: enc.codec_id.clone(), uncompressed_size: bytes.len() as u64 };
-        assert_eq!(ReebornForCodec.decode(&enc.data, &dmeta).unwrap(), bytes, "raw-fallback roundtrip");
+        let dmeta = DecodeMeta {
+            codec_id: enc.codec_id.clone(),
+            uncompressed_size: bytes.len() as u64,
+        };
+        assert_eq!(
+            ReebornForCodec.decode(&enc.data, &dmeta).unwrap(),
+            bytes,
+            "raw-fallback roundtrip"
+        );
     }
 }

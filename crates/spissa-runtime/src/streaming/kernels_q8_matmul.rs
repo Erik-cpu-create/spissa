@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // Q8 int8 / SMMLA matmul kernel family (accumulate_q8_0_chunk*: decode batch1, prefill
 // panel, parallel, multiply-into, fused-argmax). Split out of kernels_q8.rs (R168); include!d into mod.rs.
@@ -215,6 +214,7 @@ unsafe fn batch1_x4_ilp(
 ) -> [f32; 4] {
     let row_stride = blocks_per_row * 34;
     let mut acc = [0.0f32; 4];
+    #[allow(clippy::needless_range_loop)] // b drives raw pointer offsets across parallel buffers
     for b in 0..blocks_per_row {
         let a_ptr = act_i8.as_ptr().add(b * 32);
         let off0 = row_base + b * 34;
@@ -743,7 +743,7 @@ fn accumulate_q8_0_chunk(
     // (in_features % 32 == 0). For non-multiples a block straddles rows, which the
     // int8-activation path does not handle — route those to the scalar path below.
     // Real transformer projections are always %32==0; this only guards odd test/edge dims.
-    if q8_activation_path_enabled() && config.in_features % 32 == 0 {
+    if q8_activation_path_enabled() && config.in_features.is_multiple_of(32) {
         // Diagnostic: RLLM_Q8_PANEL=0 disables R119 panel path; useful to confirm
         // the existing R111 parity baseline still holds and isolate panel bugs.
         let panel_enabled = std::env::var("RLLM_Q8_PANEL")
@@ -1071,7 +1071,7 @@ fn q8_output2_pair_offset(
         return None;
     }
     let next_delta = next_global_start - element_start;
-    if next_delta % 32 != 0 {
+    if !next_delta.is_multiple_of(32) {
         return None;
     }
     let next_block_idx = next_delta / 32;

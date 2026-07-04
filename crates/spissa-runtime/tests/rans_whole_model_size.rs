@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // R156b — exact WHOLE-MODEL rANS compressed size on real weights.
 //
@@ -41,10 +40,10 @@ fn rans_size(bytes: &[u8]) -> (usize, usize) {
 fn whole_model_rans_size() {
     let mut m = LazySpissaModel::open(MODEL).unwrap_or_else(|e| panic!("open {MODEL}: {e}"));
     // Snapshot (id, name, even-length?) so we don't borrow m while calling with_raw_tensor.
-    let ids: Vec<(u64, String)> =
-        m.tensors().map(|t| (t.tensor_id, t.name.clone())).collect();
+    let ids: Vec<(u64, String)> = m.tensors().map(|t| (t.tensor_id, t.name.clone())).collect();
 
-    let (mut raw_total, mut rans_total, mut n_tensors, mut n_weights) = (0usize, 0usize, 0usize, 0u64);
+    let (mut raw_total, mut rans_total, mut n_tensors, mut n_weights) =
+        (0usize, 0usize, 0usize, 0u64);
     let mut biggest: Vec<(String, usize, usize)> = Vec::new();
     for (id, name) in &ids {
         let got = m
@@ -68,15 +67,25 @@ fn whole_model_rans_size() {
 
     let raw_gb = raw_total as f64 / 1e9;
     let rans_gb = rans_total as f64 / 1e9;
-    let bits_per_weight = if n_weights > 0 { rans_total as f64 * 8.0 / n_weights as f64 } else { 0.0 };
+    let bits_per_weight = if n_weights > 0 {
+        rans_total as f64 * 8.0 / n_weights as f64
+    } else {
+        0.0
+    };
     eprintln!("\n=== R156b WHOLE-MODEL rANS size ({MODEL}) ===");
     eprintln!("  tensors: {n_tensors}   weights: {n_weights}");
-    eprintln!("  raw bf16 total:  {raw_gb:.3} GB", );
-    eprintln!("  rANS total:      {rans_gb:.3} GB   ({:.0}% smaller, {bits_per_weight:.2} bits/weight)",
-        (1.0 - rans_total as f64 / raw_total as f64) * 100.0);
+    eprintln!("  raw bf16 total:  {raw_gb:.3} GB",);
+    eprintln!(
+        "  rANS total:      {rans_gb:.3} GB   ({:.0}% smaller, {bits_per_weight:.2} bits/weight)",
+        (1.0 - rans_total as f64 / raw_total as f64) * 100.0
+    );
     eprintln!("  top tensors (raw -> rANS):");
     for (name, raw, rans) in biggest.iter().take(6) {
-        eprintln!("    {:>9.1} MB -> {:>6.1} MB  {name}", *raw as f64 / 1e6, *rans as f64 / 1e6);
+        eprintln!(
+            "    {:>9.1} MB -> {:>6.1} MB  {name}",
+            *raw as f64 / 1e6,
+            *rans as f64 / 1e6
+        );
     }
     eprintln!();
 }

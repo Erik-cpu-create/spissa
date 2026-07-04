@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // De-risk the lossless-fast-on-edge frontier: does a THREADED + NEON fused bit-plane
 // GEMV (compressed-resident: read ~13 bits/weight, decode each row into L1, dot) beat
@@ -32,8 +31,16 @@ unsafe fn neon_bf16_dot(w: &[u8], x: &[f32], h: usize) -> f32 {
     let mut i = 0;
     while i + 8 <= h {
         let b = vld1q_u16(wp.add(i));
-        a0 = vfmaq_f32(a0, vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(b))), vld1q_f32(xp.add(i)));
-        a1 = vfmaq_f32(a1, vreinterpretq_f32_u32(vshll_high_n_u16::<16>(b)), vld1q_f32(xp.add(i + 4)));
+        a0 = vfmaq_f32(
+            a0,
+            vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(b))),
+            vld1q_f32(xp.add(i)),
+        );
+        a1 = vfmaq_f32(
+            a1,
+            vreinterpretq_f32_u32(vshll_high_n_u16::<16>(b)),
+            vld1q_f32(xp.add(i + 4)),
+        );
         i += 8;
     }
     let mut s = vaddvq_f32(vaddq_f32(a0, a1));
@@ -78,12 +85,18 @@ fn time_threaded<F: Fn(usize, P) + Sync>(vocab: usize, threads: usize, iters: us
 }
 
 fn main() {
-    let a: Vec<usize> = std::env::args().skip(1).filter_map(|s| s.parse().ok()).collect();
+    let a: Vec<usize> = std::env::args()
+        .skip(1)
+        .filter_map(|s| s.parse().ok())
+        .collect();
     let vocab = *a.first().unwrap_or(&8192);
     let hidden = *a.get(1).unwrap_or(&2048);
     let iters = *a.get(2).unwrap_or(&20);
     let n = vocab * hidden;
-    println!("GEMV {vocab}x{hidden} ({} MB bf16), iters={iters}", (n * 2) / 1_000_000);
+    println!(
+        "GEMV {vocab}x{hidden} ({} MB bf16), iters={iters}",
+        (n * 2) / 1_000_000
+    );
 
     let mut bf16 = vec![0u8; n * 2];
     let mut s = 0x12345u32;
@@ -94,7 +107,14 @@ fn main() {
         bf16[2 * i + 1] = (b >> 8) as u8;
     }
     let enc = BitplaneCodec
-        .encode(&bf16, &EncodeMeta { name: "e".into(), shape: vec![n as u64], dtype: "bf16".into() })
+        .encode(
+            &bf16,
+            &EncodeMeta {
+                name: "e".into(),
+                shape: vec![n as u64],
+                dtype: "bf16".into(),
+            },
+        )
         .unwrap();
     let w = enc.data[15] as usize;
     let p = enc.data[14] as usize;
@@ -103,7 +123,7 @@ fn main() {
     let mut off = 16;
     let palette = enc.data[off..off + p].to_vec();
     off += p;
-    let idx_bytes = (n * w + 7) / 8;
+    let idx_bytes = (n * w).div_ceil(8);
     let idx = enc.data[off..off + idx_bytes].to_vec();
     off += idx_bytes;
     let residuals = enc.data[off..off + n].to_vec();
@@ -112,7 +132,10 @@ fn main() {
 
     let bf16_mb = (n * 2) as f64 / 1e6;
     let plane_mb = (p + idx_bytes + n) as f64 / 1e6;
-    println!("bf16 {bf16_mb:.0} MB  vs  bit-plane {plane_mb:.0} MB ({:.0}% less), w={w}\n", (1.0 - plane_mb / bf16_mb) * 100.0);
+    println!(
+        "bf16 {bf16_mb:.0} MB  vs  bit-plane {plane_mb:.0} MB ({:.0}% less), w={w}\n",
+        (1.0 - plane_mb / bf16_mb) * 100.0
+    );
 
     for &t in &[1usize, 2, 4, 6] {
         let xa = &x;
@@ -126,7 +149,14 @@ fn main() {
         let b_ms = time_threaded(vocab, t, iters, move |r, yp| {
             let mut scratch = [0u8; 8192 * 2]; // hidden<=8192
             #[cfg(target_arch = "aarch64")]
-            rtc_codec::decode_bitplane_row_into(pal, &ix[r * row_idx_bytes..], &res[r * hidden..], hidden, w as u8, &mut scratch[..hidden * 2]);
+            rtc_codec::decode_bitplane_row_into(
+                pal,
+                &ix[r * row_idx_bytes..],
+                &res[r * hidden..],
+                hidden,
+                w as u8,
+                &mut scratch[..hidden * 2],
+            );
             let d = unsafe { neon_bf16_dot(&scratch[..hidden * 2], xb, hidden) };
             unsafe { *yp.at(r) = d };
         });

@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // Streaming multiply-into linear (target *= Linear(x,W)) + panel multiply-into +
 // the SiLU-gate-up fused MLP kernel. Split out of linear.rs (R171); include!d into mod.rs.
@@ -53,7 +52,7 @@ pub fn streaming_tile_linear_multiply_into_from_model(
     // a scratch, then apply `target *= up + bias`. Falls through if not contiguous-raw.
     if tensor.dtype == spissa_container::DType::Q8_0
         && config.linear.batch == 1
-        && config.linear.in_features % 32 == 0
+        && config.linear.in_features.is_multiple_of(32)
         && q8_activation_path_enabled()
     {
         let lin = config.linear;
@@ -79,7 +78,7 @@ pub fn streaming_tile_linear_multiply_into_from_model(
     if tensor.dtype == spissa_container::DType::Q8_0
         && q8_activation_path_enabled()
         && config.linear.batch >= 2
-        && config.linear.in_features % 32 == 0
+        && config.linear.in_features.is_multiple_of(32)
     {
         if let Some(up) = try_panel_multiply_into_up(
             model,

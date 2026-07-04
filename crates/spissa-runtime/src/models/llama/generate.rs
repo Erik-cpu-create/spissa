@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::models::llama::model::{
     OwnedLlamaStreamingBlockParameters, OwnedLlamaStreamingBlockTensorNames,
@@ -182,7 +181,7 @@ pub fn streaming_llama_transformer_block_with_timing(
     mut timing: Option<&mut RamaTransformerPhaseTimings>,
     mut experimental_speed_stats: Option<&mut RamaExperimentalSpeedStats>,
     mut sparse_column_cache: Option<&mut SparseColumnCache>,
-    mut attention_locality_cache: Option<&mut RamaAttentionLocalityCache>,
+    attention_locality_cache: Option<&mut RamaAttentionLocalityCache>,
     mut probe: Option<&mut LlamaStreamingBlockProbe>,
 ) -> Result<Vec<f32>> {
     if let Some(timing) = timing.as_deref_mut() {
@@ -365,7 +364,7 @@ pub fn streaming_llama_transformer_block_with_timing(
             if let Some(stats) = experimental_speed_stats.as_deref_mut() {
                 stats.record_attention_locality(selected.len(), *base_topk);
             }
-            if let Some(cache) = attention_locality_cache.as_deref_mut() {
+            if let Some(cache) = attention_locality_cache {
                 cache.record(selected, window);
             }
         }
@@ -763,7 +762,7 @@ pub fn streaming_llama_transformer_block_with_timing(
             budget,
         )?
     };
-    if let Some(probe) = probe.as_deref_mut() {
+    if let Some(probe) = probe {
         probe.down_output = Some(down.clone());
     }
     if let Some(timing) = timing.as_deref_mut() {

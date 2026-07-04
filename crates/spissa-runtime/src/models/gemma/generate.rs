@@ -1,11 +1,12 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::models::gemma::model::{
     is_global_layer, GemmaBlockTensorNames, GemmaBuildConfig, GemmaLayerNorms,
 };
-use crate::rotary::{apply_gemma_rotary_inplace, KvAttentionConfig, KvCache, RotaryEmbeddingConfig};
+use crate::rotary::{
+    apply_gemma_rotary_inplace, KvAttentionConfig, KvCache, RotaryEmbeddingConfig,
+};
 use crate::{
     ops::{add_inplace, gelu_inplace, rms_norm},
     scaled_dot_product_attention_with_cache, streaming_tile_linear_from_model, LazySpissaModel,
@@ -63,7 +64,15 @@ pub(super) fn gemma_lm_head_streaming(
     hidden: usize,
     budget: &mut MemoryBudget,
 ) -> Result<Vec<f32>> {
-    project(model, embedding_weight, last_hidden, 1, hidden, vocab_size, budget)
+    project(
+        model,
+        embedding_weight,
+        last_hidden,
+        1,
+        hidden,
+        vocab_size,
+        budget,
+    )
 }
 
 /// Capacity-bound input embedding: gather `token_ids` rows from the tied embedding by
@@ -182,16 +191,58 @@ fn gemma_attention_sublayer(
     let q_heads = build.num_heads;
     let kv_heads = build.num_key_value_heads;
 
-    let attn_input = rms_norm(input, &norms.input_layernorm, seq_len, hidden, build.rms_norm_eps)?;
+    let attn_input = rms_norm(
+        input,
+        &norms.input_layernorm,
+        seq_len,
+        hidden,
+        build.rms_norm_eps,
+    )?;
 
-    let mut q = project(model, &names.q_weight, &attn_input, seq_len, hidden, q_heads * head_dim, budget)?;
-    let mut k = project(model, &names.k_weight, &attn_input, seq_len, hidden, kv_heads * head_dim, budget)?;
-    let v = project(model, &names.v_weight, &attn_input, seq_len, hidden, kv_heads * head_dim, budget)?;
+    let mut q = project(
+        model,
+        &names.q_weight,
+        &attn_input,
+        seq_len,
+        hidden,
+        q_heads * head_dim,
+        budget,
+    )?;
+    let mut k = project(
+        model,
+        &names.k_weight,
+        &attn_input,
+        seq_len,
+        hidden,
+        kv_heads * head_dim,
+        budget,
+    )?;
+    let v = project(
+        model,
+        &names.v_weight,
+        &attn_input,
+        seq_len,
+        hidden,
+        kv_heads * head_dim,
+        budget,
+    )?;
 
     // Per-head QK-norm over head_dim. Q/K are laid out [seq, heads, head_dim],
     // i.e. (seq*heads) rows of head_dim — exactly what rms_norm normalizes.
-    q = rms_norm(&q, &norms.q_norm, seq_len * q_heads, head_dim, build.rms_norm_eps)?;
-    k = rms_norm(&k, &norms.k_norm, seq_len * kv_heads, head_dim, build.rms_norm_eps)?;
+    q = rms_norm(
+        &q,
+        &norms.q_norm,
+        seq_len * q_heads,
+        head_dim,
+        build.rms_norm_eps,
+    )?;
+    k = rms_norm(
+        &k,
+        &norms.k_norm,
+        seq_len * kv_heads,
+        head_dim,
+        build.rms_norm_eps,
+    )?;
 
     // Dual RoPE: global layers use rope_theta scaled by rope_scaling_factor,
     // local layers use rope_local_base_freq unscaled.
@@ -209,7 +260,14 @@ fn gemma_attention_sublayer(
         base: rope_base,
         position_offset: runtime.position_offset,
     };
-    apply_gemma_rotary_inplace(&mut q, &mut k, q_heads, kv_heads, rope_config, position_divisor)?;
+    apply_gemma_rotary_inplace(
+        &mut q,
+        &mut k,
+        q_heads,
+        kv_heads,
+        rope_config,
+        position_divisor,
+    )?;
 
     // Attention scale is 1/sqrt(query_pre_attn_scalar). The shared SDPA bakes in
     // 1/sqrt(head_dim), so fold the residual factor into Q (exactly ×1.0 when
@@ -236,7 +294,15 @@ fn gemma_attention_sublayer(
         c.append(&k, &v, seq_len)?;
     }
 
-    let attn_proj = project(model, &names.o_weight, &attn_out, seq_len, q_heads * head_dim, hidden, budget)?;
+    let attn_proj = project(
+        model,
+        &names.o_weight,
+        &attn_out,
+        seq_len,
+        q_heads * head_dim,
+        hidden,
+        budget,
+    )?;
     rms_norm(
         &attn_proj,
         &norms.post_attention_layernorm,
@@ -268,13 +334,37 @@ fn gemma_mlp_sublayer(
         hidden,
         build.rms_norm_eps,
     )?;
-    let mut gate = project(model, &names.gate_weight, &mlp_input, seq_len, hidden, intermediate, budget)?;
+    let mut gate = project(
+        model,
+        &names.gate_weight,
+        &mlp_input,
+        seq_len,
+        hidden,
+        intermediate,
+        budget,
+    )?;
     gelu_inplace(&mut gate); // gelu_pytorch_tanh
-    let up = project(model, &names.up_weight, &mlp_input, seq_len, hidden, intermediate, budget)?;
+    let up = project(
+        model,
+        &names.up_weight,
+        &mlp_input,
+        seq_len,
+        hidden,
+        intermediate,
+        budget,
+    )?;
     for (g, u) in gate.iter_mut().zip(&up) {
         *g *= *u;
     }
-    let down = project(model, &names.down_weight, &gate, seq_len, intermediate, hidden, budget)?;
+    let down = project(
+        model,
+        &names.down_weight,
+        &gate,
+        seq_len,
+        intermediate,
+        hidden,
+        budget,
+    )?;
     rms_norm(
         &down,
         &norms.post_feedforward_layernorm,

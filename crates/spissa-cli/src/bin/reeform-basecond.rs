@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — research instrument (REEFORM, SECRET IP).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 // THE BASE-CONDITIONED LEVER. The int-pattern delta's magnitude is Δvalue / ULP(W_base), and the
 // bf16 ULP is set by the base EXPONENT. So the base exponent mechanically predicts the delta
@@ -114,13 +114,18 @@ fn main() -> Result<()> {
     let mut h_em = 0.0;
     for c in 0..512 {
         if tot_em[c] != 0 {
-            h_em += (tot_em[c] as f64 / n as f64) * entropy(&joint_em[c * S..(c + 1) * S], tot_em[c]);
+            h_em +=
+                (tot_em[c] as f64 / n as f64) * entropy(&joint_em[c * S..(c + 1) * S], tot_em[c]);
         }
     }
     let mib = |bpw: f64| bpw * n as f64 / 8.0 / 1048576.0;
     println!("=== REEFORM base-conditioned ceiling (static conditional entropy) ===");
     println!("weights {n}");
-    println!("H0(Δ)                      : {:.4} bit/w   ({:.1} MiB)  [our shipped ≈ this]", h0, mib(h0));
+    println!(
+        "H0(Δ)                      : {:.4} bit/w   ({:.1} MiB)  [our shipped ≈ this]",
+        h0,
+        mib(h0)
+    );
     println!(
         "H(Δ | base-exp)            : {:.4} bit/w   ({:.1} MiB)   gain {:+.4}",
         h_e,

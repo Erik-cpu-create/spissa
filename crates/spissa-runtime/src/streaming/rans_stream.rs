@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 // R153 REESTREAM-RANS: parallel streaming GEMV over an rANS-exponent sidecar.
 //
@@ -106,6 +105,7 @@ fn build_rans_sidecar(
 
 /// Parse the RLMR header: returns (hidden, vocab, block_rows, freq, block_lens, header_len).
 #[cfg(target_arch = "aarch64")]
+#[allow(clippy::type_complexity)]
 fn read_rans_header(path: &str) -> crate::Result<(usize, usize, usize, [u32; 256], Vec<u32>, u64)> {
     use std::io::Read;
     let bad = || crate::RuntimeError::InvalidTensorData("bad RLMR sidecar header".into());

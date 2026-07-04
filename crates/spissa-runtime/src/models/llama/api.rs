@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::models::llama::generate::{
     streaming_llama_transformer_block, LlamaStreamingBlockConfig,
@@ -397,8 +396,8 @@ pub fn rama_layer_decoded_llama_transformer_generate_from_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spissa_container::{DType, GlobalMetadata, ModelConfigMetadata, SpissaWriter, TensorMeta};
     use sha2::{Digest, Sha256};
+    use spissa_container::{DType, GlobalMetadata, ModelConfigMetadata, SpissaWriter, TensorMeta};
 
     fn sha256_array(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()

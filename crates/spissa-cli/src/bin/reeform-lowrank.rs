@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. CONFIDENTIAL RESEARCH (REEFORM).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 //! REEFORM low-rank probe: does removing a rank-k component from a weight matrix yield a
 //! residual whose lossless entropy (esp. the exponent) drops enough — net of the U,V cost —
@@ -101,7 +101,10 @@ fn main() -> anyhow::Result<()> {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "models/smollm2-135m/model.safetensors".to_string());
-    let k: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(32);
+    let k: usize = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32);
     eprintln!("[reeform-lowrank] {path}  rank-k={k}");
     let mut r = SafetensorsReader::open(&path)?;
     let names: Vec<String> = r.list_tensors().iter().map(|s| s.to_string()).collect();
@@ -123,7 +126,10 @@ fn main() -> anyhow::Result<()> {
     cand.truncate(6);
 
     println!("\n=== REEFORM low-rank probe — {path} (rank-{k}) ===");
-    println!("{:<46} {:>8} {:>8} {:>8} {:>8}", "tensor (m×n)", "H0(W)", "H0(R)", "expW→R", "overhd");
+    println!(
+        "{:<46} {:>8} {:>8} {:>8} {:>8}",
+        "tensor (m×n)", "H0(W)", "H0(R)", "expW→R", "overhd"
+    );
     let (mut sw, mut sr, mut sov) = (0.0f64, 0.0, 0.0);
     let mut wt = 0u64;
     for (name, m, n) in &cand {
@@ -138,7 +144,12 @@ fn main() -> anyhow::Result<()> {
         let (h0r, expr) = h0_bits(&r16);
         // overhead of storing U,V as bf16: k*(m+n)*16 bits over m*n weights
         let overhead = (k * (m + n)) as f64 * 16.0 / (m * n) as f64;
-        let label = format!("{} ({}×{})", name.split('.').next_back().unwrap_or(name), m, n);
+        let label = format!(
+            "{} ({}×{})",
+            name.split('.').next_back().unwrap_or(name),
+            m,
+            n
+        );
         println!(
             "{:<46} {h0w:>8.3} {h0r:>8.3} {expw:>4.2}→{expr:<3.2} {overhead:>7.3}",
             label.chars().take(46).collect::<String>()
@@ -160,9 +171,15 @@ fn main() -> anyhow::Result<()> {
     println!("  NET low-rank lossless  = {net:.4} bit/weight");
     let win = baseline - net;
     if win > 0.01 {
-        println!("  ✅ low-rank BEATS the floor by {win:.4} bit/weight ({:.2}%, LOSSLESS)", win / baseline * 100.0);
+        println!(
+            "  ✅ low-rank BEATS the floor by {win:.4} bit/weight ({:.2}%, LOSSLESS)",
+            win / baseline * 100.0
+        );
     } else {
-        println!("  ❌ low-rank net {:+.4} — residual entropy + U,V cost ≥ floor. Lever is dead.", -win);
+        println!(
+            "  ❌ low-rank net {:+.4} — residual entropy + U,V cost ≥ floor. Lever is dead.",
+            -win
+        );
     }
     Ok(())
 }

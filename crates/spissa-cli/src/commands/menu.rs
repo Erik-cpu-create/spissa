@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! `spissa menu` — interactive arrow-key launcher with a text logo. A friendly layer
 //! over the flag-based subcommands (fetch / pack / chat / inspect): pick an action,
@@ -261,9 +260,16 @@ pub fn run() -> Result<()> {
 fn menu_settings(settings: &mut Settings) {
     let s = strings(settings.language);
     print_logo();
-    let lang_row = format!("{}  ›  {}", s.settings_language, lang_name(settings.language));
-    let choice = Select::new(s.settings_title, vec![lang_row.clone(), s.settings_back.to_string()])
-        .prompt();
+    let lang_row = format!(
+        "{}  ›  {}",
+        s.settings_language,
+        lang_name(settings.language)
+    );
+    let choice = Select::new(
+        s.settings_title,
+        vec![lang_row.clone(), s.settings_back.to_string()],
+    )
+    .prompt();
     if let Ok(c) = choice {
         if c == lang_row {
             let pick = Select::new(s.settings_language, vec!["English", "Indonesia"]).prompt();
@@ -522,7 +528,7 @@ fn total_ram_bytes() -> Option<u64> {
         let mut len = std::mem::size_of::<u64>();
         let ret = unsafe {
             libc::sysctlbyname(
-                b"hw.memsize\0".as_ptr() as *const libc::c_char,
+                c"hw.memsize".as_ptr(),
                 &mut size as *mut u64 as *mut libc::c_void,
                 &mut len,
                 std::ptr::null_mut(),
@@ -618,10 +624,7 @@ mod tests {
         assert_eq!(Settings::default().language, Lang::En);
 
         // Persistence format round-trips and stores the short code.
-        let json = serde_json::to_string(&Settings {
-            language: Lang::Id,
-        })
-        .unwrap();
+        let json = serde_json::to_string(&Settings { language: Lang::Id }).unwrap();
         assert!(json.contains("\"id\""), "unexpected json: {json}");
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.language, Lang::Id);
@@ -637,11 +640,20 @@ mod tests {
         // empty → default
         assert_eq!(normalize_pack_output("  ", def), def);
         // bare name → under models/ + .spsa
-        assert_eq!(normalize_pack_output("my-model", def), "models/my-model.spsa");
+        assert_eq!(
+            normalize_pack_output("my-model", def),
+            "models/my-model.spsa"
+        );
         // bare name already with ext
-        assert_eq!(normalize_pack_output("my-model.spsa", def), "models/my-model.spsa");
+        assert_eq!(
+            normalize_pack_output("my-model.spsa", def),
+            "models/my-model.spsa"
+        );
         // explicit path is respected, ext ensured
         assert_eq!(normalize_pack_output("out/x", def), "out/x.spsa");
-        assert_eq!(normalize_pack_output("models/text/x.spsa", def), "models/text/x.spsa");
+        assert_eq!(
+            normalize_pack_output("models/text/x.spsa", def),
+            "models/text/x.spsa"
+        );
     }
 }

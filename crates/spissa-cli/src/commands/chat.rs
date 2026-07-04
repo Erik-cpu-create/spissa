@@ -1,20 +1,19 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
-//! `rllm chat` — interactive multi-turn REPL over any packed model, codec-agnostic.
+//! `spissa chat` — interactive multi-turn REPL over any packed model, codec-agnostic.
 //!
 //! Dispatches on the packed architecture (gemma3 / llama) to a resident KV-cache
 //! chat session. Works with ANY codec — rANS / bit-plane (lossless), q8 (lossy), or
 //! raw bf16 — because the forward pass decodes per codec on access, so no codec is
 //! special-cased here. Mode flags pick the rANS RAM/speed trade:
-//!   * default       → decode-once (SPISSA_DECODE_RESIDENT): cache decoded weights for
-//!                     bf16-class steady speed at a higher resident footprint.
-//!   * `--low-ram`   → stream the embedding (SPISSA_STREAM_EMBEDDING): resident ≈ the
-//!                     compressed size; slower (re-decode per token) but fits the
-//!                     >RAM regime where the bf16 table would not.
-//!   * `--fast`      → mlock: page-lock the model in RAM to avoid swap. The fast SIMD decode path
-//!                     is already on by default for every dtype, so this only adds the page lock.
+//! - default: decode-once (SPISSA_DECODE_RESIDENT) — cache decoded weights for
+//!   bf16-class steady speed at a higher resident footprint.
+//! - `--low-ram`: stream the embedding (SPISSA_STREAM_EMBEDDING) — resident ≈ the
+//!   compressed size; slower (re-decode per token) but fits the >RAM regime where
+//!   the bf16 table would not.
+//! - `--fast`: mlock — page-lock the model in RAM to avoid swap. The fast SIMD decode
+//!   path is already on by default for every dtype, so this only adds the page lock.
 
 use anyhow::{Context, Result};
 use std::io::{self, BufRead, Write};
@@ -66,7 +65,7 @@ impl SamplingArgs {
     }
 }
 
-/// Entry point for `rllm chat`.
+/// Entry point for `spissa chat`.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     model_path: &str,
@@ -117,7 +116,11 @@ pub fn run(
     println!(
         "spissa chat — {} | arch={architecture} | ctx={ctx} | mode={}",
         model.metadata().model_name,
-        if low_ram { "low-ram (stream-embedding)" } else { "decode-once" },
+        if low_ram {
+            "low-ram (stream-embedding)"
+        } else {
+            "decode-once"
+        },
     );
     if sampling_args.has_qwen_only() && !matches!(architecture.as_str(), "qwen3" | "qwen") {
         eprintln!(
@@ -415,8 +418,16 @@ fn gemma_chat(
         .map(|m| SpissaTokenizer::from_metadata(&m))
         .transpose()?
         .context("model has no packed tokenizer metadata")?;
-    let bos = model.metadata().tokenizer.as_ref().and_then(|m| m.bos_token_id);
-    let eos = model.metadata().tokenizer.as_ref().and_then(|m| m.eos_token_id);
+    let bos = model
+        .metadata()
+        .tokenizer
+        .as_ref()
+        .and_then(|m| m.bos_token_id);
+    let eos = model
+        .metadata()
+        .tokenizer
+        .as_ref()
+        .and_then(|m| m.eos_token_id);
 
     // Gemma IT ends a turn with <end_of_turn> as well as <eos>; treat both as stops.
     let mut stop: Vec<usize> = Vec::new();
@@ -509,13 +520,22 @@ fn gemma_run_turn(
         print_reply_suffix(tokenizer, &reply, &mut shown, false);
         true
     };
-    let result =
-        session.feed_and_decode(model, prepared, budget, turn, max_new_tokens, stop, &mut on_token);
+    let result = session.feed_and_decode(
+        model,
+        prepared,
+        budget,
+        turn,
+        max_new_tokens,
+        stop,
+        &mut on_token,
+    );
     println!();
     match result {
         Ok(gen) => {
             if gen.is_empty() {
-                println!("[the model ended the turn with no output — try a fuller prompt or /reset]");
+                println!(
+                    "[the model ended the turn with no output — try a fuller prompt or /reset]"
+                );
             }
             eprintln!(
                 "  [{} tok, {:.1} tok/s, ctx {}/{ctx}]",
@@ -603,7 +623,8 @@ fn llama_chat(
             print_reply_suffix(&tokenizer, &reply, &mut shown, template.strips_think());
             true
         };
-        let result = session.generate_turn(&input_tokens, max_new_tokens, &mut budget, &mut on_token);
+        let result =
+            session.generate_turn(&input_tokens, max_new_tokens, &mut budget, &mut on_token);
         println!();
         match result {
             Ok(r) => {
@@ -633,9 +654,15 @@ mod tests {
     #[test]
     fn strip_think_spans_hides_reasoning() {
         // Complete block removed; the answer remains.
-        assert_eq!(strip_think_spans("<think>reasoning here</think>The answer"), "The answer");
+        assert_eq!(
+            strip_think_spans("<think>reasoning here</think>The answer"),
+            "The answer"
+        );
         // Block in the middle.
-        assert_eq!(strip_think_spans("Sure!<think>x</think> done"), "Sure! done");
+        assert_eq!(
+            strip_think_spans("Sure!<think>x</think> done"),
+            "Sure! done"
+        );
         // Streaming: an open <think> with no closing tag yet → suppress the tail.
         assert_eq!(strip_think_spans("ok <think>still going"), "ok ");
         // No think + an emoji → byte-for-byte unchanged.

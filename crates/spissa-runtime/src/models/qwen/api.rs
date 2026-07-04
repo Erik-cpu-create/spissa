@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Qwen3.5 text adapter: build a `PreparedQwenTransformer` from `.spsa` metadata and
 //! run greedy/top-p generation with heterogeneous per-layer dispatch.
@@ -22,7 +21,7 @@ pub struct QwenGenerationConfig {
     pub sampling: StreamingSamplingConfig,
 }
 
-fn require_config<'a>(model: &'a LazySpissaModel) -> Result<&'a ModelConfigMetadata> {
+fn require_config(model: &LazySpissaModel) -> Result<&ModelConfigMetadata> {
     model.metadata().model_config.as_ref().ok_or_else(|| {
         RuntimeError::InvalidTensorData(
             "qwen generation requires persisted model_config metadata; repack with --config <config.json>".to_string(),
@@ -32,10 +31,15 @@ fn require_config<'a>(model: &'a LazySpissaModel) -> Result<&'a ModelConfigMetad
 
 fn req_usize(name: &str, value: Option<u64>) -> Result<usize> {
     let v = value.ok_or_else(|| {
-        RuntimeError::InvalidTensorData(format!("qwen model_config is missing required field {name}"))
+        RuntimeError::InvalidTensorData(format!(
+            "qwen model_config is missing required field {name}"
+        ))
     })?;
-    usize::try_from(v)
-        .map_err(|_| RuntimeError::Shape(format!("qwen model_config field {name}={v} overflows usize")))
+    usize::try_from(v).map_err(|_| {
+        RuntimeError::Shape(format!(
+            "qwen model_config field {name}={v} overflows usize"
+        ))
+    })
 }
 
 fn decode_vec(model: &mut LazySpissaModel, name: &str, expected: usize) -> Result<Vec<f32>> {
@@ -136,7 +140,11 @@ fn build_qwen_config(
         .unwrap_or(4);
     let max_seq_len = generation
         .max_seq_len
-        .or_else(|| config.max_position_embeddings.and_then(|v| usize::try_from(v).ok()))
+        .or_else(|| {
+            config
+                .max_position_embeddings
+                .and_then(|v| usize::try_from(v).ok())
+        })
         .unwrap_or(4096);
 
     Ok(QwenBuildConfig {
@@ -199,6 +207,7 @@ pub fn prepare_qwen_transformer_from_metadata(
     let mut layers = Vec::with_capacity(num_layers);
     let mut layer_params = Vec::with_capacity(num_layers);
     let conv_channels = build.linear_conv_channels();
+    #[allow(clippy::needless_range_loop)] // i is formatted into the layer path, not an index
     for i in 0..num_layers {
         let p = format!("model.layers.{i}");
         let mut tensors = QwenLayerTensors {
@@ -238,7 +247,8 @@ pub fn prepare_qwen_transformer_from_metadata(
                 tensors.in_proj_b = format!("{p}.linear_attn.in_proj_b.weight");
                 tensors.in_proj_z = format!("{p}.linear_attn.in_proj_z.weight");
                 tensors.out_proj = format!("{p}.linear_attn.out_proj.weight");
-                params.a_log = decode_vec(model, &format!("{p}.linear_attn.A_log"), linear_num_heads)?;
+                params.a_log =
+                    decode_vec(model, &format!("{p}.linear_attn.A_log"), linear_num_heads)?;
                 params.dt_bias =
                     decode_vec(model, &format!("{p}.linear_attn.dt_bias"), linear_num_heads)?;
                 params.conv1d = decode_vec(
@@ -246,8 +256,11 @@ pub fn prepare_qwen_transformer_from_metadata(
                     &format!("{p}.linear_attn.conv1d.weight"),
                     conv_channels * conv_kernel,
                 )?;
-                params.linear_norm =
-                    decode_vec(model, &format!("{p}.linear_attn.norm.weight"), linear_value_dim)?;
+                params.linear_norm = decode_vec(
+                    model,
+                    &format!("{p}.linear_attn.norm.weight"),
+                    linear_value_dim,
+                )?;
             }
         }
         layers.push(tensors);
@@ -320,5 +333,13 @@ pub fn qwen_generate_from_model(
     let max_new = prepared.config.max_new_tokens;
     let params = SamplingParams::from_streaming(prepared.config.sampling);
     let mut session = QwenSession::new(model, prepared.clone())?;
-    session.generate(model, prompt_token_ids, max_new, params, &[], budget, on_token)
+    session.generate(
+        model,
+        prompt_token_ids,
+        max_new,
+        params,
+        &[],
+        budget,
+        on_token,
+    )
 }

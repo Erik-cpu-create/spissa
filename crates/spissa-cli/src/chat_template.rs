@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use anyhow::{anyhow, Result};
 use spissa_runtime::SpissaTokenizer;
@@ -357,8 +356,13 @@ mod tests {
     fn qwen2_template_omits_default_system_prompt() {
         // Unlike ChatMl (which injects a SmolLM identity), Qwen2 emits NO system block when the
         // user supplies none — the model keeps its own default persona.
-        let rendered =
-            render_interactive_user_turn(ChatTemplateKind::Qwen2, false, true, None, "what is 2+2?");
+        let rendered = render_interactive_user_turn(
+            ChatTemplateKind::Qwen2,
+            false,
+            true,
+            None,
+            "what is 2+2?",
+        );
         assert_eq!(
             rendered,
             "<|im_start|>user\nwhat is 2+2?<|im_end|>\n<|im_start|>assistant\n"
@@ -402,7 +406,10 @@ mod tests {
     #[test]
     fn qwen2_template_aliases_parse() {
         for alias in ["qwen2", "qwen2.5", "qwen", "vibethinker"] {
-            assert_eq!(alias.parse::<ChatTemplateKind>().unwrap(), ChatTemplateKind::Qwen2);
+            assert_eq!(
+                alias.parse::<ChatTemplateKind>().unwrap(),
+                ChatTemplateKind::Qwen2
+            );
         }
     }
 }

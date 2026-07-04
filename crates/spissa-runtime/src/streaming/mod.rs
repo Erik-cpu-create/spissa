@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::tensor::decode_to_f32;
 use crate::{
@@ -63,6 +62,7 @@ fn effective_runtime_threads(override_value: Option<&str>, available: usize) -> 
 /// Performance-core count on big.LITTLE ARM — Apple Silicon P-cores (macOS) or the
 /// non-efficiency tier (Android/Linux) — queried once and cached. Returns `None` when
 /// detection isn't possible, so callers fall back to the full logical-core count.
+#[allow(dead_code)] // reachable only through decode_runtime_threads
 fn performance_core_count() -> Option<usize> {
     use std::sync::OnceLock;
     static CACHED: OnceLock<Option<usize>> = OnceLock::new();
@@ -70,6 +70,7 @@ fn performance_core_count() -> Option<usize> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // P-core scheduling helper; wired via decode_runtime_threads (currently unused, see note)
 fn detect_performance_cores() -> Option<usize> {
     // hw.perflevel0 is the performance-core cluster on Apple Silicon.
     let out = std::process::Command::new("sysctl")
@@ -90,6 +91,7 @@ fn detect_performance_cores() -> Option<usize> {
 /// barrier exactly like Apple's E-cores (R165) — so we treat the non-slowest tier as
 /// the performance cores.
 #[cfg(any(target_os = "linux", target_os = "android"))]
+#[allow(dead_code)] // P-core scheduling helper; wired via decode_runtime_threads (currently unused, see note)
 fn detect_performance_cores() -> Option<usize> {
     let mut freqs: Vec<u64> = Vec::new();
     for cpu in 0..1024usize {
@@ -107,6 +109,7 @@ fn detect_performance_cores() -> Option<usize> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android")))]
+#[allow(dead_code)] // P-core scheduling helper; wired via decode_runtime_threads (currently unused, see note)
 fn detect_performance_cores() -> Option<usize> {
     None
 }
@@ -132,6 +135,7 @@ fn performance_cores_from_freqs(freqs: &[u64]) -> Option<usize> {
 /// noisy 110–311 ms/step). So default to the P-core count; `RLLM_THREADS` still
 /// overrides (capped to logical cores). Prefill (GEMM, batch≥2) deliberately keeps
 /// ALL cores — there the extra compute genuinely helps (measured 285 ms vs 331 ms).
+#[allow(dead_code)] // big.LITTLE P-core decode pinning; helper retained but not currently wired to a call site
 fn decode_runtime_threads() -> usize {
     let available = available_runtime_threads().max(1);
     match std::env::var(RLLM_THREADS_ENV)
@@ -194,7 +198,9 @@ pub fn lm_head_logits_parallel(
         lm_head_logits_rows(last_hidden, weight, hidden, &mut logits);
         return logits;
     }
-    let workers = threads.min(vocab_size / MIN_ROWS_PER_PARALLEL_ARGMAX).max(1);
+    let workers = threads
+        .min(vocab_size / MIN_ROWS_PER_PARALLEL_ARGMAX)
+        .max(1);
     let rows_per_worker = vocab_size.div_ceil(workers);
     std::thread::scope(|scope| {
         let mut out_rest = &mut logits[..];
@@ -244,7 +250,9 @@ pub fn lm_head_logits_parallel_bf16(
         lm_head_logits_rows_bf16(last_hidden, weight_bf16, hidden, 0, &mut logits);
         return logits;
     }
-    let workers = threads.min(vocab_size / MIN_ROWS_PER_PARALLEL_ARGMAX).max(1);
+    let workers = threads
+        .min(vocab_size / MIN_ROWS_PER_PARALLEL_ARGMAX)
+        .max(1);
     let rows_per_worker = vocab_size.div_ceil(workers);
     std::thread::scope(|scope| {
         let mut out_rest = &mut logits[..];
@@ -335,8 +343,7 @@ unsafe fn bf16_row_dot_f32_neon(hid: &[f32], wrow: &[u8], hidden: usize) -> f32 
         acc3 = vfmaq_f32(acc3, f3, vld1q_f32(hptr.add(i + 12)));
         i += 16;
     }
-    let mut sum =
-        vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
+    let mut sum = vaddvq_f32(vaddq_f32(vaddq_f32(acc0, acc1), vaddq_f32(acc2, acc3)));
     // 4 bf16 at a time.
     while i + 4 <= hidden {
         let w = vld1_u16(wptr.add(i * 2) as *const u16);

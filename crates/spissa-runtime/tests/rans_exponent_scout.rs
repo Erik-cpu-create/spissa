@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // R152 SCOUT — rANS exponent codec on REAL bf16 weights.
 //
@@ -33,7 +32,11 @@ fn shannon_bits(hist: &[u32]) -> f64 {
 }
 
 fn ceil_log2(n: usize) -> u32 {
-    if n <= 1 { 0 } else { usize::BITS - (n - 1).leading_zeros() }
+    if n <= 1 {
+        0
+    } else {
+        usize::BITS - (n - 1).leading_zeros()
+    }
 }
 
 // Extract the exponent byte of every bf16 weight.
@@ -83,8 +86,17 @@ fn scout_tensor(name: &str, bytes: &[u8]) {
         std::hint::black_box(rtc_codec::rans_decode(&stream, n, &freq));
     });
     let streams4 = rtc_codec::rans_encode_interleaved4(&exps, &freq);
-    let sl4 = [&streams4[0][..], &streams4[1][..], &streams4[2][..], &streams4[3][..]];
-    assert_eq!(rtc_codec::rans_decode_interleaved4(sl4, n, &freq), exps, "{name}: interleaved decode bit-exact");
+    let sl4 = [
+        &streams4[0][..],
+        &streams4[1][..],
+        &streams4[2][..],
+        &streams4[3][..],
+    ];
+    assert_eq!(
+        rtc_codec::rans_decode_interleaved4(sl4, n, &freq),
+        exps,
+        "{name}: interleaved decode bit-exact"
+    );
     let inter_s = time_dec(&|| {
         std::hint::black_box(rtc_codec::rans_decode_interleaved4(sl4, n, &freq));
     });
@@ -92,7 +104,9 @@ fn scout_tensor(name: &str, bytes: &[u8]) {
     let gw_per_core = (n as f64 / 1e9) / inter_s; // interleaved is the real candidate
 
     // Hide-under-cold-read check: need aggregate decode >= read rate.
-    let cores = std::thread::available_parallelism().map(usize::from).unwrap_or(6);
+    let cores = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(6);
     let read_gbps = 1.7; // R150a cold-read aggregate
     let bytes_per_weight = rans_total / 8.0;
     let read_gw = read_gbps / bytes_per_weight; // Gweight/s the read delivers
@@ -113,7 +127,11 @@ fn scout_tensor(name: &str, bytes: &[u8]) {
     );
     eprintln!("  SPEED (single-core):");
     eprintln!("    rANS scalar       = {scalar_gw:.3} Gweight/s/core");
-    eprintln!("    rANS interleaved4 = {gw_per_core:.3} Gweight/s/core  ({:.2}x ILP, {:.1} ms)", gw_per_core / scalar_gw, inter_s * 1000.0);
+    eprintln!(
+        "    rANS interleaved4 = {gw_per_core:.3} Gweight/s/core  ({:.2}x ILP, {:.1} ms)",
+        gw_per_core / scalar_gw,
+        inter_s * 1000.0
+    );
     eprintln!(
         "    cold read delivers ~{read_gw:.3} Gw/s (@{read_gbps} GB/s, {bytes_per_weight:.2} B/weight); aggregate decode {cores}-core = {agg_decode_gw:.2} Gw/s",
     );

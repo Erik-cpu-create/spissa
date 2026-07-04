@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 #[derive(Debug, Clone, Copy, Default)]
 struct LmHeadRepeatMarginState {
@@ -188,7 +187,7 @@ fn lm_head_exact_check_due(
 ) -> bool {
     is_decode_step
         && exact_every.is_some_and(|every| {
-            every > 0 && generated_token_count_in_turn.saturating_add(1) % every == 0
+            every > 0 && generated_token_count_in_turn.saturating_add(1).is_multiple_of(every)
         })
 }
 
@@ -294,13 +293,12 @@ fn sample_sparse_lm_head_argmax_inner(
         None
     };
     let mut novelty_excluded_token = excluded_token;
-    if excluded_token.is_some() {
-        if config.aip_lm_head_repeat_margin_adaptive {
+    if excluded_token.is_some()
+        && config.aip_lm_head_repeat_margin_adaptive {
             if let Some(state) = repeat_margin_state.as_deref_mut() {
                 state.reset();
             }
         }
-    }
 
     let mut selected_token = None;
     if excluded_token.is_none() {
@@ -345,7 +343,7 @@ fn sample_sparse_lm_head_argmax_inner(
                                 stats.record_lm_head_repeat_margin(false, gap_to_milli(gap));
                             }
                             if config.aip_lm_head_repeat_margin_adaptive {
-                                if let Some(state) = repeat_margin_state.as_deref_mut() {
+                                if let Some(state) = repeat_margin_state {
                                     state.record_margin_check(false);
                                 }
                             }
@@ -456,7 +454,7 @@ fn apply_phrase_novelty_controller(
         }
     }
 
-    if let Some(stats) = stats.as_deref_mut() {
+    if let Some(stats) = stats {
         stats.record_lm_head_phrase_novelty(false, repeated_ngram);
     }
     selected_token
@@ -599,6 +597,7 @@ fn gap_to_milli(gap: f32) -> usize {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn top_two_sparse_logits(logits: &[f32]) -> Result<(usize, f32, Option<(usize, f32)>)> {
     if logits.is_empty() {
         return Err(RuntimeError::InvalidTensorData(

@@ -11,8 +11,8 @@ members = [
 [workspace.package]
 version = "0.1.5"
 edition = "2021"
-# Proprietary — All Rights Reserved. See LICENSE. (Not an open-source license.)
-license = "LicenseRef-Proprietary"
+# MIT — open source. See LICENSE.
+license = "MIT"
 publish = false
 repository = "https://github.com/Erik-cpu-create/spissa"
 
@@ -44,11 +44,11 @@ libc = "0.2"
 # HTTP client for the HF model downloader (rustls, no system OpenSSL — universal)
 ureq = "2"
 
-# Interactive arrow-key menus for `rllm menu` (crossterm-based, cross-platform)
+# Interactive arrow-key menus for `spissa menu` (crossterm-based, cross-platform)
 inquire = "0.7"
 
-# Distribution build: strip symbols (hide function names from reverse-engineering), whole-program
-# LTO + single codegen unit (smaller, faster, harder to disassemble). Proprietary IP — see LICENSE.
+# Distribution build: strip symbols, whole-program LTO + single codegen unit for the
+# smallest, fastest binary.
 [profile.release]
 strip = true
 lto = true

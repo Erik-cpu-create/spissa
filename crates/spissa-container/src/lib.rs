@@ -1,8 +1,7 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
-//! RLLM Container - Binary container format for compressed LLM models
+//! Spissa Container - Binary container format for compressed LLM models
 //!
 //! This crate handles the .spsa file format: parsing, writing, and managing
 //! the binary layout of compressed model tensors.
@@ -24,4 +23,4 @@ pub use writer::*;
 pub const SPSA_MAGIC: &[u8; 4] = b"SPSA";
 
 /// Current format version
-pub const RLLM_VERSION: u32 = 1;
+pub const SPISSA_VERSION: u32 = 1;

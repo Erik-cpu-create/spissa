@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // SparseColumnCache data structure + cache-management impl, plus basic and column-cached
 // sparse tile-linear / SiLU kernels. input-tiled -> linear_sparse_input.rs, cache-fill +
@@ -125,7 +124,7 @@ impl SparseColumnCache {
 
 /// Experimental sparse batch-1 projection over raw 16-bit weights.
 ///
-/// This is an opt-in research path used by RLLM experimental speed mode. It
+/// This is an opt-in research path used by Spissa experimental speed mode. It
 /// keeps model weights unchanged and computes an approximate projection from
 /// the top activation dimensions by absolute magnitude.
 pub fn streaming_sparse_tile_linear_from_model(

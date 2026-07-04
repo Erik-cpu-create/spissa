@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // Q8 block-scale / validate / dot helpers + the f32-fallback dot kernels.
 // Split out of kernels_q8.rs (R168); include!d into streaming/mod.rs.
@@ -82,7 +81,7 @@ fn q8_0_scaled_block(qs: &[u8], scale: f32) -> [f32; 32] {
 fn q8_0_scaled_block_reecast(qs: &[u8], scale: f32) -> [f32; 32] {
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        return q8_0_scaled_block_neon(qs, scale);
+        q8_0_scaled_block_neon(qs, scale)
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -179,14 +178,14 @@ fn accumulate_f32_dot_32_batch4_reevec(
 ) {
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        return accumulate_f32_dot_32_batch4_neon(
+        accumulate_f32_dot_32_batch4_neon(
             weights,
             input,
             input_stride,
             output,
             output_stride,
             out_feature,
-        );
+        )
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -211,7 +210,7 @@ fn accumulate_f32_dot_32_output2_batch4_reebundle(
 ) {
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        return accumulate_f32_dot_32_output2_batch4_neon(
+        accumulate_f32_dot_32_output2_batch4_neon(
             first,
             second,
             input,
@@ -219,7 +218,7 @@ fn accumulate_f32_dot_32_output2_batch4_reebundle(
             output,
             output_stride,
             first_out_feature,
-        );
+        )
     }
 
     #[cfg(not(target_arch = "aarch64"))]
@@ -396,13 +395,13 @@ fn accumulate_f32_dot_32_batch4_into_reevec(
 ) {
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        return accumulate_f32_dot_32_batch4_into_neon(
+        accumulate_f32_dot_32_batch4_into_neon(
             weights,
             input,
             input_stride,
             accumulators,
             accumulator_start,
-        );
+        )
     }
 
     #[cfg(not(target_arch = "aarch64"))]

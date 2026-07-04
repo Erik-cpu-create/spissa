@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // Measure the REAL quantization loss of q8_0 on actual model weights.
 // For each bf16 weight tensor: quantize -> dequantize, compare to the exact bf16 value.
@@ -32,7 +31,9 @@ fn err_sums(orig: &[f32], deq: &[f32]) -> (f64, f64) {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: q8-error <model.spsa>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: q8-error <model.spsa>");
     let mut model = LazySpissaModel::open(&path).expect("open");
     model.set_rama_integrity_mode(RamaIntegrityMode::Unchecked);
 
@@ -84,7 +85,10 @@ fn main() {
     let r4 = (g4 / gsig.max(1e-30)).sqrt() * 100.0;
     let snr8 = 10.0 * (gsig / g8.max(1e-30)).log10();
     let snr4 = 10.0 * (gsig / g4.max(1e-30)).log10();
-    println!("\n=== AGGREGATE over {gn} weights ({} tensors) ===", names.len());
+    println!(
+        "\n=== AGGREGATE over {gn} weights ({} tensors) ===",
+        names.len()
+    );
     println!("q8_0 RMS relative error : {r8:.3} %   (SNR {snr8:.1} dB)");
     println!("q4_0 RMS relative error : {r4:.3} %   (SNR {snr4:.1} dB)");
     println!("rANS (lossless)         : 0.000 %   (bit-exact, no quantization)");

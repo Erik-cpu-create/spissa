@@ -22,17 +22,48 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
       - name: Format check
         run: cargo fmt --all --check
-        continue-on-error: true
+
+      # Clippy is a hard gate: any warning fails CI. The workspace is warning-clean;
+      # research binaries and the experimental kernel lab carry targeted `#[allow]`s
+      # with reasons rather than blanket suppression.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Build
         run: cargo build --workspace
 
       - name: Test
         run: cargo test --workspace
+
+  dco:
+    name: DCO sign-off
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify every commit is signed off
+        run: |
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          missing=0
+          for c in $(git rev-list "$base..$head"); do
+            if ! git log -1 --format=%B "$c" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "::error::Commit $c is missing a 'Signed-off-by' line (DCO)."
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "See CONTRIBUTING.md §0 — sign commits with 'git commit -s'."
+            exit 1
+          fi
+          echo "All commits are signed off. ✅"

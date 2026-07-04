@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::{Result, RuntimeError};
 use spissa_container::DType;
@@ -310,7 +309,10 @@ mod tests {
         while v > 1.0e-12 {
             for &val in &[v, -v] {
                 let decoded = fp16_to_f32(f32_to_fp16(val));
-                assert!(decoded.is_finite(), "f32_to_fp16({val:e}) -> non-finite {decoded}");
+                assert!(
+                    decoded.is_finite(),
+                    "f32_to_fp16({val:e}) -> non-finite {decoded}"
+                );
                 if decoded != 0.0 {
                     assert_eq!(decoded.signum(), val.signum(), "sign flip for {val:e}");
                 }

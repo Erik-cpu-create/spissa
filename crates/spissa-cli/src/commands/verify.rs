@@ -1,15 +1,14 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use anyhow::{Context, Result};
-use spissa_container::SpissaReader;
-use spissa_import::SafetensorsReader;
 use rtc_codec::{
     BitplaneCodec, DecodeMeta, HuffmanCodec, RansCodec, RawCodec, ReebornForCodec, RleCodec,
     TensorCodec,
 };
 use sha2::{Digest, Sha256};
+use spissa_container::SpissaReader;
+use spissa_import::SafetensorsReader;
 use std::path::Path;
 
 fn get_codec(codec_id: &str) -> Result<Box<dyn TensorCodec>> {
@@ -41,7 +40,7 @@ pub fn run(original: &str, compressed: &str) -> Result<()> {
     let mut safetensors = SafetensorsReader::open(original_path)
         .with_context(|| format!("Failed to open original file: {}", original))?;
 
-    // Open RLLM reader
+    // Open Spissa reader
     let reader = SpissaReader::open(compressed_path)
         .with_context(|| format!("Failed to open compressed file: {}", compressed))?;
 

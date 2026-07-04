@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! rtc-bitplane-v1: SIMD-decodable lossless bf16 codec.
 //!
@@ -40,7 +39,11 @@ impl BitplaneCodec {
         data.push(0); // palette_len
         data.push(0); // index_width
         data.extend_from_slice(input);
-        EncodedChunk { codec_id: Self::ID.to_string(), data, original_size: input.len() as u64 }
+        EncodedChunk {
+            codec_id: Self::ID.to_string(),
+            data,
+            original_size: input.len() as u64,
+        }
     }
 }
 
@@ -56,7 +59,7 @@ impl TensorCodec for BitplaneCodec {
         let _ = meta; // dtype-agnostic: the (exp,residual) bf16 split is a bijection on any
                       // even-length bytes (pack passes dtype "u8"); it only compresses for
                       // real bf16. Odd length -> raw fallback.
-        if input.len() % 2 != 0 {
+        if !input.len().is_multiple_of(2) {
             return Ok(Self::raw_chunk(input));
         }
         let n = input.len() / 2;
@@ -71,8 +74,10 @@ impl TensorCodec for BitplaneCodec {
             exps.push(e);
             residuals.push(r);
         }
-        let palette: Vec<u8> =
-            (0..256usize).filter(|&i| present[i]).map(|i| i as u8).collect();
+        let palette: Vec<u8> = (0..256usize)
+            .filter(|&i| present[i])
+            .map(|i| i as u8)
+            .collect();
 
         if palette.len() > 64 {
             // Not usefully palette-compressible → raw fallback.
@@ -131,7 +136,7 @@ impl TensorCodec for BitplaneCodec {
 
         let palette = encoded.get(off..off + p).ok_or_else(err)?;
         off += p;
-        let idx_bytes = (n * w as usize + 7) / 8;
+        let idx_bytes = (n * w as usize).div_ceil(8);
         let idx_plane = encoded.get(off..off + idx_bytes).ok_or_else(err)?;
         off += idx_bytes;
         let residuals = encoded.get(off..off + n).ok_or_else(err)?;
@@ -159,7 +164,7 @@ impl TensorCodec for BitplaneCodec {
         #[cfg(target_arch = "aarch64")]
         {
             decode_bitplane_row_into(palette, idx_plane, residuals, n, w, &mut out);
-            return Ok(out);
+            Ok(out)
         }
         #[cfg(not(target_arch = "aarch64"))]
         {
@@ -218,7 +223,11 @@ unsafe fn decode_w5_neon_inner(
 
     // SIMD-safe groups: each iteration loads 8 bytes at offset g*5, so require
     // g*5 + 8 <= idx_plane.len(); also g*8 + 8 <= n.
-    let groups_by_bytes = if idx_plane.len() >= 8 { (idx_plane.len() - 8) / 5 + 1 } else { 0 };
+    let groups_by_bytes = if idx_plane.len() >= 8 {
+        (idx_plane.len() - 8) / 5 + 1
+    } else {
+        0
+    };
     let simd_groups = core::cmp::min(n / 8, groups_by_bytes);
 
     let out_u16 = out.as_mut_ptr() as *mut u16;
@@ -281,6 +290,12 @@ pub fn decode_neon_w5_into(
 
 /// R146 SCOUT: 16-wide w=5 decode (vqtbl2q gathers 16 exponents/lookup vs the
 /// 8-wide vtbl4's 8). Processes 16 weights/iter; scalar tail via the 8-wide path.
+///
+/// # Safety
+/// The caller must ensure the CPU supports NEON (guaranteed on `aarch64`, but the
+/// `#[target_feature(enable = "neon")]` contract still requires it), and that
+/// `palette`, `idx_plane`, `residuals`, and `out` are sized consistently with `n`
+/// for the w=5 layout — the function reads/writes those buffers without bounds checks.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn decode16_w5_into(
@@ -310,7 +325,11 @@ pub unsafe fn decode16_w5_into(
     let mask7f = vdupq_n_u16(0x7f);
 
     // 16-group is safe while its 16-byte load stays in bounds (needs up to byte 10).
-    let groups16 = if idx_plane.len() >= 16 { (idx_plane.len() - 16) / 10 + 1 } else { 0 };
+    let groups16 = if idx_plane.len() >= 16 {
+        (idx_plane.len() - 16) / 10 + 1
+    } else {
+        0
+    };
     let simd16 = core::cmp::min(n / 16, groups16);
     let out_u16 = out.as_mut_ptr() as *mut u16;
 
@@ -319,8 +338,14 @@ pub unsafe fn decode16_w5_into(
         let hi = vqtbl1q_u8(grp, vhi);
         let lo = vqtbl1q_u8(grp, vlo);
         // 16-bit windows, low and high halves.
-        let win_lo = vorrq_u16(vshlq_n_u16(vmovl_u8(vget_low_u8(hi)), 8), vmovl_u8(vget_low_u8(lo)));
-        let win_hi = vorrq_u16(vshlq_n_u16(vmovl_u8(vget_high_u8(hi)), 8), vmovl_u8(vget_high_u8(lo)));
+        let win_lo = vorrq_u16(
+            vshlq_n_u16(vmovl_u8(vget_low_u8(hi)), 8),
+            vmovl_u8(vget_low_u8(lo)),
+        );
+        let win_hi = vorrq_u16(
+            vshlq_n_u16(vmovl_u8(vget_high_u8(hi)), 8),
+            vmovl_u8(vget_high_u8(lo)),
+        );
         let idx_lo = vandq_u16(vshlq_u16(win_lo, vshift), mask5);
         let idx_hi = vandq_u16(vshlq_u16(win_hi, vshift), mask5);
         let idx16 = vcombine_u8(vmovn_u16(idx_lo), vmovn_u16(idx_hi));
@@ -330,13 +355,19 @@ pub unsafe fn decode16_w5_into(
         let res_lo = vmovl_u8(vget_low_u8(res16));
         let exp_lo = vmovl_u8(vget_low_u8(exp16));
         let bf_lo = vorrq_u16(
-            vorrq_u16(vshlq_n_u16(vandq_u16(res_lo, mask80), 8), vshlq_n_u16(exp_lo, 7)),
+            vorrq_u16(
+                vshlq_n_u16(vandq_u16(res_lo, mask80), 8),
+                vshlq_n_u16(exp_lo, 7),
+            ),
             vandq_u16(res_lo, mask7f),
         );
         let res_hi = vmovl_u8(vget_high_u8(res16));
         let exp_hi = vmovl_u8(vget_high_u8(exp16));
         let bf_hi = vorrq_u16(
-            vorrq_u16(vshlq_n_u16(vandq_u16(res_hi, mask80), 8), vshlq_n_u16(exp_hi, 7)),
+            vorrq_u16(
+                vshlq_n_u16(vandq_u16(res_hi, mask80), 8),
+                vshlq_n_u16(exp_hi, 7),
+            ),
             vandq_u16(res_hi, mask7f),
         );
         vst1q_u16(out_u16.add(g * 16), bf_lo);
@@ -361,7 +392,14 @@ pub unsafe fn decode16_w5_into(
 /// the SIMD kernels reproduce; used as their byte-aligned tail and as the
 /// dispatcher fallback for widths without a SIMD path. Mirrors the inner loop of
 /// `BitplaneCodec::decode` exactly (MSB-first `BufferedBitReader`).
-fn decode_scalar_w(palette: &[u8], idx_plane: &[u8], residuals: &[u8], n: usize, w: u8, out: &mut [u8]) {
+fn decode_scalar_w(
+    palette: &[u8],
+    idx_plane: &[u8],
+    residuals: &[u8],
+    n: usize,
+    w: u8,
+    out: &mut [u8],
+) {
     let mut reader = BufferedBitReader::new(idx_plane);
     for i in 0..n {
         reader.refill();
@@ -379,6 +417,12 @@ fn decode_scalar_w(palette: &[u8], idx_plane: &[u8], residuals: &[u8], n: usize,
 /// exponents are gathered from a **64-entry** palette via `vqtbl4q_u8` (a single
 /// TBL over 4 registers) — `vqtbl2q`'s 32-entry table cannot reach indices ≥ 32.
 /// Bit-identical to scalar `BitplaneCodec::decode` for w=6.
+///
+/// # Safety
+/// The caller must ensure the CPU supports NEON (guaranteed on `aarch64`, but the
+/// `#[target_feature(enable = "neon")]` contract still requires it), and that
+/// `palette`, `idx_plane`, `residuals`, and `out` are sized consistently with `n`
+/// for the w=6 layout — the function reads/writes those buffers without bounds checks.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub unsafe fn decode16_w6_into(
@@ -413,7 +457,11 @@ pub unsafe fn decode16_w6_into(
     let mask7f = vdupq_n_u16(0x7f);
 
     // 16-group is safe while its 16-byte load stays in bounds (needs up to byte 12).
-    let groups16 = if idx_plane.len() >= 16 { (idx_plane.len() - 16) / 12 + 1 } else { 0 };
+    let groups16 = if idx_plane.len() >= 16 {
+        (idx_plane.len() - 16) / 12 + 1
+    } else {
+        0
+    };
     let simd16 = core::cmp::min(n / 16, groups16);
     let out_u16 = out.as_mut_ptr() as *mut u16;
 
@@ -421,8 +469,14 @@ pub unsafe fn decode16_w6_into(
         let grp = vld1q_u8(idx_plane.as_ptr().add(g * 12));
         let hi = vqtbl1q_u8(grp, vhi);
         let lo = vqtbl1q_u8(grp, vlo);
-        let win_lo = vorrq_u16(vshlq_n_u16(vmovl_u8(vget_low_u8(hi)), 8), vmovl_u8(vget_low_u8(lo)));
-        let win_hi = vorrq_u16(vshlq_n_u16(vmovl_u8(vget_high_u8(hi)), 8), vmovl_u8(vget_high_u8(lo)));
+        let win_lo = vorrq_u16(
+            vshlq_n_u16(vmovl_u8(vget_low_u8(hi)), 8),
+            vmovl_u8(vget_low_u8(lo)),
+        );
+        let win_hi = vorrq_u16(
+            vshlq_n_u16(vmovl_u8(vget_high_u8(hi)), 8),
+            vmovl_u8(vget_high_u8(lo)),
+        );
         let idx_lo = vandq_u16(vshlq_u16(win_lo, vshift), mask6);
         let idx_hi = vandq_u16(vshlq_u16(win_hi, vshift), mask6);
         let idx16 = vcombine_u8(vmovn_u16(idx_lo), vmovn_u16(idx_hi));
@@ -432,13 +486,19 @@ pub unsafe fn decode16_w6_into(
         let res_lo = vmovl_u8(vget_low_u8(res16));
         let exp_lo = vmovl_u8(vget_low_u8(exp16));
         let bf_lo = vorrq_u16(
-            vorrq_u16(vshlq_n_u16(vandq_u16(res_lo, mask80), 8), vshlq_n_u16(exp_lo, 7)),
+            vorrq_u16(
+                vshlq_n_u16(vandq_u16(res_lo, mask80), 8),
+                vshlq_n_u16(exp_lo, 7),
+            ),
             vandq_u16(res_lo, mask7f),
         );
         let res_hi = vmovl_u8(vget_high_u8(res16));
         let exp_hi = vmovl_u8(vget_high_u8(exp16));
         let bf_hi = vorrq_u16(
-            vorrq_u16(vshlq_n_u16(vandq_u16(res_hi, mask80), 8), vshlq_n_u16(exp_hi, 7)),
+            vorrq_u16(
+                vshlq_n_u16(vandq_u16(res_hi, mask80), 8),
+                vshlq_n_u16(exp_hi, 7),
+            ),
             vandq_u16(res_hi, mask7f),
         );
         vst1q_u16(out_u16.add(g * 16), bf_lo);
@@ -449,7 +509,14 @@ pub unsafe fn decode16_w6_into(
     let done = simd16 * 16;
     if done < n {
         let byte_off = done * 6 / 8; // done is a multiple of 16 => byte-aligned
-        decode_scalar_w(palette, &idx_plane[byte_off..], &residuals[done..], n - done, 6, &mut out[done * 2..]);
+        decode_scalar_w(
+            palette,
+            &idx_plane[byte_off..],
+            &residuals[done..],
+            n - done,
+            6,
+            &mut out[done * 2..],
+        );
     }
 }
 
@@ -466,7 +533,10 @@ pub fn decode_bitplane_row_into(
     w: u8,
     out: &mut [u8],
 ) {
-    assert!(out.len() >= n * 2, "decode_bitplane_row_into: out too small");
+    assert!(
+        out.len() >= n * 2,
+        "decode_bitplane_row_into: out too small"
+    );
     match w {
         5 => unsafe { decode16_w5_into(palette, idx_plane, residuals, n, out) },
         6 => unsafe { decode16_w6_into(palette, idx_plane, residuals, n, out) },
