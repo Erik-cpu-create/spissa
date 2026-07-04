@@ -9,6 +9,12 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 <!-- BUMP:INSERT -->
 
+## [0.1.8.0] - 2026-07-04
+
+### Fixes
+- minor bug fixes
+
+
 ## [0.1.7.0] - 2026-07-04
 
 ### Documentation
