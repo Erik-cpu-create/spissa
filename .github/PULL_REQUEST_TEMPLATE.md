@@ -25,7 +25,7 @@
 - [ ] `cargo test --workspace` — passes
 - [ ] Conventional Commit message; used a `[minor]`/`[major]`/`[revision]` marker if needed
 - [ ] I did not break the [project invariants](../CONTRIBUTING.md#6-project-invariants-do-not-break)
-      (lossless by default, honest metrics, from scratch, custom RTC codecs, codecs round-trip)
+      (lossless by default, honest metrics, custom RTC codecs, codecs round-trip)
 
 ## Notes for reviewers
 
