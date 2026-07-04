@@ -9,6 +9,17 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 <!-- BUMP:INSERT -->
 
+## [0.1.6.0] - 2026-07-04
+
+### Documentation
+- use consistent contact email across SECURITY and CoC
+- translate AI agent spec to English
+- remove internal superpowers research plans and specs
+
+### Build & CI
+- fix clippy -D warnings on non-aarch64 targets
+
+
 ## [0.1.5.0] - 2026-06-27
 
 ### Fixes
