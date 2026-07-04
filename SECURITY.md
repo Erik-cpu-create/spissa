@@ -13,7 +13,7 @@ Instead, report them privately via one of:
 
 - GitHub's [private vulnerability reporting](https://github.com/Erik-cpu-create/spissa/security/advisories/new)
   (preferred — **Security → Report a vulnerability**), or
-- Email the maintainer at **ramaerikesprada@gmail.com** with the subject
+- Email the maintainer at **ramaerikesprada.ganteng@gmail.com** with the subject
   `[SECURITY] Spissa`.
 
 Please include:
