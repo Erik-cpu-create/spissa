@@ -45,7 +45,7 @@ libc = "0.2"
 ureq = "2"
 
 # Interactive arrow-key menus for `spissa menu` (crossterm-based, cross-platform)
-inquire = "0.7"
+inquire = "0.9"
 
 # Distribution build: strip symbols, whole-program LTO + single codegen unit for the
 # smallest, fastest binary.
