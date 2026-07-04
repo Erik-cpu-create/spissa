@@ -9,6 +9,13 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 <!-- BUMP:INSERT -->
 
+## [0.1.7.0] - 2026-07-04
+
+### Documentation
+- remove remaining 'no wrapping / from scratch' claims
+- drop the 'no wrapping Ollama/llama.cpp' design principle
+
+
 ## [0.1.6.0] - 2026-07-04
 
 ### Documentation
