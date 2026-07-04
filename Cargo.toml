@@ -42,7 +42,7 @@ memmap2 = "0.9"
 libc = "0.2"
 
 # HTTP client for the HF model downloader (rustls, no system OpenSSL — universal)
-ureq = "2"
+ureq = "3"
 
 # Interactive arrow-key menus for `spissa menu` (crossterm-based, cross-platform)
 inquire = "0.7"
