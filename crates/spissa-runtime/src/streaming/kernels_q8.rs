@@ -256,6 +256,7 @@ fn with_q8_panel_activations<R>(
 /// Pack one weight-row pair from the q8 chunk into a contiguous panel and read
 /// the two per-block fp16 scales (one per row). Same layout as
 /// `pack_act_panel_pairs` (4 segments of 16 bytes per K-block).
+#[allow(dead_code)] // used only by the aarch64 i8mm path
 fn pack_q8_weight_pair(
     q8_bytes: &[u8],
     base_r0: usize,
@@ -570,6 +571,7 @@ unsafe fn smmla_accumulate_output_octet(
 
 /// Scalar int8 dot for one weight row × all batch rows (handles odd-batch and
 /// odd-output-row tails, partial chunks, and non-i8mm CPUs).
+#[allow(dead_code)] // used only by the aarch64 i8mm path
 fn scalar_int8_row(
     q8_bytes: &[u8],
     base_r: usize,

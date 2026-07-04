@@ -15,6 +15,7 @@
 
 /// rANS-exponent sidecar header offset of the (variable) block-length table tail.
 /// magic(4)+ver(1)+hidden(4)+vocab(4)+block_rows(4)+freq(512)+num_blocks(4) = 533.
+#[allow(dead_code)] // referenced only by the aarch64 streaming path
 const RLMR_FIXED_HEADER: usize = 17 + 512 + 4;
 
 /// Write a model's tied bf16 lm-head as an rANS-exponent sidecar (RLMR v1).
