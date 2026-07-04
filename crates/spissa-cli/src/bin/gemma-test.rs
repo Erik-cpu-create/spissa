@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -79,7 +78,10 @@ fn parse_token_ids(raw: &str) -> Result<Vec<usize>> {
         if part.is_empty() {
             continue;
         }
-        ids.push(part.parse::<usize>().with_context(|| format!("invalid token id: {part}"))?);
+        ids.push(
+            part.parse::<usize>()
+                .with_context(|| format!("invalid token id: {part}"))?,
+        );
     }
     if ids.is_empty() {
         anyhow::bail!("--token-ids must contain at least one token id");
@@ -99,34 +101,6 @@ fn write_first_step_logits(path: &str, logits: &[f32], first_token: usize) -> Re
     body.push_str("]}");
     std::fs::write(path, body).with_context(|| format!("failed to write logits JSON {path}"))?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use spissa_import::tokenizer_metadata_from_json_str;
-    use spissa_runtime::SpissaTokenizer;
-
-    /// Validate the metaspace tokenizer path against the REAL Gemma 3
-    /// tokenizer.json (needs the local download). Run:
-    /// `cargo test -p spissa-cli --bin gemma-test -- --ignored --nocapture real_gemma_tokenizer`
-    #[test]
-    #[ignore]
-    fn real_gemma_tokenizer_encodes_with_metaspace_and_bos() {
-        let json =
-            std::fs::read_to_string("../../models/gemma-3-4b-it/tokenizer.json").unwrap();
-        let meta = tokenizer_metadata_from_json_str(&json).unwrap();
-        assert_eq!(meta.pre_tokenizer.as_deref(), Some("metaspace"));
-        assert_eq!(meta.add_bos_token, Some(true));
-        assert_eq!(meta.bos_token_id, Some(2));
-        let tok = SpissaTokenizer::from_metadata(&meta).unwrap();
-
-        let ids = tok.encode("The capital of France is").unwrap();
-        eprintln!("encode(\"The capital of France is\") = {ids:?}");
-        // BOS(2) + faithful SentencePiece (no dummy prefix): leading word "The"
-        // has no metaspace; subsequent words carry ▁.
-        assert_eq!(ids, vec![2, 818, 5279, 529, 7001, 563]);
-        assert_eq!(tok.decode(&ids[1..]).unwrap(), "The capital of France is");
-    }
 }
 
 /// Build the token ids for one user turn in Gemma's chat template. The first
@@ -333,8 +307,9 @@ fn main() -> Result<()> {
     if let Some(eos) = eos_token_id {
         stop_token_ids.push(eos as usize);
     }
-    if let Some(eot) =
-        tokenizer.as_ref().and_then(|t| t.token_id_for_raw_token("<end_of_turn>"))
+    if let Some(eot) = tokenizer
+        .as_ref()
+        .and_then(|t| t.token_id_for_raw_token("<end_of_turn>"))
     {
         if !stop_token_ids.contains(&eot) {
             stop_token_ids.push(eot);
@@ -371,8 +346,19 @@ fn main() -> Result<()> {
         let tokenizer = tokenizer
             .as_ref()
             .context("interactive mode needs tokenizer metadata")?;
-        let bos = model.metadata().tokenizer.as_ref().and_then(|m| m.bos_token_id);
-        return run_interactive(&mut model, &prepared, tokenizer, &stop_token_ids, bos, args.ctx);
+        let bos = model
+            .metadata()
+            .tokenizer
+            .as_ref()
+            .and_then(|m| m.bos_token_id);
+        return run_interactive(
+            &mut model,
+            &prepared,
+            tokenizer,
+            &stop_token_ids,
+            bos,
+            args.ctx,
+        );
     }
 
     println!("===================================================");
@@ -441,7 +427,10 @@ fn main() -> Result<()> {
             .filter(|id| !stop_token_ids.contains(id))
             .collect();
         let text = tokenizer.decode(&visible)?;
-        println!("\n--- generated ({} tokens) ---", result.generated_token_ids.len());
+        println!(
+            "\n--- generated ({} tokens) ---",
+            result.generated_token_ids.len()
+        );
         println!("{text}");
     }
     println!("Generated token ids: {:?}", result.generated_token_ids);
@@ -459,10 +448,40 @@ fn main() -> Result<()> {
             Some(logits) => {
                 let first = result.generated_token_ids.first().copied().unwrap_or(0);
                 write_first_step_logits(path, logits, first)?;
-                eprintln!("first-step logits ({} values) written to {path}", logits.len());
+                eprintln!(
+                    "first-step logits ({} values) written to {path}",
+                    logits.len()
+                );
             }
             None => eprintln!("warning: --logits-out set but no logits were collected"),
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use spissa_import::tokenizer_metadata_from_json_str;
+    use spissa_runtime::SpissaTokenizer;
+
+    /// Validate the metaspace tokenizer path against the REAL Gemma 3
+    /// tokenizer.json (needs the local download). Run:
+    /// `cargo test -p spissa-cli --bin gemma-test -- --ignored --nocapture real_gemma_tokenizer`
+    #[test]
+    #[ignore]
+    fn real_gemma_tokenizer_encodes_with_metaspace_and_bos() {
+        let json = std::fs::read_to_string("../../models/gemma-3-4b-it/tokenizer.json").unwrap();
+        let meta = tokenizer_metadata_from_json_str(&json).unwrap();
+        assert_eq!(meta.pre_tokenizer.as_deref(), Some("metaspace"));
+        assert_eq!(meta.add_bos_token, Some(true));
+        assert_eq!(meta.bos_token_id, Some(2));
+        let tok = SpissaTokenizer::from_metadata(&meta).unwrap();
+
+        let ids = tok.encode("The capital of France is").unwrap();
+        eprintln!("encode(\"The capital of France is\") = {ids:?}");
+        // BOS(2) + faithful SentencePiece (no dummy prefix): leading word "The"
+        // has no metaspace; subsequent words carry ▁.
+        assert_eq!(ids, vec![2, 818, 5279, 529, 7001, 563]);
+        assert_eq!(tok.decode(&ids[1..]).unwrap(), "The capital of France is");
+    }
 }

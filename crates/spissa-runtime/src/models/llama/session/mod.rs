@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::models::llama::api::{
     decode_llama_layer_params, require_config_usize, require_model_config, validate_llama_shape,
@@ -74,7 +73,7 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
     pub fn new(
         model: &'a mut LazySpissaModel,
         prepared: &LayerDecodedLlamaRamaTransformer,
-        budget: &mut MemoryBudget,
+        _budget: &mut MemoryBudget,
     ) -> Result<Self> {
         if prepared.layers.is_empty() {
             return Err(RuntimeError::Shape(
@@ -259,7 +258,10 @@ impl<'a> LlamaRamaSessionAdapter<'a> {
                 )));
             }
         }
-        let tensor_id = self.model.tensor(&self.prepared.embedding_weight)?.tensor_id;
+        let tensor_id = self
+            .model
+            .tensor(&self.prepared.embedding_weight)?
+            .tensor_id;
         // Each token's raw bf16 row bytes, filled from however many chunks the row overlaps.
         let mut row_buffers = vec![vec![0u8; row_bytes]; token_ids.len()];
         let mut chunks = self.model.chunks_for_tensor(tensor_id).to_vec();

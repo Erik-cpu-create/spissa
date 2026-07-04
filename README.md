@@ -69,10 +69,10 @@ new text. Architecture (Gemma / Llama) is auto-detected from the packed metadata
 ```
 
 In chat: just type. `/reset` starts a new conversation, `/exit` (or `exit`/`quit`) ends it.
-`--fast` is q8 turbo (see below). On big.LITTLE ARM (Apple Silicon, phones) the decode
-GEMV **auto-pins to the performance cores** (~2× vs all-cores; override with
-`RLLM_THREADS`). Note: lossless rANS holds up better over long multi-turn than lossy q8,
-which can degrade into empty replies on a tiny model.
+`--fast` is q8 turbo (see below). The decode GEMV parallelizes across the cores
+reported by the OS; cap or tune the worker count with `RLLM_THREADS=N`. Note:
+lossless rANS holds up better over long multi-turn than lossy q8, which can
+degrade into empty replies on a tiny model.
 
 ### `--fast` mode
 
@@ -122,7 +122,7 @@ is platform-independent (copy it as-is), and the kernels are `cfg`-gated with fa
 | Device | Status |
 |---|---|
 | ARM laptop (Apple Silicon) | ✅ fully optimized — NEON / `sdot` / `smmla` |
-| Android (Snapdragon / MediaTek) | ✅ same ARM path; big.LITTLE perf-cores auto-detected |
+| Android (Snapdragon / MediaTek) | ✅ same ARM path |
 | ARM SBC / server | ✅ optimized |
 | x86 laptop (Intel / AMD) | ⚠️ compiles & runs, but **scalar** (AVX kernels are future work) |
 
@@ -305,7 +305,7 @@ SPISSA_INTEGRITY=unchecked ./target/release/spissa chat models/gemma-3-1b-it-q8-
 ### Useful environment variables
 
 - `SPISSA_INTEGRITY=unchecked|verify-once|strict` — skip / once-per-process / per-recall SHA-256 verification.
-- `RLLM_THREADS=N` — cap worker threads (decode auto-pins to performance cores on big.LITTLE; see [docs/android-termux.md](docs/android-termux.md)).
+- `RLLM_THREADS=N` — cap the number of decode/GEMV worker threads (default: all cores the OS reports).
 - `SPISSA_DECODE_RESIDENT=1` — decode weights once at load and cache (bf16-class steady speed; the default inside `spissa chat`).
 - `SPISSA_STREAM_EMBEDDING=1` — stream the tied embedding instead of holding it resident (resident ≈ compressed size, for the >RAM regime).
 - `--fast` (chat) — q8 turbo: `mlock` residency + int8-activation kernels.
@@ -460,4 +460,6 @@ the full rules.
 
 ## License
 
-Proprietary — All Rights Reserved. No license is granted; see [LICENSE](LICENSE).
+Spissa is open source under the [MIT License](LICENSE). Contributions are
+welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) (contributions are accepted
+under the [Developer Certificate of Origin](https://developercertificate.org/)).

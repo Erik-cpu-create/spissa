@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — research instrument (REEFORM).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 // Dumps the RAW zigzag-int-delta byte stream (Δ = W_ft − W_base, bf16 patterns) to a file —
 // the exact input our u16-rANS coder sees. Lets us compare a GENERIC codec (zstd/gzip) against

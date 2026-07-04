@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // Sparse raw-16bit linear + sparse SiLU-gate-up kernels (batch1 + parallel).
 // Split out of kernels_raw16.rs (R169); include!d into streaming/mod.rs.

@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // REEPOOL — persistent decode worker pool (R172).
 //
@@ -63,6 +62,8 @@ struct Shared {
 
 pub(crate) struct DecodePool {
     shared: &'static Shared,
+    // Held to keep the worker threads' JoinHandles alive for the pool's lifetime; never read.
+    #[allow(dead_code)]
     workers: Vec<JoinHandle<()>>,
     size: usize,
 }

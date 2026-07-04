@@ -1,10 +1,9 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! RTC - Rama Tensor Codec
 //!
-//! Lossless tensor compression codecs for RLLM.
+//! Lossless tensor compression codecs for Spissa.
 //! Every codec must satisfy: decode(encode(input)) == input (bit-identical).
 
 mod bitplane;

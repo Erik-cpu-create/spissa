@@ -1,11 +1,10 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
-//! `rllm bench` — native benchmark matrices for `rllm run`.
+//! `spissa bench` — native benchmark matrices for `spissa run`.
 //!
-//! These subcommands spawn the running `rllm` binary, measure wall-clock time
-//! and peak RSS from the child's `rusage`, parse the metrics RLLM prints, and
+//! These subcommands spawn the running `spissa` binary, measure wall-clock time
+//! and peak RSS from the child's `rusage`, parse the metrics Spissa prints, and
 //! emit CSV/Markdown matrices. They replace the former Python harnesses under
 //! `scripts/` so the whole toolchain stays Rust-only.
 

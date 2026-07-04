@@ -29,7 +29,10 @@ impl Spinner {
             while !st.load(Ordering::Relaxed) {
                 let text = ms.lock().map(|m| m.clone()).unwrap_or_default();
                 // \r → line start, \x1b[2K → clear line, green frame, message.
-                print!("\r\x1b[2K\x1b[92m{}\x1b[0m  {text}", FRAMES[i % FRAMES.len()]);
+                print!(
+                    "\r\x1b[2K\x1b[92m{}\x1b[0m  {text}",
+                    FRAMES[i % FRAMES.len()]
+                );
                 io::stdout().flush().ok();
                 i += 1;
                 thread::sleep(Duration::from_millis(80));

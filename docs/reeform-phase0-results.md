@@ -1,11 +1,11 @@
 <!--
-Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-PROPRIETARY & CONFIDENTIAL — see LICENSE. Do not distribute, publish, or disclose.
+SPDX-License-Identifier: MIT
+Copyright (c) 2026 Rama Erik Esprada
 -->
 
 # REEFORM — Phase-0 Results & First Successful Test
 
-**Research log** · Owner: Rama Erik Esprada · Project: Spissa · CONFIDENTIAL
+**Research log** · Owner: Rama Erik Esprada · Project: Spissa
 Probe model: **SmolLM2-135M** (bf16, ≤1B per the research rule) · 211 weight matrices · 134.5M weights
 Instruments (committed): `reeform-probe`, `reeform-lowrank`, `reeform-delta` (under `spissa-cli/src/bin/`)
 

@@ -1,17 +1,16 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::commands::common::parse_size;
 use anyhow::{Context, Result};
+use serde_json::json;
 use spissa_runtime::{
     build_runtime_plan, prepare_gpt_neox_rama_layer_decode_transformer_from_metadata,
     recommend_rama_prefill_chunk_tokens, FullDecodeModel, GptNeoxRamaGenerationConfig,
     GptNeoxRamaGenerationOptions, LazySpissaModel, MemoryBudget, PlanStatus, RamaGenerationTiming,
-    RamaIntegrityMode, RamaPrefillPolicy, RamaTrace, SpissaTokenizer, RuntimeMode, RuntimePlanConfig,
-    StreamingEchoTransformerConfig, StreamingSamplingConfig,
+    RamaIntegrityMode, RamaPrefillPolicy, RamaTrace, RuntimeMode, RuntimePlanConfig,
+    SpissaTokenizer, StreamingEchoTransformerConfig, StreamingSamplingConfig,
 };
-use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

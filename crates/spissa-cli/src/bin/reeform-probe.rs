@@ -1,5 +1,6 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. CONFIDENTIAL RESEARCH (REEFORM).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
+#![allow(dead_code)]
 //
 //! REEFORM Phase-0 probe: measure whether LLM bf16 weights carry CONDITIONAL (higher-order)
 //! structure that the order-0 entropy floor (~10.6 bit/weight, what rANS/bit-plane/DFloat11
@@ -261,25 +262,56 @@ fn main() -> anyhow::Result<()> {
 
     let wf = w as f64;
     let floor = h0f / wf;
-    println!("\n=== REEFORM Phase-0 — SmolLM2-135M bf16, {} matrices, {w} weights ===\n", order.len());
+    println!(
+        "\n=== REEFORM Phase-0 — SmolLM2-135M bf16, {} matrices, {w} weights ===\n",
+        order.len()
+    );
     println!("ORDER-0 FLOOR (rANS / bit-plane / DFloat11 all land here):");
-    println!("  H0(full)  = {floor:.4} bit/weight    sign {:.4} | exp {:.4} | man {:.4}", h0s/wf, h0e/wf, h0m/wf);
+    println!(
+        "  H0(full)  = {floor:.4} bit/weight    sign {:.4} | exp {:.4} | man {:.4}",
+        h0s / wf,
+        h0e / wf,
+        h0m / wf
+    );
     println!("\nEXPONENT (the only field with < random entropy, so the only lever):");
     println!("  H0(exp)            = {:.4}", h0e / wf);
     println!("  H(exp | left)      = {:.4}   (row neighbour)", e_row / wf);
-    println!("  H(exp | up)        = {:.4}   (column neighbour)", e_col / wf);
-    println!("  H(exp | column)    = {:.4}   (per-channel adaptive) *", e_pcol / wf);
-    println!("  H(man | column)    = {:.4}   (vs H0(man) {:.4}) *", m_pcol / wf, h0m / wf);
-    println!("  H(full | column)   = {:.4}   (vs floor {:.4}) *", f_pcol / wf, floor);
+    println!(
+        "  H(exp | up)        = {:.4}   (column neighbour)",
+        e_col / wf
+    );
+    println!(
+        "  H(exp | column)    = {:.4}   (per-channel adaptive) *",
+        e_pcol / wf
+    );
+    println!(
+        "  H(man | column)    = {:.4}   (vs H0(man) {:.4}) *",
+        m_pcol / wf,
+        h0m / wf
+    );
+    println!(
+        "  H(full | column)   = {:.4}   (vs floor {:.4}) *",
+        f_pcol / wf,
+        floor
+    );
     println!("  * per-column empirical entropy ignores model-transmit cost — treat as an");
     println!("    OPTIMISTIC bound; only a LARGE gap survives the per-channel model overhead.");
     if clw > 0 {
         let cw = clw as f64;
-        println!("\nCROSS-LAYER (residual-stream bet, {} layer-pairs-worth of weights):", clw);
+        println!(
+            "\nCROSS-LAYER (residual-stream bet, {} layer-pairs-worth of weights):",
+            clw
+        );
         println!("  H0(exp)            = {:.4}   (this layer)", cl_e0 / cw);
-        println!("  H(exp | prevlayer) = {:.4}   (predict exp from previous layer)", cl_e / cw);
+        println!(
+            "  H(exp | prevlayer) = {:.4}   (predict exp from previous layer)",
+            cl_e / cw
+        );
         println!("  H0(full)           = {:.4}", cl_f0 / cw);
-        println!("  H0(full Δ prevlayer)= {:.4}  (cross-layer integer delta residual)", cl_fd / cw);
+        println!(
+            "  H0(full Δ prevlayer)= {:.4}  (cross-layer integer delta residual)",
+            cl_fd / cw
+        );
     }
 
     // Best lossless rate we can construct from the measured structure: keep sign(1)+man(7),
@@ -290,7 +322,10 @@ fn main() -> anyhow::Result<()> {
     println!("\n--- VERDICT (spatial) ---");
     println!("  floor {floor:.4} | ours(best-exp-context) {ours:.4} | Δ {win:+.4} bit/weight");
     if win > 0.001 {
-        println!("  ✅ structure found — {:.2}% lossless gain available", win / floor * 100.0);
+        println!(
+            "  ✅ structure found — {:.2}% lossless gain available",
+            win / floor * 100.0
+        );
     } else {
         println!("  ❌ spatial exp context ≈ null. Real signal (if any) is cross-layer/low-rank — see above.");
     }

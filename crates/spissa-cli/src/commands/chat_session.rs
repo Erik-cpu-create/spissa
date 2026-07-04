@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use anyhow::{Context, Result};
 use spissa_runtime::{
@@ -30,7 +29,8 @@ pub fn run(
         anyhow::bail!("--ctx must be greater than zero");
     }
 
-    let mut model = LazySpissaModel::open(file).with_context(|| format!("failed to open {file}"))?;
+    let mut model =
+        LazySpissaModel::open(file).with_context(|| format!("failed to open {file}"))?;
     model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
     let tokenizer_meta = model
         .metadata()

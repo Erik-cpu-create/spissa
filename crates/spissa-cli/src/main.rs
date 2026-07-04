@@ -1,8 +1,7 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
-//! RLLM CLI - Command-line interface for Runtime-compressed Local LLM
+//! Spissa CLI - Command-line interface for Runtime-compressed Local LLM
 #![allow(clippy::too_many_arguments)]
 
 use anyhow::Result;
@@ -258,12 +257,12 @@ enum Commands {
         #[arg(long, default_value = "candidate")]
         candidate_name: String,
 
-        /// Optional path to llama-test; defaults to sibling binary beside rllm
+        /// Optional path to llama-test; defaults to sibling binary beside spissa
         #[arg(long)]
         runner: Option<String>,
     },
 
-    /// Run native benchmark matrices for `rllm run` (RSS, throughput, RAMA timing)
+    /// Run native benchmark matrices for `spissa run` (RSS, throughput, RAMA timing)
     Bench {
         #[command(subcommand)]
         command: commands::bench::BenchCommand,
@@ -467,9 +466,11 @@ fn main() -> Result<()> {
             verbose,
         ),
         Commands::Inspect { file } => commands::inspect::run(&file),
-        Commands::Delta { finetune, base, out } => {
-            commands::pack::run_delta(&finetune, &base, &out, verbose)
-        }
+        Commands::Delta {
+            finetune,
+            base,
+            out,
+        } => commands::pack::run_delta(&finetune, &base, &out, verbose),
         Commands::Verify {
             original,
             compressed,

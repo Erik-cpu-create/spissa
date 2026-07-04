@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::{
     layer_norm, sample_argmax, sample_top_p, streaming_embedding_lookup_from_model,
@@ -774,8 +773,8 @@ mod tests {
         ContextEchoState, LazySpissaModel, MemoryBudget, StreamingBlockParameters,
         StreamingBlockTensorNames, StreamingSamplingConfig, StreamingTinyRotaryConfig,
     };
-    use spissa_container::{DType, GlobalMetadata, SpissaWriter, TensorMeta};
     use sha2::{Digest, Sha256};
+    use spissa_container::{DType, GlobalMetadata, SpissaWriter, TensorMeta};
 
     const NUM_LAYERS: usize = 2;
     const VOCAB_SIZE: usize = 3;

@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // Core dense streaming linear projection: shared helpers + streaming_linear_from_model
 // + streaming_tile_linear_from_model. multiply-into + silu-gate-up -> linear_multiply.rs (R171).
@@ -302,7 +301,7 @@ pub fn streaming_tile_linear_from_model(
     // per-chunk path otherwise, or if the tensor isn't contiguous-raw.
     if tensor.dtype == spissa_container::DType::Q8_0
         && config.linear.batch == 1
-        && config.linear.in_features % 32 == 0
+        && config.linear.in_features.is_multiple_of(32)
         && q8_activation_path_enabled()
     {
         let lin = config.linear;
@@ -321,7 +320,7 @@ pub fn streaming_tile_linear_from_model(
     // made naive prefill parallelization slower than single-threaded.
     if tensor.dtype == spissa_container::DType::Q8_0
         && config.linear.batch >= 2
-        && config.linear.in_features % 32 == 0
+        && config.linear.in_features.is_multiple_of(32)
         && q8_activation_path_enabled()
     {
         let lin = config.linear;

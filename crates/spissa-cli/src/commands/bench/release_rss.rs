@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Release RSS matrix: vary `--ctx` and `--max-new-tokens` for a text prompt
 //! and record per-cell throughput and peak RSS. Native port of the former
@@ -38,7 +37,7 @@ pub struct Args {
     #[arg(long, default_value = "target/phase76-bench")]
     pub out_dir: String,
 
-    /// Extra argument appended to every `rllm run` invocation (repeatable).
+    /// Extra argument appended to every `spissa run` invocation (repeatable).
     #[arg(long = "run-arg")]
     pub run_arg: Vec<String>,
 }

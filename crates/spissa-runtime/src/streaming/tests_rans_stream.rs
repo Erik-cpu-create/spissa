@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 // Tests for REESTREAM-RANS (R153): synthetic lossless parity, real-Gemma lossless
 // gate, and the >RAM cold capacity-bound bench. Split from rans_stream.rs to keep the
@@ -217,7 +217,7 @@ fn r157b_gemma_layer0_all_projections_lossless() {
         let _ = std::fs::remove_file(sidecar);
         assert_eq!(streamed.len(), out_f, "{tname}: output length must equal out_features (padding truncated)");
         assert_eq!(streamed, resident, "{tname}: rANS stream W·x must equal resident bf16 bit-for-bit");
-        let pad = if out_f % 256 == 0 { "no pad" } else { "PADDED" };
+        let pad = if out_f.is_multiple_of(256) { "no pad" } else { "PADDED" };
         eprintln!("  R157b OK: {tname} [{out_f}×{in_f}] ({pad}) — {out_f} outputs bit-identical");
     }
     eprintln!("R157b OK: all 7 Gemma layer-0 projections stream-rANS == resident, lossless");

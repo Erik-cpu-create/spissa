@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Dequantization and quantization kernels for block-quantized types (e.g. Q4_0).
 
@@ -36,6 +35,8 @@ fn raw_to_f32_data(raw_data: &[u8], dtype: DType, shape: &[u64], label: &str) ->
 
     let mut f32_data = vec![0.0f32; elements];
 
+    #[allow(clippy::needless_range_loop)]
+    // i drives a byte offset (i * element_size), not just indexing
     for i in 0..elements {
         let offset = i * element_size;
         let val = match dtype {
@@ -68,7 +69,7 @@ fn raw_to_f32_data(raw_data: &[u8], dtype: DType, shape: &[u64], label: &str) ->
 
 fn quantize_f32_to_q4_0(f32_data: &[f32]) -> Result<Vec<u8>> {
     let elements = f32_data.len();
-    let num_blocks = (elements + 31) / 32;
+    let num_blocks = elements.div_ceil(32);
     let mut quantized_data = vec![0u8; num_blocks * 18];
 
     for b in 0..num_blocks {
@@ -119,7 +120,7 @@ fn quantize_f32_to_q4_0(f32_data: &[f32]) -> Result<Vec<u8>> {
 
 fn quantize_f32_to_q8_0(f32_data: &[f32]) -> Result<Vec<u8>> {
     let elements = f32_data.len();
-    let num_blocks = (elements + 31) / 32;
+    let num_blocks = elements.div_ceil(32);
     let mut quantized_data = vec![0u8; num_blocks * 34];
 
     for b in 0..num_blocks {
@@ -250,8 +251,7 @@ mod tests {
             // Q4_0 uses the asymmetric signed range [-8, 7]. With scale=max/8,
             // the negative endpoint is exact while a positive block maximum can
             // saturate by up to one scale step before normal rounding error.
-            let block = i / 32;
-            let block_max = if block == 0 { 4.0f32 } else { 4.0f32 }; // max values in blocks
+            let block_max = 4.0f32; // max value magnitude in every Q4_0 block
             let expected_scale = block_max / 8.0;
             assert!(
                 diff <= expected_scale + 1e-5,

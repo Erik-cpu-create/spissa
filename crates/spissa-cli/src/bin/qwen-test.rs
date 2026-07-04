@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Standalone smoke/bring-up harness for the Qwen3.5 text adapter.
 //!
@@ -51,7 +50,10 @@ fn main() -> anyhow::Result<()> {
     };
     let ids = tokenizer.encode(&text)?;
     if std::env::var("QWEN_DEBUG").is_ok() {
-        eprintln!("[qwen-test] token 220 decodes to {:?}", tokenizer.decode(&[220]));
+        eprintln!(
+            "[qwen-test] token 220 decodes to {:?}",
+            tokenizer.decode(&[220])
+        );
         eprintln!("[qwen-test] prompt ids = {ids:?}");
     }
     eprintln!(

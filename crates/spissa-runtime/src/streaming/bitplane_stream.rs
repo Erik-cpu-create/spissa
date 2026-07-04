@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 // Pipelined streaming bit-plane GEMV (R148 REESTREAM, capacity-bound runtime kernel).
 //
@@ -54,11 +53,10 @@ fn streaming_bitplane_gemv(
             if nocache {
                 unsafe { fcntl(f.as_raw_fd(), F_NOCACHE, 1) };
             }
-            if data_offset > 0 {
-                if f.seek(SeekFrom::Start(data_offset)).is_err() {
+            if data_offset > 0
+                && f.seek(SeekFrom::Start(data_offset)).is_err() {
                     return;
                 }
-            }
             for blk in 0..num_blocks {
                 let mut buf = match empty_rx.recv() {
                     Ok(b) => b,
@@ -179,7 +177,7 @@ fn streaming_bitplane_gemv_parallel(
 /// the palette must be ≤ 64 distinct exponents (index width `w ∈ 1..=6`, decodable
 /// by the streaming dispatcher), `hidden·w % 8 == 0`, and `vocab % block_rows == 0`.
 /// The sidecar header (v2) records `w`, so w=5 (Llama) and w=6 (Gemma) both stream.
-/// Sidecar producer: consumed by the streaming tests and a future `rllm` subcommand.
+/// Sidecar producer: consumed by the streaming tests and a future `spissa` subcommand.
 #[cfg(target_arch = "aarch64")]
 #[allow(dead_code)]
 pub fn write_lmhead_sidecar(
@@ -215,12 +213,12 @@ pub fn write_lmhead_sidecar(
             "lm-head bit-plane width {w} unsupported by the streaming decoder (need 1..=6)",
         )));
     }
-    if hidden * w % 8 != 0 {
+    if !(hidden * w).is_multiple_of(8) {
         return Err(crate::RuntimeError::InvalidTensorData(format!(
             "hidden*w must be byte-aligned for row framing (hidden={hidden}, w={w})",
         )));
     }
-    if vocab % block_rows != 0 {
+    if !vocab.is_multiple_of(block_rows) {
         return Err(crate::RuntimeError::InvalidTensorData(
             "vocab must be a multiple of block_rows".into(),
         ));
