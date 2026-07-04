@@ -1,9 +1,8 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
-//! Spawn `rllm` subcommands as child processes, measure wall-clock time and
-//! peak resident set size (RSS), and parse the metrics RLLM prints on stdout.
+//! Spawn `spissa` subcommands as child processes, measure wall-clock time and
+//! peak resident set size (RSS), and parse the metrics Spissa prints on stdout.
 //!
 //! RSS is captured from the child's `rusage` (via `wait4` on Unix) so the
 //! harness no longer depends on the macOS-only `/usr/bin/time -l` wrapper.
@@ -14,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
-/// Result of one child `rllm run` invocation.
+/// Result of one child `spissa run` invocation.
 pub struct Outcome {
     pub exit_code: i32,
     pub real_seconds: f64,
@@ -67,12 +66,12 @@ impl Outcome {
     }
 }
 
-/// Resolve the running `rllm` binary so the harness benchmarks itself.
+/// Resolve the running `spissa` binary so the harness benchmarks itself.
 pub fn rllm_bin() -> Result<PathBuf> {
     std::env::current_exe().context("failed to resolve current rllm executable")
 }
 
-/// Spawn `rllm <args>`, stream its output, and return the captured outcome.
+/// Spawn `spissa <args>`, stream its output, and return the captured outcome.
 pub fn run_child(bin: &Path, args: &[String]) -> Result<Outcome> {
     println!("$ {} {}", bin.display(), args.join(" "));
     let started = Instant::now();
@@ -100,7 +99,7 @@ pub fn run_child(bin: &Path, args: &[String]) -> Result<Outcome> {
     })
 }
 
-/// Spawn `rllm <args>` and fail if it exits non-zero (used for pack/verify).
+/// Spawn `spissa <args>` and fail if it exits non-zero (used for pack/verify).
 pub fn run_checked(bin: &Path, args: &[String]) -> Result<()> {
     let outcome = run_child(bin, args)?;
     if outcome.exit_code != 0 {

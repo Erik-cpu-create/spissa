@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Buffered bit-reader for fast canonical-Huffman decode.
 //!
@@ -17,14 +16,19 @@
 /// `BitReader`), so the final symbols decode identically.
 pub struct BufferedBitReader<'a> {
     bytes: &'a [u8],
-    pos: usize,   // index of the next byte to pull into the window
-    bitbuf: u64,  // buffered bits, next bit to read at the MSB (bit 63)
-    bitcnt: u32,  // number of valid bits currently in `bitbuf` (0..=64)
+    pos: usize,  // index of the next byte to pull into the window
+    bitbuf: u64, // buffered bits, next bit to read at the MSB (bit 63)
+    bitcnt: u32, // number of valid bits currently in `bitbuf` (0..=64)
 }
 
 impl<'a> BufferedBitReader<'a> {
     pub fn new(bytes: &'a [u8]) -> Self {
-        let mut r = Self { bytes, pos: 0, bitbuf: 0, bitcnt: 0 };
+        let mut r = Self {
+            bytes,
+            pos: 0,
+            bitbuf: 0,
+            bitcnt: 0,
+        };
         r.refill();
         r
     }

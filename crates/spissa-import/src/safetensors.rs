@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Safetensors format parser
 //!
@@ -10,9 +9,9 @@
 //! - N bytes: JSON header (metadata about tensors)
 //! - Rest: raw tensor data
 
-use spissa_container::{DType, ModelConfigMetadata, TensorMeta};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use spissa_container::{DType, ModelConfigMetadata, TensorMeta};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -103,6 +102,8 @@ struct RopeScalingConfig {
     rope_type: Option<String>,
     /// Phi-3 LongRoPE per-dimension factors.
     short_factor: Option<Vec<f32>>,
+    /// Parsed from config for completeness; not yet consumed by the runtime.
+    #[allow(dead_code)]
     long_factor: Option<Vec<f32>>,
 }
 
@@ -186,9 +187,11 @@ pub fn model_config_metadata_from_json_str(json: &str) -> Result<ModelConfigMeta
         linear_num_value_heads: dims.linear_num_value_heads,
         linear_conv_kernel_dim: dims.linear_conv_kernel_dim,
         attn_output_gate: dims.attn_output_gate,
-        partial_rotary_factor: dims
-            .partial_rotary_factor
-            .or_else(|| dims.rope_parameters.as_ref().and_then(|r| r.partial_rotary_factor)),
+        partial_rotary_factor: dims.partial_rotary_factor.or_else(|| {
+            dims.rope_parameters
+                .as_ref()
+                .and_then(|r| r.partial_rotary_factor)
+        }),
         mrope_section: dims
             .rope_parameters
             .as_ref()
@@ -319,7 +322,7 @@ impl SafetensorsReader {
         Ok(data)
     }
 
-    /// Convert safetensors dtype to RLLM DType
+    /// Convert safetensors dtype to Spissa DType
     pub fn convert_dtype(dtype: &str) -> Result<DType> {
         match dtype {
             "F16" => Ok(DType::Fp16),
@@ -338,7 +341,7 @@ impl SafetensorsReader {
         }
     }
 
-    /// Convert tensor metadata to RLLM TensorMeta
+    /// Convert tensor metadata to Spissa TensorMeta
     pub fn to_rllm_meta(&mut self, name: &str) -> Result<TensorMeta> {
         let meta = self
             .header
@@ -428,7 +431,7 @@ impl ShardedSafetensorsReader {
         self.shards[idx].read_tensor(name)
     }
 
-    /// Convert a tensor's metadata to RLLM `TensorMeta` (hashes the data).
+    /// Convert a tensor's metadata to Spissa `TensorMeta` (hashes the data).
     pub fn to_rllm_meta(&mut self, name: &str) -> Result<TensorMeta> {
         let idx = *self
             .name_to_shard
@@ -538,7 +541,11 @@ mod tests {
         let idx = "../../models/gemma-3-4b-it/model.safetensors.index.json";
         let mut r = ShardedSafetensorsReader::open_index(idx).expect("open index");
         let names = r.list_tensors();
-        assert!(names.len() > 800, "expected ~883 tensors, got {}", names.len());
+        assert!(
+            names.len() > 800,
+            "expected ~883 tensors, got {}",
+            names.len()
+        );
         // text decoder is nested under language_model.*; embeddings are [vocab, hidden]
         let meta = r
             .to_rllm_meta("language_model.model.embed_tokens.weight")
@@ -548,7 +555,11 @@ mod tests {
         let q = r
             .to_rllm_meta("language_model.model.layers.0.self_attn.q_proj.weight")
             .expect("q_proj meta");
-        assert_eq!(q.shape, vec![2048, 2560], "gemma3 q_proj shape (8*256, 2560)");
+        assert_eq!(
+            q.shape,
+            vec![2048, 2560],
+            "gemma3 q_proj shape (8*256, 2560)"
+        );
         // the Gemma-specific QK-norm tensor exists
         assert!(r
             .to_rllm_meta("language_model.model.layers.0.self_attn.q_norm.weight")
@@ -604,8 +615,7 @@ mod tests {
         .unwrap();
         assert_eq!(non_linear.rope_scaling_factor, None);
 
-        let absent =
-            model_config_metadata_from_json_str(r#"{"model_type":"llama"}"#).unwrap();
+        let absent = model_config_metadata_from_json_str(r#"{"model_type":"llama"}"#).unwrap();
         assert_eq!(absent.rope_scaling_factor, None);
     }
 }

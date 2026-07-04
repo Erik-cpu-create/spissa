@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::{Result, RuntimeError};
 
@@ -685,7 +684,7 @@ mod tests {
         let q: Vec<f32> = (0..config.seq_len * 2 * config.head_dim)
             .map(|i| (i as f32 * 0.1) - 1.0)
             .collect();
-        let k: Vec<f32> = (0..config.seq_len * 1 * config.head_dim)
+        let k: Vec<f32> = (0..config.seq_len * config.head_dim)
             .map(|i| 0.5 - (i as f32 * 0.05))
             .collect();
 
@@ -722,8 +721,10 @@ mod tests {
             let scaled = (config.position_offset + pos) as f32 / factor;
             let row = pos * config.head_dim;
             for pair in 0..half {
-                let inv_freq =
-                    1.0 / config.base.powf((2 * pair) as f32 / config.rotary_dim as f32);
+                let inv_freq = 1.0
+                    / config
+                        .base
+                        .powf((2 * pair) as f32 / config.rotary_dim as f32);
                 let angle = scaled * inv_freq;
                 let (cos, sin) = (angle.cos(), angle.sin());
                 for buf in [&mut expected_q, &mut expected_k] {

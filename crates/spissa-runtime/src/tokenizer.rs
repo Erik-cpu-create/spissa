@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::{Result, RuntimeError};
 use spissa_container::TokenizerMetadata;
@@ -59,7 +58,9 @@ impl SpissaTokenizer {
             _ => PreTokenizerScheme::ByteLevel,
         };
         let add_bos_id = if metadata.add_bos_token == Some(true) {
-            metadata.bos_token_id.and_then(|id| usize::try_from(id).ok())
+            metadata
+                .bos_token_id
+                .and_then(|id| usize::try_from(id).ok())
         } else {
             None
         };
@@ -87,7 +88,9 @@ impl SpissaTokenizer {
             .id_to_token
             .iter()
             .enumerate()
-            .filter(|(_, token)| is_raw_special_token(token) && byte_fallback_value(token).is_none())
+            .filter(|(_, token)| {
+                is_raw_special_token(token) && byte_fallback_value(token).is_none()
+            })
             .map(|(id, token)| (token.clone(), id))
             .collect();
         special_token_candidates.sort_by(|(left_text, left_id), (right_text, right_id)| {
@@ -244,19 +247,16 @@ impl SpissaTokenizer {
             return Ok(());
         }
         let mut parts: Vec<String> = encoded.chars().map(|ch| ch.to_string()).collect();
-        loop {
-            let Some((merge_index, _rank)) = parts
-                .windows(2)
-                .enumerate()
-                .filter_map(|(idx, pair)| {
-                    self.bpe_ranks
-                        .get(&(pair[0].clone(), pair[1].clone()))
-                        .map(|rank| (idx, *rank))
-                })
-                .min_by_key(|(_, rank)| *rank)
-            else {
-                break;
-            };
+        while let Some((merge_index, _rank)) = parts
+            .windows(2)
+            .enumerate()
+            .filter_map(|(idx, pair)| {
+                self.bpe_ranks
+                    .get(&(pair[0].clone(), pair[1].clone()))
+                    .map(|rank| (idx, *rank))
+            })
+            .min_by_key(|(_, rank)| *rank)
+        {
             let merged = format!("{}{}", parts[merge_index], parts[merge_index + 1]);
             parts.splice(merge_index..=merge_index + 1, [merged]);
         }
@@ -349,7 +349,7 @@ impl SpissaTokenizer {
                 text.push_str(&String::from_utf8_lossy(&byte_run));
                 byte_run.clear();
             }
-            text.push_str(&self.surface(token_id)?);
+            text.push_str(self.surface(token_id)?);
         }
         if !byte_run.is_empty() {
             text.push_str(&String::from_utf8_lossy(&byte_run));
@@ -358,12 +358,15 @@ impl SpissaTokenizer {
     }
 
     fn surface(&self, token_id: usize) -> Result<&str> {
-        self.id_to_text.get(token_id).map(String::as_str).ok_or_else(|| {
-            RuntimeError::InvalidTensorData(format!(
-                "token id {token_id} is outside tokenizer vocab size {}",
-                self.id_to_text.len()
-            ))
-        })
+        self.id_to_text
+            .get(token_id)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                RuntimeError::InvalidTensorData(format!(
+                    "token id {token_id} is outside tokenizer vocab size {}",
+                    self.id_to_text.len()
+                ))
+            })
     }
 }
 
@@ -584,7 +587,11 @@ mod tests {
     fn greedy_encode_and_decode_use_literal_token_surfaces() {
         let tokenizer = SpissaTokenizer::from_metadata(&meta(
             "hf-wordlevel",
-            vec!["Hello".to_string(), " world".to_string(), "<unk>".to_string()],
+            vec![
+                "Hello".to_string(),
+                " world".to_string(),
+                "<unk>".to_string(),
+            ],
             Vec::new(),
             Some(2),
         ))
@@ -640,7 +647,10 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(tokenizer.token_id_for_raw_token("<|begin_of_text|>"), Some(1));
+        assert_eq!(
+            tokenizer.token_id_for_raw_token("<|begin_of_text|>"),
+            Some(1)
+        );
         assert_eq!(tokenizer.token_id_for_raw_token("<|eot_id|>"), Some(2));
         assert_eq!(tokenizer.token_id_for_raw_token("<missing>"), None);
     }
@@ -663,7 +673,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            tokenizer.encode("?<|im_end|>\n<|im_start|>assistant\n").unwrap(),
+            tokenizer
+                .encode("?<|im_end|>\n<|im_start|>assistant\n")
+                .unwrap(),
             vec![2, 1, 5, 0, 4, 5]
         );
     }
@@ -702,7 +714,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            tokenizer.encode("?<|im_end|>\n<|im_start|>assistant\n").unwrap(),
+            tokenizer
+                .encode("?<|im_end|>\n<|im_start|>assistant\n")
+                .unwrap(),
             vec![2, 1, 8, 0, 4, 7, 8]
         );
     }
@@ -761,7 +775,7 @@ mod tests {
         // 'é' (U+00E9) is not a vocab piece → bytes C3 A9 → tokens 11, 12.
         let ids = tokenizer.encode("é").unwrap();
         assert_eq!(ids, vec![1, 11, 12]); // bos + byte fallback
-        // Decode reassembles the byte run into UTF-8.
+                                          // Decode reassembles the byte run into UTF-8.
         assert_eq!(tokenizer.decode(&[11, 12]).unwrap(), "é");
     }
 

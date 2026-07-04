@@ -1,8 +1,7 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
-//! RLLM file reader
+//! Spissa file reader
 
 use crate::error::{ContainerError, Result};
 use crate::header::SpissaHeader;
@@ -95,7 +94,10 @@ impl SpissaReader {
         // `Mmap::lock` is `#[cfg(unix)]`; on non-unix targets we report the
         // unsupported request and continue (the mapping still works, just
         // without hard residency).
-        if std::env::var("SPISSA_MLOCK").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("SPISSA_MLOCK")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
             #[cfg(unix)]
             match mmap.lock() {
                 Ok(()) => {}
@@ -329,7 +331,7 @@ mod tests {
 
         // Read
         let reader = SpissaReader::open(&temp).unwrap();
-        assert_eq!(reader.header().version, crate::RLLM_VERSION);
+        assert_eq!(reader.header().version, crate::SPISSA_VERSION);
         assert_eq!(reader.metadata().model_name, "test-model");
         assert_eq!(reader.list_tensors().len(), 1);
         assert_eq!(reader.list_tensors()[0].name, "test.weight");

@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — research/test instrument (REEFORM).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 // Proves a delta-`.spsa` reconstructs BIT-EXACT through the real runtime loader (the same path
 // `spissa chat` uses): open the delta `.spsa` (the loader opens its base + rebuilds W_ft = W_base
@@ -14,8 +14,8 @@ use spissa_runtime::LazySpissaModel;
 fn main() -> Result<()> {
     let a: Vec<String> = std::env::args().collect();
     let (delta_spsa, original) = (&a[1], &a[2]);
-    let mut model = LazySpissaModel::open(delta_spsa)
-        .map_err(|e| anyhow::anyhow!("open delta .spsa: {e}"))?;
+    let mut model =
+        LazySpissaModel::open(delta_spsa).map_err(|e| anyhow::anyhow!("open delta .spsa: {e}"))?;
     let mut orig = SafetensorsReader::open(original)?;
     let orig_names: std::collections::HashSet<String> =
         orig.list_tensors().iter().map(|s| s.to_string()).collect();

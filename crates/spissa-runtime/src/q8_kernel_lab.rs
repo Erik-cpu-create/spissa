@@ -1,6 +1,7 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
+#![allow(clippy::needless_range_loop)] // experimental kernel lab: index loops mirror the GEMM index math
+#![allow(dead_code)] // experimental lab: several kernels are aarch64-only or bench-only
 
 use serde::Serialize;
 #[cfg(target_arch = "aarch64")]
@@ -325,15 +326,27 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         // current output2 panel run twice. Both pack outside the timed loop.
         let q8_quad = deterministic_q8_row_quad_blocks(config.blocks_per_row);
         let quad_pair_bytes = config.blocks_per_row * 2 * 34;
-        let weight_panel0 = pack_weight_panel_pair_lab(&q8_quad[..quad_pair_bytes], config.blocks_per_row);
-        let weight_panel1 = pack_weight_panel_pair_lab(&q8_quad[quad_pair_bytes..], config.blocks_per_row);
+        let weight_panel0 =
+            pack_weight_panel_pair_lab(&q8_quad[..quad_pair_bytes], config.blocks_per_row);
+        let weight_panel1 =
+            pack_weight_panel_pair_lab(&q8_quad[quad_pair_bytes..], config.blocks_per_row);
 
         // Reference 4-row output = baseline on each pair, interleaved [t][w0..w3].
         let ref_p0 = baseline_i8_dot32_output2_batch4(
-            &q8_quad[..quad_pair_bytes], scale, &input, config.batch, config.in_features, config.blocks_per_row,
+            &q8_quad[..quad_pair_bytes],
+            scale,
+            &input,
+            config.batch,
+            config.in_features,
+            config.blocks_per_row,
         );
         let ref_p1 = baseline_i8_dot32_output2_batch4(
-            &q8_quad[quad_pair_bytes..], scale, &input, config.batch, config.in_features, config.blocks_per_row,
+            &q8_quad[quad_pair_bytes..],
+            scale,
+            &input,
+            config.batch,
+            config.in_features,
+            config.blocks_per_row,
         );
         let mut ref4 = vec![0f32; config.batch * 4];
         for t in 0..config.batch {
@@ -346,12 +359,26 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         // Honest 4-row baseline: the current panel kernel run twice.
         let (output2x2_ns, _o) = time_variant(config.iters, config.batch * 4, || unsafe {
             let a = reefuse_smmla_panel_output2(
-                &weight_panel0, &q8_quad[..quad_pair_bytes], &act_panel, &act_i8, &act_scales,
-                scale, config.batch, config.in_features, config.blocks_per_row,
+                &weight_panel0,
+                &q8_quad[..quad_pair_bytes],
+                &act_panel,
+                &act_i8,
+                &act_scales,
+                scale,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
             );
             let b = reefuse_smmla_panel_output2(
-                &weight_panel1, &q8_quad[quad_pair_bytes..], &act_panel, &act_i8, &act_scales,
-                scale, config.batch, config.in_features, config.blocks_per_row,
+                &weight_panel1,
+                &q8_quad[quad_pair_bytes..],
+                &act_panel,
+                &act_i8,
+                &act_scales,
+                scale,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
             );
             [a, b].concat()
         });
@@ -365,8 +392,16 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
 
         let (elapsed_ns, output) = time_variant(config.iters, config.batch * 4, || unsafe {
             reefuse_smmla_panel_output4(
-                &weight_panel0, &weight_panel1, &q8_quad, &act_panel, &act_i8, &act_scales,
-                scale, config.batch, config.in_features, config.blocks_per_row,
+                &weight_panel0,
+                &weight_panel1,
+                &q8_quad,
+                &act_panel,
+                &act_i8,
+                &act_scales,
+                scale,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
             )
         });
         results.push(Q8KernelBenchResult {
@@ -382,13 +417,20 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         let q8_oct = deterministic_q8_row_oct_blocks(config.blocks_per_row);
         let pb = config.blocks_per_row * 2 * 34;
         let wp: Vec<Vec<i8>> = (0..4)
-            .map(|i| pack_weight_panel_pair_lab(&q8_oct[i * pb..(i + 1) * pb], config.blocks_per_row))
+            .map(|i| {
+                pack_weight_panel_pair_lab(&q8_oct[i * pb..(i + 1) * pb], config.blocks_per_row)
+            })
             .collect();
         // Reference 8-row output via baseline on each pair, interleaved.
         let mut ref8 = vec![0f32; config.batch * 8];
         for i in 0..4 {
             let rp = baseline_i8_dot32_output2_batch4(
-                &q8_oct[i * pb..(i + 1) * pb], scale, &input, config.batch, config.in_features, config.blocks_per_row,
+                &q8_oct[i * pb..(i + 1) * pb],
+                scale,
+                &input,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
             );
             for t in 0..config.batch {
                 ref8[t * 8 + i * 2] = rp[t * 2];
@@ -399,8 +441,15 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
             let mut v = Vec::new();
             for i in 0..4 {
                 v.push(reefuse_smmla_panel_output2(
-                    &wp[i], &q8_oct[i * pb..(i + 1) * pb], &act_panel, &act_i8, &act_scales,
-                    scale, config.batch, config.in_features, config.blocks_per_row,
+                    &wp[i],
+                    &q8_oct[i * pb..(i + 1) * pb],
+                    &act_panel,
+                    &act_i8,
+                    &act_scales,
+                    scale,
+                    config.batch,
+                    config.in_features,
+                    config.blocks_per_row,
                 ));
             }
             v.concat()
@@ -414,8 +463,18 @@ pub fn run_suite(config: Q8KernelBenchConfig) -> Q8KernelBenchReport {
         });
         let (elapsed_ns, output) = time_variant(config.iters, config.batch * 8, || unsafe {
             reefuse_smmla_panel_output8(
-                &wp[0], &wp[1], &wp[2], &wp[3], &q8_oct, &act_panel, &act_i8, &act_scales,
-                scale, config.batch, config.in_features, config.blocks_per_row,
+                &wp[0],
+                &wp[1],
+                &wp[2],
+                &wp[3],
+                &q8_oct,
+                &act_panel,
+                &act_i8,
+                &act_scales,
+                scale,
+                config.batch,
+                config.in_features,
+                config.blocks_per_row,
             )
         });
         results.push(Q8KernelBenchResult {
@@ -1972,10 +2031,8 @@ fn pack_w_interleaved_x4(q8_quad: &[u8], blocks_per_row: usize) -> (Vec<i8>, Vec
     for b in 0..blocks_per_row {
         for (j, row) in (0..4).enumerate() {
             let blk = row * row_stride + b * 34;
-            scales[b * 4 + j] = crate::tensor::fp16_to_f32(u16::from_le_bytes([
-                q8_quad[blk],
-                q8_quad[blk + 1],
-            ]));
+            scales[b * 4 + j] =
+                crate::tensor::fp16_to_f32(u16::from_le_bytes([q8_quad[blk], q8_quad[blk + 1]]));
             let qs = &q8_quad[blk + 2..blk + 34];
             for seg in 0..8 {
                 for k in 0..4 {
@@ -2609,7 +2666,10 @@ mod tests {
     #[ignore]
     fn r123_output4_microbench() {
         let report = run_suite(Q8KernelBenchConfig::default());
-        println!("\n== R123 panel ILP microbench (batch={} in={} iters={}) ==", report.batch, report.in_features, report.iters);
+        println!(
+            "\n== R123 panel ILP microbench (batch={} in={} iters={}) ==",
+            report.batch, report.in_features, report.iters
+        );
         for r in &report.results {
             if r.variant.contains("panel") || r.variant.contains("reebundle") {
                 println!(

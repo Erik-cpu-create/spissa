@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::loader::{
     chunk_range_for_original_bytes, codec_for_id, verify_compressed_chunk_checksum,
@@ -286,14 +285,14 @@ impl LazySpissaModel {
                     let mut ok = Vec::with_capacity(shard.len());
                     for chunk in shard {
                         let start = chunk.file_offset as usize;
-                        let end = start.checked_add(chunk.compressed_size as usize).ok_or_else(
-                            || {
+                        let end = start
+                            .checked_add(chunk.compressed_size as usize)
+                            .ok_or_else(|| {
                                 RuntimeError::InvalidTensorData(format!(
                                     "chunk {} span overflow",
                                     chunk.chunk_id
                                 ))
-                            },
-                        )?;
+                            })?;
                         let slice = bytes.get(start..end).ok_or_else(|| {
                             RuntimeError::InvalidTensorData(format!(
                                 "chunk {} out of file bounds",
@@ -524,10 +523,15 @@ impl LazySpissaModel {
                 ))
             })?;
             let base_bytes = base.decode_tensor_raw_bytes(name)?;
-            let cb = self.delta_codebook.as_ref().ok_or_else(|| {
-                RuntimeError::InvalidTensorData("missing decode table".into())
-            })?;
-            return Ok(rtc_codec::delta::decode_tensor_bx(&encoded, &base_bytes, cb));
+            let cb = self
+                .delta_codebook
+                .as_ref()
+                .ok_or_else(|| RuntimeError::InvalidTensorData("missing decode table".into()))?;
+            return Ok(rtc_codec::delta::decode_tensor_bx(
+                &encoded,
+                &base_bytes,
+                cb,
+            ));
         }
         crate::loader::decode_tensor_bytes(&self.reader, &tensor_meta)
     }
@@ -944,7 +948,8 @@ impl LazySpissaModel {
             .chunks_by_id
             .iter()
             .filter(|(id, c)| {
-                c.codec_id == rtc_codec::delta::CODEC_DELTA_V1 && !self.decoded_cache.contains_key(id)
+                c.codec_id == rtc_codec::delta::CODEC_DELTA_V1
+                    && !self.decoded_cache.contains_key(id)
             })
             .map(|(&id, c)| {
                 let name = self
@@ -962,7 +967,11 @@ impl LazySpissaModel {
                 .ok()
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .filter(|&n| n > 0)
-                .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+                .unwrap_or_else(|| {
+                    std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(4)
+                })
                 .min(nd)
                 .max(1);
             let part = nd.div_ceil(nthreads);
@@ -993,7 +1002,11 @@ impl LazySpissaModel {
                                     let base_bytes = base.decode_tensor_bytes_shared(name)?;
                                     out.push((
                                         *id,
-                                        rtc_codec::delta::decode_tensor_bx(&encoded, &base_bytes, cb),
+                                        rtc_codec::delta::decode_tensor_bx(
+                                            &encoded,
+                                            &base_bytes,
+                                            cb,
+                                        ),
                                     ));
                                 }
                                 Ok(out)
@@ -1031,7 +1044,11 @@ impl LazySpissaModel {
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .filter(|&n| n > 0)
-            .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+            })
             .min(jobs.len())
             .max(1);
         let part = jobs.len().div_ceil(nthreads);
@@ -1475,7 +1492,9 @@ fn prewarm_thread_count() -> usize {
             }
         }
     }
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 pub(crate) fn runtime_f32_bytes_for_tensor(tensor: &TensorMeta) -> Result<usize> {
@@ -1505,8 +1524,8 @@ pub(crate) fn runtime_f32_bytes_for_tensor(tensor: &TensorMeta) -> Result<usize>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spissa_container::{DType, SpissaWriter};
     use sha2::{Digest, Sha256};
+    use spissa_container::{DType, SpissaWriter};
 
     fn sha256_array(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()
@@ -1535,7 +1554,10 @@ mod tests {
             .unwrap()
             .expect("embedding is contiguous-raw");
         std::fs::write("/tmp/rllm-bf16-sample.bin", &bytes).unwrap();
-        eprintln!("wrote {} bf16 bytes to /tmp/rllm-bf16-sample.bin", bytes.len());
+        eprintln!(
+            "wrote {} bf16 bytes to /tmp/rllm-bf16-sample.bin",
+            bytes.len()
+        );
     }
 
     /// Measure the ACTUAL q8_0 quantization error of a packed model against its
@@ -1809,7 +1831,9 @@ mod tests {
             chunk_count: 1,
             chunk_start_index: 0,
         });
-        writer.write_chunk(0, "rtc-raw-v1", &data, &data, 0).unwrap();
+        writer
+            .write_chunk(0, "rtc-raw-v1", &data, &data, 0)
+            .unwrap();
         writer.finalize().unwrap();
 
         // (a) VerifyOnce, chunks NOT pre-verified: with_raw_tensor runs the
@@ -1818,7 +1842,10 @@ mod tests {
             let mut model = LazySpissaModel::open(&path).unwrap();
             model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
             let got = model.with_raw_tensor(0, |bytes| Ok(bytes.len())).unwrap();
-            assert_eq!(got, None, "bad tensor checksum must be caught when chunks are unverified");
+            assert_eq!(
+                got, None,
+                "bad tensor checksum must be caught when chunks are unverified"
+            );
         }
 
         // (b) VerifyOnce, chunk pre-verified (as prefill does): the bytes are
@@ -1828,7 +1855,9 @@ mod tests {
             let mut model = LazySpissaModel::open(&path).unwrap();
             model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
             let mut budget = MemoryBudget::new(usize::MAX);
-            model.with_raw_chunk(0, &mut budget, |bytes, _b| Ok(bytes.len())).unwrap();
+            model
+                .with_raw_chunk(0, &mut budget, |bytes, _b| Ok(bytes.len()))
+                .unwrap();
             let got = model.with_raw_tensor(0, |bytes| Ok(bytes.len())).unwrap();
             assert_eq!(
                 got,
@@ -1843,9 +1872,14 @@ mod tests {
             let mut model = LazySpissaModel::open(&path).unwrap();
             model.set_rama_integrity_mode(RamaIntegrityMode::Strict);
             let mut budget = MemoryBudget::new(usize::MAX);
-            model.with_raw_chunk(0, &mut budget, |bytes, _b| Ok(bytes.len())).unwrap();
+            model
+                .with_raw_chunk(0, &mut budget, |bytes, _b| Ok(bytes.len()))
+                .unwrap();
             let got = model.with_raw_tensor(0, |bytes| Ok(bytes.len())).unwrap();
-            assert_eq!(got, None, "Strict must re-verify the whole tensor on every call");
+            assert_eq!(
+                got, None,
+                "Strict must re-verify the whole tensor on every call"
+            );
         }
 
         std::fs::remove_file(&path).ok();
@@ -1870,12 +1904,18 @@ mod tests {
             chunk_count: 1,
             chunk_start_index: 0,
         });
-        writer.write_chunk(0, "rtc-raw-v1", &data, &data, 0).unwrap();
+        writer
+            .write_chunk(0, "rtc-raw-v1", &data, &data, 0)
+            .unwrap();
         writer.finalize().unwrap();
 
         let mut model = LazySpissaModel::open(&path).unwrap();
         model.set_rama_integrity_mode(RamaIntegrityMode::VerifyOnce);
-        assert_eq!(model.prewarm_chunk_integrity().unwrap(), 1, "verifies the one chunk");
+        assert_eq!(
+            model.prewarm_chunk_integrity().unwrap(),
+            1,
+            "verifies the one chunk"
+        );
         // Idempotent: nothing left to verify on a second call.
         assert_eq!(model.prewarm_chunk_integrity().unwrap(), 0);
         // Bridge active: with_raw_tensor skips the (wrong) whole-tensor hash.

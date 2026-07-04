@@ -1,12 +1,12 @@
 <!--
-Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-PROPRIETARY & CONFIDENTIAL — see LICENSE. Do not distribute, publish, or disclose.
+SPDX-License-Identifier: MIT
+Copyright (c) 2026 Rama Erik Esprada
 -->
 
 # REEFORM — Structural Lossless Codec for LLM Weights
 
 **PRD / Research Charter** · v0.1 (draft) · Owner: **Rama Erik Esprada** · Project: **Spissa**
-Status: **research, not yet started** · Classification: **CONFIDENTIAL — proprietary IP**
+Status: **research, not yet started**
 
 > `REEFORM` is a working codename (REE-lineage + *transform/reform*). Final name is decided
 > if/when the method proves out.
@@ -165,14 +165,12 @@ Per-experiment metrics:
 
 ---
 
-## 8. IP & secrecy
+## 8. IP & privacy
 
-- Proprietary to **Rama Erik Esprada**. Repo is private; license is All-Rights-Reserved.
+- Authored by **Rama Erik Esprada**. Spissa is open source under the [MIT License](../LICENSE).
 - **No method, code, parameter, or result is ever sent to any external/web service.** All probes
-  run **locally** on local weights. Web search (if ever used) stays on *generic public concepts*,
-  never our specifics.
-- Paper is drafted internally; publication timing is the Owner's decision (and a deliberate
-  disclosure choice, since publishing forfeits trade-secret protection).
+  run **locally** on local weights. Web search (if ever used) stays on *generic public concepts*.
+- Any paper is drafted openly; publication timing is the author's decision.
 
 ---
 

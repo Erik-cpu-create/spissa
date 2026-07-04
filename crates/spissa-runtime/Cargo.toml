@@ -3,7 +3,7 @@ name = "spissa-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Runtime tensor loading and toy inference primitives for RLLM"
+description = "Runtime tensor loading and toy inference primitives for Spissa"
 
 [dependencies]
 spissa-container = { path = "../spissa-container" }

@@ -1,10 +1,9 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::safetensors::{Result, SafetensorsError};
-use spissa_container::TokenizerMetadata;
 use serde_json::Value;
+use spissa_container::TokenizerMetadata;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

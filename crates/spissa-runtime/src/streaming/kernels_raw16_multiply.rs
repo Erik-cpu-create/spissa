@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // Multiply-into raw fp16 kernels + raw-16bit->f32 / fp16 weight-at helpers.
 // Split out of kernels_raw16.rs (R169); include!d into streaming/mod.rs.
@@ -580,6 +579,7 @@ mod r121_multiply_into_tests {
             .collect();
         let mut max = 0.0f32;
         let mut worst = (0, 0);
+        #[allow(clippy::needless_range_loop)] // b,f compute a flat index b*out_features+f across buffers
         for b in 0..batch {
             for f in 0..out_features {
                 let idx = b * out_features + f;

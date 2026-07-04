@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — research instrument (REEFORM, SECRET IP).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 // Stage-B realisation probe: how big is a base-exponent-conditioned delta coder in REAL bytes?
 // Partition the zigzag Δ by the base bf16 exponent (the decoder recomputes it for free from the

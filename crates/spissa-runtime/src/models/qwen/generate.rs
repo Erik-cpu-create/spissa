@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Qwen3.5 per-layer forward blocks.
 //!
@@ -20,7 +19,9 @@ use crate::models::qwen::model::{
     GatedDeltaNetState, PreparedQwenTransformer, QwenBuildConfig, QwenLayerParams, QwenLayerTensors,
 };
 use crate::ops::{add_inplace, rms_norm, silu_inplace};
-use crate::rotary::{apply_llama_rotary_inplace, KvAttentionConfig, KvCache, RotaryEmbeddingConfig};
+use crate::rotary::{
+    apply_llama_rotary_inplace, KvAttentionConfig, KvCache, RotaryEmbeddingConfig,
+};
 use crate::{
     scaled_dot_product_attention_with_cache, streaming_tile_linear_from_model, LazySpissaModel,
     MemoryBudget, Result, RuntimeError, StreamingLinearConfig, StreamingTileLinearConfig,
@@ -266,7 +267,11 @@ pub fn qwen_gated_attention_block(
     // q_proj emits a PER-HEAD [query(head_dim) ‖ gate(head_dim)] split when
     // attn_output_gate is set: view(.., num_heads, 2*head_dim).chunk(2, dim=-1). Repack
     // into contiguous query/gate matching the [h0, h1, ...] attention layout.
-    let qg_out = if cfg.attn_output_gate { 2 * q_out } else { q_out };
+    let qg_out = if cfg.attn_output_gate {
+        2 * q_out
+    } else {
+        q_out
+    };
     let qg = project(model, &tensors.q_proj, &x, seq_len, hidden, qg_out, budget)?;
     let mut query = vec![0.0f32; seq_len * q_out];
     let mut gate = vec![0.0f32; seq_len * q_out];
@@ -316,7 +321,15 @@ pub fn qwen_gated_attention_block(
         }
     }
 
-    let o = project(model, &tensors.o_proj, &attn, seq_len, q_out, hidden, budget)?;
+    let o = project(
+        model,
+        &tensors.o_proj,
+        &attn,
+        seq_len,
+        q_out,
+        hidden,
+        budget,
+    )?;
     add_inplace(&mut residual, &o)?;
 
     let mlp_in = rms_norm(
@@ -400,10 +413,42 @@ pub fn qwen_gated_deltanet_block(
 
     // Projections (whole sequence at once).
     let _pt = profile::tic();
-    let qkv = project(model, &tensors.in_proj_qkv, &x, seq_len, hidden, channels, budget)?;
-    let a = project(model, &tensors.in_proj_a, &x, seq_len, hidden, heads, budget)?;
-    let b = project(model, &tensors.in_proj_b, &x, seq_len, hidden, heads, budget)?;
-    let z = project(model, &tensors.in_proj_z, &x, seq_len, hidden, heads * vd, budget)?;
+    let qkv = project(
+        model,
+        &tensors.in_proj_qkv,
+        &x,
+        seq_len,
+        hidden,
+        channels,
+        budget,
+    )?;
+    let a = project(
+        model,
+        &tensors.in_proj_a,
+        &x,
+        seq_len,
+        hidden,
+        heads,
+        budget,
+    )?;
+    let b = project(
+        model,
+        &tensors.in_proj_b,
+        &x,
+        seq_len,
+        hidden,
+        heads,
+        budget,
+    )?;
+    let z = project(
+        model,
+        &tensors.in_proj_z,
+        &x,
+        seq_len,
+        hidden,
+        heads * vd,
+        budget,
+    )?;
     profile::toc(&profile::PROJ_NS, _pt);
 
     let mut out_heads = vec![0.0f32; seq_len * heads * vd];
@@ -428,7 +473,8 @@ pub fn qwen_gated_deltanet_block(
             }
 
             let beta = sigmoidf(b[t * heads + h]);
-            let g = (-params.a_log[h].exp() * softplusf(a[t * heads + h] + params.dt_bias[h])).exp();
+            let g =
+                (-params.a_log[h].exp() * softplusf(a[t * heads + h] + params.dt_bias[h])).exp();
             let s = &mut state.s[h * kd * vd..(h + 1) * kd * vd];
             delta_rule_head_step(s, &q_h, &k_h, v_h, beta, g, kd, vd, &mut o);
 
@@ -482,7 +528,9 @@ pub fn qwen_gated_deltanet_block(
 /// Guard: ensure the prepared transformer's dims are internally consistent.
 pub(crate) fn validate_prepared(prepared: &PreparedQwenTransformer) -> Result<()> {
     let cfg = &prepared.config;
-    if cfg.num_heads == 0 || cfg.num_kv_heads == 0 || !cfg.num_heads.is_multiple_of(cfg.num_kv_heads)
+    if cfg.num_heads == 0
+        || cfg.num_kv_heads == 0
+        || !cfg.num_heads.is_multiple_of(cfg.num_kv_heads)
     {
         return Err(RuntimeError::Shape(format!(
             "qwen attention heads invalid: num_heads={}, num_kv_heads={}",

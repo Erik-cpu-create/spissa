@@ -1,13 +1,12 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use anyhow::{Context, Result};
-use spissa_container::SpissaReader;
 use rtc_codec::{
     BitplaneCodec, DecodeMeta, HuffmanCodec, RansCodec, RawCodec, ReebornForCodec, RleCodec,
     TensorCodec,
 };
+use spissa_container::SpissaReader;
 use std::fs;
 use std::path::Path;
 

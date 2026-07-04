@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. CONFIDENTIAL RESEARCH (REEFORM).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 //! REEFORM Phase-1 amplifier: the fine-tune delta Δ = W_ft − W_base is exactly the object LoRA
 //! approximates as low-rank. The raw weights were NOT low-rank, but the DELTA should be. Test
@@ -34,7 +34,13 @@ fn h0(syms: &[u32]) -> f64 {
         *hist.entry(s).or_insert(0) += 1;
     }
     let n = syms.len() as f64;
-    -hist.values().map(|&c| { let p = c as f64 / n; p * p.log2() }).sum::<f64>()
+    -hist
+        .values()
+        .map(|&c| {
+            let p = c as f64 / n;
+            p * p.log2()
+        })
+        .sum::<f64>()
 }
 /// H(cur | left), row-aware. For a u16 delta the alphabet is huge, so quantise the context to
 /// the delta's high byte (captures magnitude) to keep the table small but meaningful.
@@ -103,18 +109,28 @@ fn lowrank_residual(w: &[f32], m: usize, n: usize, k: usize, iters: usize) -> Ve
 }
 fn read_u16(r: &mut SafetensorsReader, name: &str) -> anyhow::Result<Vec<u16>> {
     let b = r.read_tensor(name)?;
-    Ok((0..b.len() / 2).map(|i| u16::from_le_bytes([b[2 * i], b[2 * i + 1]])).collect())
+    Ok((0..b.len() / 2)
+        .map(|i| u16::from_le_bytes([b[2 * i], b[2 * i + 1]]))
+        .collect())
 }
 
 fn main() -> anyhow::Result<()> {
-    let base = std::env::args().nth(1).unwrap_or_else(|| "models/smollm2-135m/model.safetensors".into());
-    let ft = std::env::args().nth(2).unwrap_or_else(|| "models/downloads/smollm2-135m-instruct/model.safetensors".into());
-    let k: usize = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(32);
+    let base = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "models/smollm2-135m/model.safetensors".into());
+    let ft = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "models/downloads/smollm2-135m-instruct/model.safetensors".into());
+    let k: usize = std::env::args()
+        .nth(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32);
     eprintln!("[reeform-amplify] base={base} ft={ft} rank-k={k}");
     let mut rb = SafetensorsReader::open(&base)?;
     let mut rf = SafetensorsReader::open(&ft)?;
     let bnames: Vec<String> = rb.list_tensors().iter().map(|s| s.to_string()).collect();
-    let fset: std::collections::HashSet<String> = rf.list_tensors().iter().map(|s| s.to_string()).collect();
+    let fset: std::collections::HashSet<String> =
+        rf.list_tensors().iter().map(|s| s.to_string()).collect();
 
     // Pick the largest few square-ish matrices (skip embed/lm_head).
     let mut cand: Vec<(String, usize, usize)> = Vec::new();
@@ -123,7 +139,11 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
         let m = rb.to_rllm_meta(name)?;
-        if m.dtype != DType::Bf16 || m.shape.len() != 2 || name.contains("embed") || name.contains("lm_head") {
+        if m.dtype != DType::Bf16
+            || m.shape.len() != 2
+            || name.contains("embed")
+            || name.contains("lm_head")
+        {
             continue;
         }
         cand.push((name.clone(), m.shape[0] as usize, m.shape[1] as usize));
@@ -131,9 +151,16 @@ fn main() -> anyhow::Result<()> {
     cand.sort_by_key(|c| std::cmp::Reverse(c.1 * c.2));
     cand.truncate(6);
 
-    println!("\n=== REEFORM amplify (rank-{k}) — top {} matrices ===", cand.len());
-    println!("{:<28} {:>8} {:>8} {:>10} {:>8} {:>8}", "tensor", "H0(Δ)", "H1(Δ)", "lr-resid", "overhd", "lr-net");
-    let (mut w, mut s_d0, mut s_d1, mut s_lr, mut s_ov, mut mism) = (0u64, 0.0f64, 0.0, 0.0, 0.0, 0u64);
+    println!(
+        "\n=== REEFORM amplify (rank-{k}) — top {} matrices ===",
+        cand.len()
+    );
+    println!(
+        "{:<28} {:>8} {:>8} {:>10} {:>8} {:>8}",
+        "tensor", "H0(Δ)", "H1(Δ)", "lr-resid", "overhd", "lr-net"
+    );
+    let (mut w, mut s_d0, mut s_d1, mut s_lr, mut s_ov, mut mism) =
+        (0u64, 0.0f64, 0.0, 0.0, 0.0, 0u64);
     for (name, m, n) in &cand {
         let bb = read_u16(&mut rb, name)?;
         let fb = read_u16(&mut rf, name)?;
@@ -147,7 +174,7 @@ fn main() -> anyhow::Result<()> {
         let ftf: Vec<f32> = fb.iter().map(|&b| bf16_to_f32(b)).collect();
         let deltaf: Vec<f32> = (0..nn).map(|i| ftf[i] - basef[i]).collect();
         let resid = lowrank_residual(&deltaf, *m, *n, k, 24); // R = Δ − lowrank
-        // pred = base + lowrank(Δ) = ft − R ;  residual_int = ft_bits − bf16(pred)
+                                                              // pred = base + lowrank(Δ) = ft − R ;  residual_int = ft_bits − bf16(pred)
         let mut rint = Vec::with_capacity(nn);
         for i in 0..nn {
             let pred = f32_to_bf16(ftf[i] - resid[i]);
@@ -161,7 +188,11 @@ fn main() -> anyhow::Result<()> {
         let lr = h0(&rint);
         let ov = (k * (m + n)) as f64 * 16.0 / (m * n) as f64;
         let label = name.split('.').rev().take(2).collect::<Vec<_>>().join(".");
-        println!("{:<28} {d0:>8.3} {d1:>8.3} {lr:>10.3} {ov:>8.3} {:>8.3}", label.chars().take(28).collect::<String>(), lr + ov);
+        println!(
+            "{:<28} {d0:>8.3} {d1:>8.3} {lr:>10.3} {ov:>8.3} {:>8.3}",
+            label.chars().take(28).collect::<String>(),
+            lr + ov
+        );
         let c = nn as f64;
         s_d0 += d0 * c;
         s_d1 += d1 * c;
@@ -171,12 +202,26 @@ fn main() -> anyhow::Result<()> {
     }
     let wf = w as f64;
     println!("\n--- aggregate ---  (round-trip mismatches: {mism})");
-    println!("  int-delta floor   H0(Δ)        = {:.4} bit/weight", s_d0 / wf);
-    println!("  delta neighbour   H1(Δ)        = {:.4}  (Δ {:+.4})", s_d1 / wf, s_d1 / wf - s_d0 / wf);
-    println!("  low-rank-on-Δ     resid+ovhd   = {:.4}  (Δ {:+.4})", (s_lr + s_ov) / wf, (s_lr + s_ov - s_d0) / wf);
+    println!(
+        "  int-delta floor   H0(Δ)        = {:.4} bit/weight",
+        s_d0 / wf
+    );
+    println!(
+        "  delta neighbour   H1(Δ)        = {:.4}  (Δ {:+.4})",
+        s_d1 / wf,
+        s_d1 / wf - s_d0 / wf
+    );
+    println!(
+        "  low-rank-on-Δ     resid+ovhd   = {:.4}  (Δ {:+.4})",
+        (s_lr + s_ov) / wf,
+        (s_lr + s_ov - s_d0) / wf
+    );
     let best = (s_d1 / wf).min((s_lr + s_ov) / wf);
     if best < s_d0 / wf - 0.02 && mism == 0 {
-        println!("  ✅ amplifier beats int-delta by {:.4} bit/weight (LOSSLESS)", s_d0 / wf - best);
+        println!(
+            "  ✅ amplifier beats int-delta by {:.4} bit/weight (LOSSLESS)",
+            s_d0 / wf - best
+        );
     } else {
         println!("  ❌ no net amplifier here — int-delta (7.70) stands as the win; Δ mantissa is the wall too.");
     }

@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Qwen3.5-2B (qwen3_5 / Qwen3-Next-style) text-only model types.
 //!
@@ -94,9 +93,9 @@ pub struct QwenLayerParams {
     pub q_norm: Vec<f32>,
     pub k_norm: Vec<f32>,
     // linear attention: decay / gate / short-conv / gated-rmsnorm params
-    pub a_log: Vec<f32>,    // [linear_num_heads]
-    pub dt_bias: Vec<f32>,  // [linear_num_heads]
-    pub conv1d: Vec<f32>,   // [conv_channels * conv_kernel], depthwise
+    pub a_log: Vec<f32>,       // [linear_num_heads]
+    pub dt_bias: Vec<f32>,     // [linear_num_heads]
+    pub conv1d: Vec<f32>,      // [conv_channels * conv_kernel], depthwise
     pub linear_norm: Vec<f32>, // [linear_value_dim] gated-RMSNorm weight
 }
 

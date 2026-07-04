@@ -1,15 +1,14 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
-//! RLLM file header structures
+//! Spissa file header structures
 
 use serde::{Deserialize, Serialize};
 
 /// The file header for .spsa files
 ///
 /// Layout (44 bytes):
-/// - magic: 4 bytes ("RLLM")
+/// - magic: 4 bytes ("SPSA")
 /// - version: 4 bytes (u32, little-endian)
 /// - endian: 1 byte (0 = little-endian)
 /// - reserved: 3 bytes
@@ -19,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// - data_start_offset: 8 bytes (u64, file offset where chunk data starts)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpissaHeader {
-    /// Magic bytes: must be "RLLM"
+    /// Magic bytes: must be "SPSA"
     pub magic: [u8; 4],
     /// Format version
     pub version: u32,
@@ -45,7 +44,7 @@ impl SpissaHeader {
     pub fn new() -> Self {
         Self {
             magic: *crate::SPSA_MAGIC,
-            version: crate::RLLM_VERSION,
+            version: crate::SPISSA_VERSION,
             endian: 0, // little-endian
             reserved: [0; 3],
             metadata_offset: 0,
@@ -60,7 +59,7 @@ impl SpissaHeader {
         if &self.magic != crate::SPSA_MAGIC {
             return Err(crate::error::ContainerError::InvalidMagic);
         }
-        if self.version != crate::RLLM_VERSION {
+        if self.version != crate::SPISSA_VERSION {
             return Err(crate::error::ContainerError::UnsupportedVersion(
                 self.version,
             ));
@@ -131,7 +130,7 @@ mod tests {
         let decoded = SpissaHeader::from_bytes(&bytes);
 
         assert_eq!(decoded.magic, *crate::SPSA_MAGIC);
-        assert_eq!(decoded.version, crate::RLLM_VERSION);
+        assert_eq!(decoded.version, crate::SPISSA_VERSION);
         assert_eq!(decoded.endian, 0);
         assert_eq!(decoded.metadata_offset, 1024);
         assert_eq!(decoded.tensor_dir_offset, 2048);

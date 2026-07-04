@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::models::gemma::generate::{
     gemma_embed_input_streaming, gemma_lm_head_streaming, streaming_gemma_transformer_block,
@@ -41,7 +40,7 @@ impl Default for GemmaGenerationOptions {
     }
 }
 
-fn require_config<'a>(model: &'a LazySpissaModel) -> Result<&'a ModelConfigMetadata> {
+fn require_config(model: &LazySpissaModel) -> Result<&ModelConfigMetadata> {
     model.metadata().model_config.as_ref().ok_or_else(|| {
         RuntimeError::InvalidTensorData(
             "gemma generation requires persisted model_config metadata; repack with --config <config.json>"
@@ -52,10 +51,15 @@ fn require_config<'a>(model: &'a LazySpissaModel) -> Result<&'a ModelConfigMetad
 
 fn require_usize(field: &str, value: Option<u64>) -> Result<usize> {
     let value = value.ok_or_else(|| {
-        RuntimeError::InvalidTensorData(format!("gemma model_config is missing required field {field}"))
+        RuntimeError::InvalidTensorData(format!(
+            "gemma model_config is missing required field {field}"
+        ))
     })?;
-    usize::try_from(value)
-        .map_err(|_| RuntimeError::Shape(format!("gemma model_config field {field}={value} overflows usize")))
+    usize::try_from(value).map_err(|_| {
+        RuntimeError::Shape(format!(
+            "gemma model_config field {field}={value} overflows usize"
+        ))
+    })
 }
 
 /// Decode an RMSNorm weight and pre-bake Gemma's `(1 + weight)` convention so it
@@ -102,7 +106,11 @@ pub fn prepare_gemma_transformer_from_metadata(
         let query_pre_attn_scalar = config.query_pre_attn_scalar.unwrap_or(head_dim as f32);
         let max_seq_len = generation
             .max_seq_len
-            .or_else(|| config.max_position_embeddings.and_then(|v| usize::try_from(v).ok()))
+            .or_else(|| {
+                config
+                    .max_position_embeddings
+                    .and_then(|v| usize::try_from(v).ok())
+            })
             .unwrap_or(2048);
         let num_layers = require_usize("num_hidden_layers", config.num_hidden_layers)?;
         let build = GemmaBuildConfig {
@@ -138,8 +146,12 @@ pub fn prepare_gemma_transformer_from_metadata(
         embedding_weight.clone()
     };
 
-    let final_layernorm =
-        decode_norm_1plus(model, "model.norm.weight", build.hidden_size, &mut MemoryBudget::unbounded())?;
+    let final_layernorm = decode_norm_1plus(
+        model,
+        "model.norm.weight",
+        build.hidden_size,
+        &mut MemoryBudget::unbounded(),
+    )?;
 
     let mut layers = Vec::with_capacity(num_layers);
     let mut layer_norms = Vec::with_capacity(num_layers);
@@ -156,7 +168,9 @@ pub fn prepare_gemma_transformer_from_metadata(
         layer_norms.push(decode_layer_norms(model, i, &build)?);
     }
     if layers.is_empty() {
-        return Err(RuntimeError::Shape("gemma model requires at least one layer".to_string()));
+        return Err(RuntimeError::Shape(
+            "gemma model requires at least one layer".to_string(),
+        ));
     }
 
     Ok(PreparedGemmaTransformer {
@@ -178,7 +192,12 @@ fn decode_layer_norms(
     let head_dim = build.head_dim;
     let mut budget = MemoryBudget::unbounded();
     let mut norm = |model: &mut LazySpissaModel, suffix: &str, len: usize| -> Result<Vec<f32>> {
-        decode_norm_1plus(model, &format!("model.layers.{layer}.{suffix}"), len, &mut budget)
+        decode_norm_1plus(
+            model,
+            &format!("model.layers.{layer}.{suffix}"),
+            len,
+            &mut budget,
+        )
     };
     Ok(GemmaLayerNorms {
         input_layernorm: norm(model, "input_layernorm.weight", hidden)?,
@@ -242,7 +261,11 @@ fn gemma_forward_logits(
             names,
             &prepared.layer_norms[i],
             build,
-            GemmaBlockRuntime { seq_len, position_offset, layer_index: i },
+            GemmaBlockRuntime {
+                seq_len,
+                position_offset,
+                layer_index: i,
+            },
             budget,
             Some(&mut caches[i]),
         )?;
@@ -255,13 +278,29 @@ fn gemma_forward_logits(
         );
     }
 
-    hidden_states = rms_norm(&hidden_states, &prepared.final_layernorm, seq_len, hidden, build.rms_norm_eps)?;
+    hidden_states = rms_norm(
+        &hidden_states,
+        &prepared.final_layernorm,
+        seq_len,
+        hidden,
+        build.rms_norm_eps,
+    )?;
 
     let last_hidden = &hidden_states[(seq_len - 1) * hidden..];
     // R131: parallel LM-head GEMV over the 262k-row vocabulary (bf16-direct from
     // mmap, or f32 fallback).
     let lm_head_started = crate::q8_kernel_profile_enabled().then(std::time::Instant::now);
-    let logits = gemma_lm_head(model, embed.embedding_f32, embed.embedding_bf16, embed.embed_id, &prepared.embedding_weight, last_hidden, embed.vocab_size, hidden, budget)?;
+    let logits = gemma_lm_head(
+        model,
+        embed.embedding_f32,
+        embed.embedding_bf16,
+        embed.embed_id,
+        &prepared.embedding_weight,
+        last_hidden,
+        embed.vocab_size,
+        hidden,
+        budget,
+    )?;
     if let Some(t) = lm_head_started {
         eprintln!(
             "[gemma-profile] step {profile_step} lm_head {:.0}ms (vocab={})",
@@ -287,7 +326,11 @@ pub fn gemma_generate_from_model(
 
     let mut caches = Vec::with_capacity(prepared.layers.len());
     for _ in 0..prepared.layers.len() {
-        caches.push(KvCache::new(build.num_key_value_heads, build.head_dim, build.max_seq_len)?);
+        caches.push(KvCache::new(
+            build.num_key_value_heads,
+            build.head_dim,
+            build.max_seq_len,
+        )?);
     }
 
     // Tied embeddings. Materializing the 262208×2560 table as f32 costs 2.68 GB
@@ -296,7 +339,8 @@ pub fn gemma_generate_from_model(
     // and dequant-on-the-fly for both the input lookup and the LM head. Fall back
     // to a one-time f32 decode only if the embedding isn't a contiguous bf16 raw
     // tensor (e.g. a different codec/dtype).
-    let (embed_id, vocab_size, embedding_f32, embedding_bf16) = resolve_gemma_embedding(model, prepared, budget)?;
+    let (embed_id, vocab_size, embedding_f32, embedding_bf16) =
+        resolve_gemma_embedding(model, prepared, budget)?;
     let embed_ctx = GemmaEmbedCtx {
         embed_id,
         vocab_size,
@@ -329,9 +373,11 @@ pub fn gemma_generate_from_model(
 
         let next_token = match build.sampling {
             StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
-            StreamingSamplingConfig::TopP { temperature, top_p, seed } => {
-                sample_top_p(&logits, temperature, top_p, seed)?
-            }
+            StreamingSamplingConfig::TopP {
+                temperature,
+                top_p,
+                seed,
+            } => sample_top_p(&logits, temperature, top_p, seed)?,
         };
         token_ids.push(next_token);
         generated_token_ids.push(next_token);
@@ -365,6 +411,7 @@ fn stream_embedding_enabled() -> bool {
 
 /// Resolve the tied embedding once: prefer the bf16-direct mmap path (no 2.68 GB
 /// f32 materialization); otherwise decode the table to a resident f32 vector.
+#[allow(clippy::type_complexity)]
 fn resolve_gemma_embedding(
     model: &mut LazySpissaModel,
     prepared: &PreparedGemmaTransformer,
@@ -374,7 +421,10 @@ fn resolve_gemma_embedding(
     let vocab_size = embed_meta.shape.first().copied().unwrap_or(0) as usize;
     let embed_id = embed_meta.tensor_id;
     let is_bf16 = embed_meta.dtype == DType::Bf16;
-    let raw_bf16 = is_bf16 && model.with_raw_tensor(embed_id, |_| Ok::<(), RuntimeError>(()))?.is_some();
+    let raw_bf16 = is_bf16
+        && model
+            .with_raw_tensor(embed_id, |_| Ok::<(), RuntimeError>(()))?
+            .is_some();
     if raw_bf16 {
         // Zero-copy bf16 from the mmap — no resident table at all.
         return Ok((embed_id, vocab_size, None, None));
@@ -394,7 +444,9 @@ fn resolve_gemma_embedding(
         return Ok((embed_id, vocab_size, None, Some(bf16)));
     }
     // Non-bf16 embedding (e.g. q8) — keep the f32 table.
-    let f32 = model.decode_tensor(&prepared.embedding_weight, budget)?.data;
+    let f32 = model
+        .decode_tensor(&prepared.embedding_weight, budget)?
+        .data;
     Ok((embed_id, vocab_size, Some(f32), None))
 }
 
@@ -424,10 +476,23 @@ impl GemmaChatSession {
         let build = &prepared.config;
         let mut caches = Vec::with_capacity(prepared.layers.len());
         for _ in 0..prepared.layers.len() {
-            caches.push(KvCache::new(build.num_key_value_heads, build.head_dim, max_context)?);
+            caches.push(KvCache::new(
+                build.num_key_value_heads,
+                build.head_dim,
+                max_context,
+            )?);
         }
-        let (embed_id, vocab_size, embedding_f32, embedding_bf16) = resolve_gemma_embedding(model, prepared, budget)?;
-        Ok(Self { caches, total_tokens: 0, max_context, embed_id, vocab_size, embedding_f32, embedding_bf16 })
+        let (embed_id, vocab_size, embedding_f32, embedding_bf16) =
+            resolve_gemma_embedding(model, prepared, budget)?;
+        Ok(Self {
+            caches,
+            total_tokens: 0,
+            max_context,
+            embed_id,
+            vocab_size,
+            embedding_f32,
+            embedding_bf16,
+        })
     }
 
     /// Tokens currently held in the KV cache (the running conversation length).
@@ -487,16 +552,25 @@ impl GemmaChatSession {
         for step in 0..max_new {
             let position_offset = self.total_tokens;
             let logits = gemma_forward_logits(
-                model, prepared, &embed, &current, position_offset, &mut self.caches, budget, step,
+                model,
+                prepared,
+                &embed,
+                &current,
+                position_offset,
+                &mut self.caches,
+                budget,
+                step,
             )?;
             // `current` is now resident in the caches.
             self.total_tokens += current.len();
 
             let next = match build.sampling {
                 StreamingSamplingConfig::Argmax => sample_argmax(&logits)?,
-                StreamingSamplingConfig::TopP { temperature, top_p, seed } => {
-                    sample_top_p(&logits, temperature, top_p, seed)?
-                }
+                StreamingSamplingConfig::TopP {
+                    temperature,
+                    top_p,
+                    seed,
+                } => sample_top_p(&logits, temperature, top_p, seed)?,
             };
             if stop_ids.contains(&next) {
                 break;
@@ -545,7 +619,14 @@ fn gemma_embed_input(
     }
     // R162: non-raw bf16 with no resident table (SPISSA_STREAM_EMBEDDING) — stream only
     // the chunk(s) holding the requested rows.
-    gemma_embed_input_streaming(model, embedding_weight, token_ids, hidden, embed_scale, budget)
+    gemma_embed_input_streaming(
+        model,
+        embedding_weight,
+        token_ids,
+        hidden,
+        embed_scale,
+        budget,
+    )
 }
 
 /// Tied LM head — f32 table (fallback) or bf16-direct from the mmap (default).
@@ -571,10 +652,20 @@ fn gemma_lm_head(
     }
     // R158b: resident bf16 table (non-raw bf16, e.g. rANS).
     if let Some(bf16) = embedding_bf16 {
-        return Ok(lm_head_logits_parallel_bf16(last_hidden, bf16, vocab_size, hidden));
+        return Ok(lm_head_logits_parallel_bf16(
+            last_hidden,
+            bf16,
+            vocab_size,
+            hidden,
+        ));
     }
     if let Some(emb) = embedding_f32 {
-        return Ok(lm_head_logits_parallel(last_hidden, emb, vocab_size, hidden));
+        return Ok(lm_head_logits_parallel(
+            last_hidden,
+            emb,
+            vocab_size,
+            hidden,
+        ));
     }
     // Raw bf16 → zero-copy parallel GEMV straight from the mmap.
     if let Some(logits) = model.with_raw_tensor(embed_id, |bf16| {
@@ -589,7 +680,14 @@ fn gemma_lm_head(
     }
     // R162: non-raw bf16 with no resident table (SPISSA_STREAM_EMBEDDING) — stream the
     // embedding as an output projection (decode per chunk, never materialize 604 MB).
-    gemma_lm_head_streaming(model, embedding_weight, last_hidden, vocab_size, hidden, budget)
+    gemma_lm_head_streaming(
+        model,
+        embedding_weight,
+        last_hidden,
+        vocab_size,
+        hidden,
+        budget,
+    )
 }
 
 /// Gather `token_ids` rows from the bf16 embedding table (mmap bytes), dequant
@@ -617,4 +715,3 @@ fn gemma_embed_lookup_bf16(
     }
     Ok(out)
 }
-

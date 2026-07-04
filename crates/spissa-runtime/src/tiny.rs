@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::tensor::decode_to_f32;
 use crate::{
@@ -1110,7 +1109,7 @@ fn build_q4_embedding_row_requests(
         }
 
         if !copies.is_empty() {
-            if request_start % block_bytes != 0 || request_end % block_bytes != 0 {
+            if request_start % block_bytes != 0 || !request_end.is_multiple_of(block_bytes) {
                 return Err(RuntimeError::InvalidTensorData(format!(
                     "embedding tensor {embedding_name} Q4_0 request range [{}..{}) is not block-aligned",
                     request_start, request_end
@@ -1286,8 +1285,8 @@ mod tests {
         LazySpissaModel, MemoryBudget, RuntimeError, StreamingBlockParameters,
         StreamingBlockTensorNames,
     };
-    use spissa_container::{DType, GlobalMetadata, SpissaWriter, TensorMeta};
     use sha2::{Digest, Sha256};
+    use spissa_container::{DType, GlobalMetadata, SpissaWriter, TensorMeta};
 
     const VOCAB_SIZE: usize = 3;
     const HIDDEN_SIZE: usize = 2;

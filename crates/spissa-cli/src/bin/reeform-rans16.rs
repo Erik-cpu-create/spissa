@@ -1,5 +1,6 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. CONFIDENTIAL RESEARCH (REEFORM).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
+#![allow(dead_code, unused_assignments, clippy::needless_range_loop)]
 //
 //! REEFORM Phase-2: a u16-SYMBOL static rANS (one global normalized frequency table) so the
 //! fine-tune delta is coded at its true 16-bit-symbol entropy (~7.7 bit) instead of the
@@ -158,12 +159,15 @@ fn main() -> anyhow::Result<()> {
     let mut rb = SafetensorsReader::open(&base)?;
     let mut rf = SafetensorsReader::open(&ft)?;
     let bnames: Vec<String> = rb.list_tensors().iter().map(|s| s.to_string()).collect();
-    let fset: std::collections::HashSet<String> = rf.list_tensors().iter().map(|s| s.to_string()).collect();
+    let fset: std::collections::HashSet<String> =
+        rf.list_tensors().iter().map(|s| s.to_string()).collect();
 
     // Collect zigzag deltas per tensor + a GLOBAL histogram (table amortised over all weights).
     let read = |r: &mut SafetensorsReader, n: &str| -> anyhow::Result<Vec<u16>> {
         let b = r.read_tensor(n)?;
-        Ok((0..b.len() / 2).map(|i| u16::from_le_bytes([b[2 * i], b[2 * i + 1]])).collect())
+        Ok((0..b.len() / 2)
+            .map(|i| u16::from_le_bytes([b[2 * i], b[2 * i + 1]]))
+            .collect())
     };
     let mut deltas: Vec<(Vec<u16>, Vec<u16>)> = Vec::new(); // (zigzag-delta, base) per tensor
     let mut hist = vec![0u64; 65536];
@@ -181,7 +185,9 @@ fn main() -> anyhow::Result<()> {
         if b.len() != f.len() {
             continue;
         }
-        let z: Vec<u16> = (0..b.len()).map(|i| zigzag(f[i].wrapping_sub(b[i]))).collect();
+        let z: Vec<u16> = (0..b.len())
+            .map(|i| zigzag(f[i].wrapping_sub(b[i])))
+            .collect();
         for &s in &z {
             hist[s as usize] += 1;
         }
@@ -211,11 +217,19 @@ fn main() -> anyhow::Result<()> {
     let bits = comp as f64 * 8.0 / weights as f64;
     println!("\n=== REEFORM u16-rANS delta codec — {weights} weights ===");
     println!("  rANS(full fine-tune) baseline (shipped) ≈ 10.63 bit/weight");
-    println!("  u16-rANS(zigzag Δ)  OURS                = {bits:.4} bit/weight  (incl. global table)");
-    println!("  delta round-trip                        : {}", if exact { "✅ BIT-EXACT" } else { "❌" });
+    println!(
+        "  u16-rANS(zigzag Δ)  OURS                = {bits:.4} bit/weight  (incl. global table)"
+    );
+    println!(
+        "  delta round-trip                        : {}",
+        if exact { "✅ BIT-EXACT" } else { "❌" }
+    );
     let win = 10.6277 - bits;
     if win > 0.05 && exact {
-        println!("  ✅ {:.1}% LOSSLESS reduction (realised, real bytes)", win / 10.6277 * 100.0);
+        println!(
+            "  ✅ {:.1}% LOSSLESS reduction (realised, real bytes)",
+            win / 10.6277 * 100.0
+        );
     }
     Ok(())
 }

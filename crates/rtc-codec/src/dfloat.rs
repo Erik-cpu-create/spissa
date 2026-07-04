@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! rtc-dfloat-v1: lossless bf16 codec.
 //!
@@ -44,7 +43,11 @@ pub struct BitWriter {
 
 impl BitWriter {
     pub fn new() -> Self {
-        Self { bytes: Vec::new(), cur: 0, nbits: 0 }
+        Self {
+            bytes: Vec::new(),
+            cur: 0,
+            nbits: 0,
+        }
     }
 
     /// Write the low `len` bits of `code`, most-significant bit first.
@@ -134,8 +137,13 @@ pub fn huffman_code_lengths(freqs: &[u64; 256]) -> [u8; 256] {
         weight: u64,
         members: Vec<usize>,
     }
-    let mut nodes: Vec<Node> =
-        used.iter().map(|&s| Node { weight: freqs[s], members: vec![s] }).collect();
+    let mut nodes: Vec<Node> = used
+        .iter()
+        .map(|&s| Node {
+            weight: freqs[s],
+            members: vec![s],
+        })
+        .collect();
 
     while nodes.len() > 1 {
         // find two smallest-weight nodes
@@ -159,7 +167,10 @@ pub fn huffman_code_lengths(freqs: &[u64; 256]) -> [u8; 256] {
         }
         let mut members = a.members;
         members.extend(b.members);
-        nodes.push(Node { weight: a.weight + b.weight, members });
+        nodes.push(Node {
+            weight: a.weight + b.weight,
+            members,
+        });
     }
 
     // Length-limit to MAX_CODE_LEN bits, then repair the Kraft inequality. A
@@ -279,6 +290,7 @@ pub fn build_decode_lut(lengths: &[u8; 256]) -> DecodeLut {
 /// Parse a rtc-dfloat-v1 chunk into its sections, shared by `decode` and
 /// `decode_fast` so the framing logic lives in exactly one place. Returns
 /// `(num_weights, lengths, exp_stream, residuals)`.
+#[allow(clippy::type_complexity)]
 fn parse_chunk(encoded: &[u8]) -> Result<(usize, [u8; 256], &[u8], &[u8])> {
     let err = || CodecError::InvalidData("truncated rtc-dfloat-v1 chunk".to_string());
     if encoded.len() < 8 + 256 + 8 {
@@ -294,7 +306,12 @@ fn parse_chunk(encoded: &[u8]) -> Result<(usize, [u8; 256], &[u8], &[u8])> {
     if encoded.len() < res_end {
         return Err(err());
     }
-    Ok((num_weights, lengths, &encoded[exp_start..exp_end], &encoded[exp_end..res_end]))
+    Ok((
+        num_weights,
+        lengths,
+        &encoded[exp_start..exp_end],
+        &encoded[exp_end..res_end],
+    ))
 }
 
 pub struct DfloatCodec;
@@ -346,8 +363,10 @@ impl TensorCodec for DfloatCodec {
                 meta.dtype
             )));
         }
-        if input.len() % 2 != 0 {
-            return Err(CodecError::InvalidData("bf16 byte length must be even".into()));
+        if !input.len().is_multiple_of(2) {
+            return Err(CodecError::InvalidData(
+                "bf16 byte length must be even".into(),
+            ));
         }
         let num_weights = input.len() / 2;
 
@@ -483,12 +502,21 @@ mod tests {
             bytes.extend_from_slice(&bits.to_le_bytes());
         }
         let codec = DfloatCodec;
-        let meta = EncodeMeta { name: "w".into(), shape: vec![1024], dtype: "bf16".into() };
+        let meta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![1024],
+            dtype: "bf16".into(),
+        };
         let enc = codec.encode(&bytes, &meta).unwrap();
         assert_eq!(enc.codec_id, "rtc-dfloat-v1");
         assert_eq!(enc.original_size, bytes.len() as u64);
         // header(8) + table(256) + 8 + exp_bits + residuals(1024). Must beat raw 2048.
-        assert!(enc.data.len() < bytes.len(), "encoded {} !< raw {}", enc.data.len(), bytes.len());
+        assert!(
+            enc.data.len() < bytes.len(),
+            "encoded {} !< raw {}",
+            enc.data.len(),
+            bytes.len()
+        );
     }
 
     #[test]
@@ -505,9 +533,16 @@ mod tests {
             bytes.extend_from_slice(&bits.to_le_bytes());
         }
         let codec = DfloatCodec;
-        let emeta = EncodeMeta { name: "w".into(), shape: vec![4096], dtype: "bf16".into() };
+        let emeta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![4096],
+            dtype: "bf16".into(),
+        };
         let enc = codec.encode(&bytes, &emeta).unwrap();
-        let dmeta = DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: bytes.len() as u64 };
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: bytes.len() as u64,
+        };
         let dec = codec.decode(&enc.data, &dmeta).unwrap();
         assert_eq!(dec, bytes, "rtc-dfloat-v1 must be bit-exact lossless");
     }
@@ -516,7 +551,11 @@ mod tests {
     fn dfloat_satisfies_verify_roundtrip_contract() {
         use crate::{EncodeMeta, TensorCodec};
         let bytes: Vec<u8> = (0..2048u16).flat_map(|i| i.to_le_bytes()).collect();
-        let meta = EncodeMeta { name: "w".into(), shape: vec![2048], dtype: "bf16".into() };
+        let meta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![2048],
+            dtype: "bf16".into(),
+        };
         assert!(DfloatCodec.verify_roundtrip(&bytes, &meta).unwrap());
     }
 
@@ -525,7 +564,11 @@ mod tests {
         use crate::{DecodeMeta, EncodeMeta, TensorCodec};
         let bytes: Vec<u8> = Vec::new();
         let codec = DfloatCodec;
-        let emeta = EncodeMeta { name: "w".into(), shape: vec![0], dtype: "bf16".into() };
+        let emeta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![0],
+            dtype: "bf16".into(),
+        };
         let enc = codec.encode(&bytes, &emeta).unwrap();
         let dmeta = DecodeMeta {
             codec_id: "rtc-dfloat-v1".into(),
@@ -542,7 +585,11 @@ mod tests {
         let bits: u16 = 0x3F80; // 1.0 in bf16
         let bytes = bits.to_le_bytes().to_vec();
         let codec = DfloatCodec;
-        let emeta = EncodeMeta { name: "w".into(), shape: vec![1], dtype: "bf16".into() };
+        let emeta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![1],
+            dtype: "bf16".into(),
+        };
         let enc = codec.encode(&bytes, &emeta).unwrap();
         let dmeta = DecodeMeta {
             codec_id: "rtc-dfloat-v1".into(),
@@ -556,11 +603,13 @@ mod tests {
     fn dfloat_roundtrip_all_identical() {
         use crate::{DecodeMeta, EncodeMeta, TensorCodec};
         let bits: u16 = 0x4000; // 2.0 in bf16
-        let bytes: Vec<u8> =
-            (0..512).flat_map(|_| bits.to_le_bytes()).collect();
+        let bytes: Vec<u8> = (0..512).flat_map(|_| bits.to_le_bytes()).collect();
         let codec = DfloatCodec;
-        let emeta =
-            EncodeMeta { name: "w".into(), shape: vec![512], dtype: "bf16".into() };
+        let emeta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![512],
+            dtype: "bf16".into(),
+        };
         let enc = codec.encode(&bytes, &emeta).unwrap();
         let dmeta = DecodeMeta {
             codec_id: "rtc-dfloat-v1".into(),
@@ -583,8 +632,11 @@ mod tests {
             bytes.extend_from_slice(&bits.to_le_bytes());
         }
         let codec = DfloatCodec;
-        let emeta =
-            EncodeMeta { name: "w".into(), shape: vec![512], dtype: "bf16".into() };
+        let emeta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![512],
+            dtype: "bf16".into(),
+        };
         let enc = codec.encode(&bytes, &emeta).unwrap();
         let dmeta = DecodeMeta {
             codec_id: "rtc-dfloat-v1".into(),
@@ -601,7 +653,11 @@ mod tests {
         let bits: u16 = 0x3F80;
         let bytes: Vec<u8> = (0..8).flat_map(|_| bits.to_le_bytes()).collect();
         let codec = DfloatCodec;
-        let emeta = EncodeMeta { name: "w".into(), shape: vec![8], dtype: "bf16".into() };
+        let emeta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![8],
+            dtype: "bf16".into(),
+        };
         let enc = codec.encode(&bytes, &emeta).unwrap();
 
         // Corrupt the length-table region (bytes 8..264) by setting one entry to 30.
@@ -612,14 +668,20 @@ mod tests {
             uncompressed_size: bytes.len() as u64,
         };
         let result = codec.decode(&corrupt, &dmeta);
-        assert!(result.is_err(), "decode must return Err on corrupt length table");
+        assert!(
+            result.is_err(),
+            "decode must return Err on corrupt length table"
+        );
     }
 
     #[test]
     fn decode_fast_matches_decode_bit_for_bit() {
         use crate::{DecodeMeta, EncodeMeta, TensorCodec};
         let codec = DfloatCodec;
-        let dmeta = DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: 0 };
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: 0,
+        };
 
         let mut inputs: Vec<Vec<u8>> = Vec::new();
         // (a) skewed exponents
@@ -665,7 +727,10 @@ mod tests {
             let slow = codec.decode(&enc.data, &dmeta).unwrap();
             let fast = codec.decode_fast(&enc.data).unwrap();
             assert_eq!(&slow, bytes, "case {k}: slow decode must roundtrip");
-            assert_eq!(fast, slow, "case {k}: decode_fast must equal decode byte-for-byte");
+            assert_eq!(
+                fast, slow,
+                "case {k}: decode_fast must equal decode byte-for-byte"
+            );
         }
     }
 
@@ -673,7 +738,10 @@ mod tests {
     fn decode_fast_matches_decode_on_tail_boundaries() {
         use crate::{DecodeMeta, EncodeMeta, TensorCodec};
         let codec = DfloatCodec;
-        let dmeta = DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: 0 };
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: 0,
+        };
         for n in [0usize, 1, 2, 3, 5, 7, 9, 15, 17, 31, 33] {
             let mut state = 0x9E3779B97F4A7C15u64;
             let mut bytes = Vec::new();
@@ -683,11 +751,18 @@ mod tests {
                 state ^= state << 17;
                 bytes.extend_from_slice(&((state >> 48) as u16).to_le_bytes());
             }
-            let meta = EncodeMeta { name: "w".into(), shape: vec![n as u64], dtype: "bf16".into() };
+            let meta = EncodeMeta {
+                name: "w".into(),
+                shape: vec![n as u64],
+                dtype: "bf16".into(),
+            };
             let enc = codec.encode(&bytes, &meta).unwrap();
             let slow = codec.decode(&enc.data, &dmeta).unwrap();
             let fast = codec.decode_fast(&enc.data).unwrap();
-            assert_eq!(fast, slow, "n={n}: decode_fast must equal decode at tail boundary");
+            assert_eq!(
+                fast, slow,
+                "n={n}: decode_fast must equal decode at tail boundary"
+            );
             assert_eq!(fast, bytes, "n={n}: decode_fast must be lossless");
         }
     }
@@ -698,7 +773,11 @@ mod tests {
         let bits: u16 = 0x3F80;
         let bytes: Vec<u8> = (0..8).flat_map(|_| bits.to_le_bytes()).collect();
         let codec = DfloatCodec;
-        let emeta = EncodeMeta { name: "w".into(), shape: vec![8], dtype: "bf16".into() };
+        let emeta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![8],
+            dtype: "bf16".into(),
+        };
         let enc = codec.encode(&bytes, &emeta).unwrap();
         let mut corrupt = enc.data.clone();
         corrupt[8] = 30; // length > MAX_CODE_LEN (15) → must be rejected
@@ -716,16 +795,24 @@ mod tests {
             .expect("run dump_bf16_embedding_sample first (see plan Task 3, Step 2)");
         let num_weights = bytes.len() / 2;
         let codec = DfloatCodec;
-        let emeta =
-            EncodeMeta { name: "embed".into(), shape: vec![num_weights as u64], dtype: "bf16".into() };
+        let emeta = EncodeMeta {
+            name: "embed".into(),
+            shape: vec![num_weights as u64],
+            dtype: "bf16".into(),
+        };
         let enc = codec.encode(&bytes, &emeta).unwrap();
         let bits_per_weight = (enc.data.len() as f64 * 8.0) / num_weights as f64;
-        let dmeta =
-            DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: bytes.len() as u64 };
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: bytes.len() as u64,
+        };
 
         // Correctness on the real sample before timing.
         let fast = codec.decode_fast(&enc.data).unwrap();
-        assert_eq!(fast, bytes, "decode_fast must be lossless on the real embedding");
+        assert_eq!(
+            fast, bytes,
+            "decode_fast must be lossless on the real embedding"
+        );
 
         // Warm, timed fast decode.
         let iters = 5;
@@ -775,13 +862,20 @@ mod tests {
             .expect("run dump_bf16_embedding_sample first");
         let num_weights = bytes.len() / 2;
         let codec = DfloatCodec;
-        let emeta = EncodeMeta { name: "embed".into(), shape: vec![num_weights as u64], dtype: "bf16".into() };
+        let emeta = EncodeMeta {
+            name: "embed".into(),
+            shape: vec![num_weights as u64],
+            dtype: "bf16".into(),
+        };
 
         let enc = codec.encode(&bytes, &emeta).unwrap();
         let bits_per_weight = (enc.data.len() as f64 * 8.0) / num_weights as f64;
         let ratio = enc.data.len() as f64 / bytes.len() as f64;
 
-        let dmeta = DecodeMeta { codec_id: "rtc-dfloat-v1".into(), uncompressed_size: bytes.len() as u64 };
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-dfloat-v1".into(),
+            uncompressed_size: bytes.len() as u64,
+        };
         // Warm + timed decode (decode is what the fused kernel will run per tile).
         let dec = codec.decode(&enc.data, &dmeta).unwrap();
         assert_eq!(dec, bytes, "lossless");

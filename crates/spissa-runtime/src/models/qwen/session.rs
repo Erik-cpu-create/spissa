@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Stateful Qwen3.5 chat session: persistent per-layer KV / Gated-DeltaNet state across
 //! turns so each turn only prefills the NEW tokens (no O(n²) re-prefill of the whole
@@ -44,7 +43,10 @@ pub(crate) fn alloc_caches(prepared: &PreparedQwenTransformer) -> Result<Vec<Qwe
 }
 
 /// Vocabulary size from the embedding tensor metadata (`[vocab, hidden]`).
-pub(crate) fn vocab_from_meta(model: &LazySpissaModel, prepared: &PreparedQwenTransformer) -> usize {
+pub(crate) fn vocab_from_meta(
+    model: &LazySpissaModel,
+    prepared: &PreparedQwenTransformer,
+) -> usize {
     model
         .tensor(&prepared.embedding_weight)
         .ok()
@@ -84,9 +86,9 @@ pub(crate) fn qwen_forward(
                 budget,
                 cache,
             )?,
-            QwenLayerCache::Linear(state) => qwen_gated_deltanet_block(
-                model, &h, tensors, params, &cfg, seq_len, budget, state,
-            )?,
+            QwenLayerCache::Linear(state) => {
+                qwen_gated_deltanet_block(model, &h, tensors, params, &cfg, seq_len, budget, state)?
+            }
         };
     }
     h = rms_norm(&h, &prepared.final_norm, seq_len, hidden, cfg.rms_norm_eps)?;
@@ -103,8 +105,8 @@ pub(crate) fn qwen_forward(
     streaming_tile_linear_from_model(model, &prepared.lm_head_weight, last, None, lm_cfg, budget)
 }
 
-/// Full chat sampling pipeline: repeat penalty over a recent token window, then temperature
-/// + top-k + top-p (or greedy when `temperature <= 0`). Superset of the runtime's
+/// Full chat sampling pipeline: repeat penalty over a recent token window, then
+/// temperature + top-k + top-p (or greedy when `temperature <= 0`). Superset of the runtime's
 /// `StreamingSamplingConfig` (which the one-shot generation path bridges in via
 /// [`SamplingParams::from_streaming`]).
 #[derive(Clone, Copy, Debug)]
