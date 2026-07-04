@@ -172,6 +172,5 @@ that violate them:
 
 1. **Lossless by default** — decoded weights are bit-identical to the originals.
 2. **Honest metrics** — never overclaim compression/speed.
-3. **From scratch** — no wrapping Ollama/llama.cpp.
-4. **Custom RTC codecs** — no generic compression libraries by default.
-5. **Every codec round-trips** — `decode(encode(x)) == x`, with tests.
+3. **Custom RTC codecs** — no generic compression libraries by default.
+4. **Every codec round-trips** — `decode(encode(x)) == x`, with tests.

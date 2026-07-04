@@ -41,7 +41,6 @@ See [`docs/spissa-rama-architecture.md`](docs/spissa-rama-architecture.md) for t
 
 - ❌ Claim magical compression (for example, “7.6GB → 500MB with same quality”)
 - ❌ Perform lossy quantization unless explicitly labeled as a lossy optimization
-- ❌ Wrap Ollama, llama.cpp, or another existing runtime
 - ❌ Change model weights in any way
 - ❌ Use external generic compression libraries by default; RTC codecs are custom/in-house unless explicitly approved
 - ❌ Claim to simulate a biological brain, consciousness, or self-learning cognition
@@ -164,10 +163,6 @@ llama.cpp:
   only the chunks/tiles needed are decoded, under a bounded `MemoryBudget`. On
   small models this shows as a real RAM win (Llama 3.2 1B: ~1.05 GB vs Ollama's
   ~1.8 GB on the same machine).
-- **Original, not a wrapper.** Spissa does not embed or shell out to Ollama or
-  llama.cpp. The container, codecs, and CPU kernels are written from scratch — yet
-  reach **prefill parity** with llama.cpp/Ollama on the same chip (and within
-  ~1.5–2.5× on decode, a hardware-core ceiling, not a kernel-quality gap).
 - **Honest metrics.** No "10× smaller, same quality" claims. Compression ratios,
   tok/s, and RAM are measured and reported as-is, including the limitations.
 
@@ -453,10 +448,9 @@ the full rules.
 
 1. **Lossless by default** — decoded weights must be bit-identical to originals
 2. **Honest metrics** — report actual compression ratios, never overclaim
-3. **From scratch** — no wrapping Ollama/llama.cpp
-4. **Custom codecs** — compression codecs are in-house RTC codecs unless explicitly approved otherwise
-5. **Incremental** — build phase by phase, verify each step
-6. **Test everything** — round-trip tests for every codec, checksums everywhere
+3. **Custom codecs** — compression codecs are in-house RTC codecs unless explicitly approved otherwise
+4. **Incremental** — build phase by phase, verify each step
+5. **Test everything** — round-trip tests for every codec, checksums everywhere
 
 ## License
 
