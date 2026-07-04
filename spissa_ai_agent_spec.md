@@ -1,21 +1,21 @@
 # Spissa / RTC — Lossless Runtime-Compressed Local LLM Tool
 
-> Project brief untuk AI agent / coding agent.
-> Goal: membangun tool lokal mirip Ollama, tetapi **from scratch**, dengan fitur utama: **model LLM dapat disimpan dalam format compressed khusus dan dijalankan oleh runtime sendiri tanpa mengubah bobot model secara lossy**.
+> Project brief for an AI agent / coding agent.
+> Goal: build a local tool similar to Ollama, but **from scratch**, with one core feature: **LLM models can be stored in a dedicated compressed format and executed by our own runtime without altering the model weights in any lossy way**.
 
 ---
 
-## 0. Ringkasan Ide
+## 0. Idea Summary
 
-Kita ingin membuat tool baru untuk menjalankan LLM secara offline/local. Tool ini tidak boleh sekadar menjadi wrapper untuk Ollama, llama.cpp, atau format yang sudah ada. Tool harus punya identitas sendiri:
+We want to build a new tool for running LLMs offline/locally. This tool must not be a mere wrapper around Ollama, llama.cpp, or an existing format. It must have its own identity:
 
-- CLI sendiri.
-- Format file model sendiri.
-- Library kompresi tensor sendiri.
-- Runtime inference sendiri.
-- Fokus utama: **lossless compressed model storage + runtime yang dapat membaca bobot terkompresi secara block-wise/tile-wise**.
+- Its own CLI.
+- Its own model file format.
+- Its own tensor compression library.
+- Its own inference runtime.
+- Core focus: **lossless compressed model storage + a runtime that can read compressed weights block-wise/tile-wise**.
 
-Nama sementara:
+Working names:
 
 ```text
 Spissa = Runtime-compressed Local LLM
@@ -31,129 +31,123 @@ Core positioning:
 Run local LLMs from compressed weights without changing the model.
 ```
 
-Dalam bahasa Indonesia:
-
-```text
-Menjalankan model lokal dari bobot terkompresi tanpa mengubah kualitas model.
-```
-
 ---
 
-## 1. Prinsip Utama yang Tidak Boleh Dilanggar
+## 1. Core Principles That Must Not Be Violated
 
-### 1.1 Jangan klaim kompresi ajaib
+### 1.1 Do not claim magical compression
 
-Tool ini **tidak boleh** menjanjikan:
-
-```text
-LLM 7.6GB -> 500MB dengan kualitas sama persis
-```
-
-Kompresi lossless punya batas. Kalau data model sudah sangat padat, hasil kompresi mungkin hanya sedikit.
-
-Klaim yang boleh:
+This tool **must not** promise:
 
 ```text
-Spissa menyimpan bobot model dalam format compressed lossless.
-Spissa dapat memverifikasi bahwa bobot hasil decode identik dengan bobot asli.
-Spissa dapat mengurangi ukuran storage model jika bobot masih memiliki redundansi.
-Spissa dapat mengurangi peak RAM melalui block-wise/tile-wise decoding, tergantung runtime mode.
+LLM 7.6GB -> 500MB with the exact same quality
 ```
 
-### 1.2 “Tanpa mengurangi kualitas” berarti lossless
+Lossless compression has limits. If the model data is already very dense, the compression gain may be small.
 
-Dalam project ini, frasa **tanpa mengurangi kualitas** harus diartikan secara teknis sebagai:
+Claims that are allowed:
 
 ```text
-Bobot model setelah decode harus bit-identical dengan bobot asli.
+Spissa stores model weights in a lossless compressed format.
+Spissa can verify that decoded weights are identical to the original weights.
+Spissa can reduce model storage size when the weights still contain redundancy.
+Spissa can reduce peak RAM through block-wise/tile-wise decoding, depending on the runtime mode.
 ```
 
-Bukan:
+### 1.2 “Without reducing quality” means lossless
+
+In this project, the phrase **without reducing quality** must be interpreted technically as:
 
 ```text
-Benchmark terlihat mirip.
-Output terasa mirip.
-User tidak sadar kualitas turun.
+Decoded model weights must be bit-identical to the original weights.
 ```
 
-Kriteria lossless:
+Not:
+
+```text
+Benchmarks look similar.
+Outputs feel similar.
+Users don't notice the quality drop.
+```
+
+Lossless criterion:
 
 ```text
 original tensor bytes == decoded tensor bytes
 ```
 
-Jika bobot identik, maka model yang dijalankan adalah model yang sama.
+If the weights are identical, then the model being run is the same model.
 
-### 1.3 Jangan melakukan quantization tambahan untuk mode lossless
+### 1.3 Do not apply extra quantization for lossless mode
 
-Quantization tambahan seperti FP16 -> INT4 adalah lossy, kecuali bobot input memang sudah INT4 dan kita hanya mengemas ulang bit-nya tanpa mengubah nilai.
+Extra quantization such as FP16 -> INT4 is lossy, unless the input weights are already INT4 and we merely re-pack the bits without changing the values.
 
-Mode yang diperbolehkan:
+Allowed modes:
 
 ```text
-lossless-pack      = aman, bobot tidak berubah
-lossy-optimize     = opsional di masa depan, harus diberi label jelas
+lossless-pack      = safe, weights unchanged
+lossy-optimize     = optional in the future, must be clearly labeled
 ```
 
-Default project ini adalah:
+This project's default is:
 
 ```text
 lossless only
 ```
 
-### 1.4 Jangan bergantung pada Ollama/llama.cpp sebagai core runtime
+### 1.4 Do not depend on Ollama/llama.cpp as the core runtime
 
-Boleh mempelajari ide umum dari tools lain, tetapi implementasi project harus from scratch.
+Learning general ideas from other tools is fine, but the project's implementation must be from scratch.
 
-Tidak boleh:
-
-```text
-spissa hanya memanggil ollama run
-spissa hanya membungkus llama.cpp
-spissa hanya rename GGUF menjadi format sendiri
-```
-
-Boleh:
+Not allowed:
 
 ```text
-membaca konsep umum transformer
-menggunakan library standar untuk CLI, checksum, mmap, filesystem
-menggunakan model kecil/toy model untuk validasi awal
+spissa merely calls ollama run
+spissa merely wraps llama.cpp
+spissa merely renames GGUF into its own format
 ```
 
-### 1.5 Kernel runtime wajib punya versioning REE
+Allowed:
 
-Setiap kernel eksekusi Spissa yang menjadi kandidat serius harus punya nama
-lineage REE sebelum dilaporkan, di-benchmark, atau di-merge.
+```text
+studying general transformer concepts
+using standard libraries for CLI, checksum, mmap, filesystem
+using small/toy models for early validation
+```
 
-Aturan:
+### 1.5 Runtime kernels must have REE versioning
+
+Every Spissa execution kernel that becomes a serious candidate must have an REE
+lineage name before it is reported, benchmarked, or merged.
+
+Rule:
 
 ```text
 REE = Rama Erik Esprada kernel lineage
 ```
 
-Contoh nama:
+Example names:
 
 ```text
-REEDOT-LAB    = microbench dot-product lab, belum dipakai runtime
-REEBORN-Q8    = kernel Q8 pertama yang terbukti dan dipromosikan ke runtime
-REETHINK-Q8   = redesign kernel setelah arah sebelumnya gagal
-REEFUSE-Q8    = fused kernel, misalnya gate/up atau matmul+scale
-REELITE-Q8    = kernel khusus low-end CPU / IoT profile
+REEDOT-LAB    = dot-product microbench lab, not yet used by the runtime
+REEBORN-Q8    = the first proven Q8 kernel, promoted into the runtime
+REETHINK-Q8   = kernel redesign after the previous direction failed
+REEFUSE-Q8    = fused kernel, e.g. gate/up or matmul+scale
+REELITE-Q8    = kernel dedicated to low-end CPU / IoT profiles
 ```
 
-Agent tidak boleh membuat atau merge perubahan bernama generik seperti
-`fast path`, `candidate kernel`, atau `optimized kernel` tanpa mencatat nama
-REE-nya di plan dan laporan benchmark. Trial yang gagal tetap harus mencatat
-nama REE supaya negative evidence bisa dilacak.
+The agent must not create or merge generically named changes such as
+`fast path`, `candidate kernel`, or `optimized kernel` without recording their
+REE name in the plan and benchmark report. Failed trials must still record their
+REE name so that negative evidence stays traceable.
 
 ---
 
-## 2. Target Produk
+## 2. Product Target
 
-### 2.1 CLI utama
+### 2.1 Main CLI
 
-Command target:
+Target commands:
 
 ```bash
 spissa import ./model_dir
@@ -163,7 +157,7 @@ spissa verify ./model_dir model.spsa
 spissa run model.spsa
 ```
 
-Command tambahan:
+Additional commands:
 
 ```bash
 spissa unpack model.spsa --out ./restored_model
@@ -171,38 +165,38 @@ spissa benchmark model.spsa
 spissa doctor
 ```
 
-### 2.2 Fitur MVP
+### 2.2 MVP Features
 
-MVP wajib memiliki:
+The MVP must have:
 
-1. CLI `spissa`.
-2. Format file `.spsa`.
-3. Library `rtc` untuk encode/decode tensor secara lossless.
-4. Import minimal dari format tensor sederhana.
-5. Pack tensor ke `.spsa`.
-6. Unpack `.spsa` kembali ke tensor asli.
-7. Verify bit-identical.
-8. Toy inference runtime untuk model kecil.
+1. The `spissa` CLI.
+2. The `.spsa` file format.
+3. The `rtc` library for lossless tensor encode/decode.
+4. Minimal import from a simple tensor format.
+5. Packing tensors into `.spsa`.
+6. Unpacking `.spsa` back to the original tensors.
+7. Bit-identical verification.
+8. A toy inference runtime for small models.
 
-MVP belum wajib mendukung model besar seperti Gemma 12B.
+The MVP is not yet required to support large models such as Gemma 12B.
 
-### 2.3 Fitur setelah MVP
+### 2.3 Post-MVP Features
 
-Setelah MVP stabil:
+Once the MVP is stable:
 
-1. Dukungan `safetensors`.
-2. Dukungan tokenizer.
-3. Dukungan arsitektur transformer minimal.
-4. Inference layer-by-layer.
+1. `safetensors` support.
+2. Tokenizer support.
+3. Minimal transformer architecture support.
+4. Layer-by-layer inference.
 5. Block-wise decoding.
 6. Tile-wise decoding.
 7. Memory-mapped compressed loading.
 8. Fused decode + matmul.
-9. Auto low-RAM runtime mode.
+9. Automatic low-RAM runtime mode.
 
 ---
 
-## 3. Arsitektur Sistem
+## 3. System Architecture
 
 ```text
 spissa CLI
@@ -245,21 +239,21 @@ spissa CLI
 
 ## 4. Format File `.spsa`
 
-### 4.1 Tujuan format
+### 4.1 Format goals
 
-Format `.spsa` harus:
+The `.spsa` format must:
 
-- Single-file jika memungkinkan.
-- Bisa menyimpan metadata model.
-- Bisa menyimpan tokenizer.
-- Bisa menyimpan tensor dalam chunks.
-- Mendukung random access ke chunk.
-- Mendukung checksum per tensor dan per chunk.
-- Mendukung banyak codec di masa depan.
-- Mendukung memory mapping.
-- Bisa dibaca tanpa decompress seluruh model.
+- Be single-file where possible.
+- Be able to store model metadata.
+- Be able to store the tokenizer.
+- Be able to store tensors in chunks.
+- Support random access to chunks.
+- Support per-tensor and per-chunk checksums.
+- Support multiple codecs in the future.
+- Support memory mapping.
+- Be readable without decompressing the entire model.
 
-### 4.2 Layout awal
+### 4.2 Initial layout
 
 ```text
 .spsa file
@@ -278,7 +272,7 @@ Format `.spsa` harus:
 
 ### 4.3 Header
 
-Contoh field header:
+Example header fields:
 
 ```text
 magic:      "SPSA"
@@ -290,9 +284,9 @@ container:  spissa-v1
 
 ### 4.4 Global metadata
 
-Metadata disimpan dalam format yang mudah dibaca, misalnya JSON/CBOR/MessagePack.
+Metadata is stored in an easily readable format, e.g. JSON/CBOR/MessagePack.
 
-Contoh:
+Example:
 
 ```json
 {
@@ -309,7 +303,7 @@ Contoh:
 
 ### 4.5 Tensor directory
 
-Setiap tensor harus punya metadata:
+Every tensor must have metadata:
 
 ```text
 tensor_id
@@ -323,7 +317,7 @@ chunk_count
 chunk_start_index
 ```
 
-Contoh:
+Example:
 
 ```json
 {
@@ -341,7 +335,7 @@ Contoh:
 
 ### 4.6 Chunk directory
 
-Setiap chunk harus punya metadata:
+Every chunk must have metadata:
 
 ```text
 chunk_id
@@ -355,7 +349,7 @@ chunk_sha256_original
 chunk_sha256_compressed
 ```
 
-Contoh:
+Example:
 
 ```json
 {
@@ -373,20 +367,20 @@ Contoh:
 
 ### 4.7 Chunk size
 
-Chunk size awal yang disarankan:
+Recommended initial chunk size:
 
 ```text
-256KB sampai 4MB uncompressed per chunk
+256KB to 4MB uncompressed per chunk
 ```
 
 Trade-off:
 
 ```text
-chunk kecil  = random access bagus, metadata lebih besar
-chunk besar  = kompresi lebih baik, random access lebih buruk
+small chunk  = good random access, larger metadata
+large chunk  = better compression, worse random access
 ```
 
-MVP bisa mulai dari:
+The MVP can start from:
 
 ```text
 1MB per chunk
@@ -396,9 +390,9 @@ MVP bisa mulai dari:
 
 ## 5. RTC: Rama Tensor Codec
 
-### 5.1 Tujuan RTC
+### 5.1 RTC goals
 
-RTC adalah codec lossless untuk tensor LLM.
+RTC is a lossless codec for LLM tensors.
 
 Input:
 
@@ -412,11 +406,11 @@ Output:
 compressed chunk bytes + codec metadata
 ```
 
-Decode harus menghasilkan bytes yang sama persis.
+Decoding must produce exactly the same bytes.
 
-### 5.2 Codec mode awal
+### 5.2 Initial codec modes
 
-MVP codec:
+MVP codecs:
 
 ```text
 rtc-raw-v1
@@ -426,18 +420,18 @@ rtc-bitplane-v1
 rtc-entropy-v1
 ```
 
-Untuk MVP paling awal, implementasikan minimal:
+For the earliest MVP, implement at minimum:
 
 ```text
 rtc-raw-v1
 rtc-rle-v1
 ```
 
-`rtc-raw-v1` tidak mengompres, tetapi penting untuk fallback.
+`rtc-raw-v1` does not compress, but is important as a fallback.
 
 ### 5.3 Codec selection
 
-Packer harus mencoba beberapa codec pada chunk kecil lalu memilih yang terbaik.
+The packer must try several codecs on a small chunk and pick the best one.
 
 Pseudo-flow:
 
@@ -451,13 +445,13 @@ for each chunk:
     choose smallest candidate that decodes exactly
 ```
 
-Jika codec gagal memperkecil, gunakan raw.
+If a codec fails to shrink the data, use raw.
 
 ### 5.4 Dtype-aware compression
 
-RTC harus sadar dtype.
+RTC must be dtype-aware.
 
-Untuk `fp16` / `bf16`:
+For `fp16` / `bf16`:
 
 ```text
 split bits into sign/exponent/mantissa candidates
@@ -467,7 +461,7 @@ try bitplane packing
 fallback raw mantissa if random
 ```
 
-Untuk quantized int weights:
+For quantized int weights:
 
 ```text
 respect original packed representation
@@ -477,7 +471,7 @@ compress scales separately
 compress zero-points separately
 ```
 
-Untuk metadata/scale tensor:
+For metadata/scale tensors:
 
 ```text
 try delta coding
@@ -487,7 +481,7 @@ try entropy coding
 
 ### 5.5 Lossless verification per chunk
 
-Setiap encode harus langsung melakukan self-test:
+Every encode must immediately run a self-test:
 
 ```text
 encoded = encode(chunk)
@@ -495,7 +489,7 @@ decoded = decode(encoded)
 assert decoded == chunk
 ```
 
-Jika tidak sama, codec candidate ditolak.
+If they differ, the candidate codec is rejected.
 
 ---
 
@@ -503,29 +497,29 @@ Jika tidak sama, codec candidate ditolak.
 
 ### 6.1 Runtime goals
 
-Runtime harus bisa menjalankan model dari `.spsa` tanpa unpack penuh ke file asli.
+The runtime must be able to run a model from `.spsa` without fully unpacking it to the original file.
 
-Runtime mode:
+Runtime modes:
 
 ```text
-full-decode mode       = decode semua tensor ke RAM, paling mudah
-layer-decode mode      = decode layer saat diperlukan
-tile-decode mode       = decode potongan tensor saat matmul
-fused-decode-matmul    = decode dan multiply langsung, target jangka panjang
+full-decode mode       = decode all tensors into RAM, the simplest
+layer-decode mode      = decode a layer when needed
+tile-decode mode       = decode a tensor slice during matmul
+fused-decode-matmul    = decode and multiply directly, the long-term target
 ```
 
 ### 6.2 MVP runtime
 
-MVP runtime boleh sederhana:
+The MVP runtime may be simple:
 
 ```text
 load .spsa
-full decode tensor model kecil ke RAM
+full-decode a small model's tensors into RAM
 run toy transformer inference
-verify output deterministic
+verify deterministic output
 ```
 
-Setelah itu naik ke:
+Then move up to:
 
 ```text
 layer-by-layer decode
@@ -533,7 +527,7 @@ layer-by-layer decode
 
 ### 6.3 Low-RAM runtime target
 
-Low-RAM mode harus menghindari decode seluruh model sekaligus.
+Low-RAM mode must avoid decoding the entire model at once.
 
 Flow:
 
@@ -544,7 +538,7 @@ for each transformer layer:
     release layer weights
 ```
 
-Untuk matmul besar:
+For large matmuls:
 
 ```text
 for each tile in weight matrix:
@@ -556,7 +550,7 @@ for each tile in weight matrix:
 
 ### 6.4 Cache
 
-Runtime perlu decode cache:
+The runtime needs a decode cache:
 
 ```text
 LRU cache for decoded chunks
@@ -573,14 +567,14 @@ spissa run model.spsa --mode tile-decode --cache 256mb
 
 ### 6.5 Expected trade-off
 
-Dokumentasi harus jujur:
+The documentation must be honest:
 
 ```text
 Compressed runtime can reduce storage and peak RAM.
 It may reduce speed because decoding costs CPU cycles.
 ```
 
-Jangan klaim selalu lebih cepat.
+Do not claim it is always faster.
 
 ---
 
@@ -592,7 +586,7 @@ Jangan klaim selalu lebih cepat.
 spissa pack ./model_dir --out model.spsa --codec rtc-lossless-v1
 ```
 
-Output contoh:
+Example output:
 
 ```text
 Reading model: ./model_dir
@@ -1066,7 +1060,7 @@ Tile decode peak RAM: 540 MB
 
 ## 12. README Positioning
 
-README harus jujur dan kuat.
+The README must be honest and strong.
 
 Suggested README intro:
 
