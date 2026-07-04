@@ -1,8 +1,7 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
-//! `rllm fetch <repo>` — download a Hugging Face model into `models/<category>/<name>/`,
+//! `spissa fetch <repo>` — download a Hugging Face model into `models/<category>/<name>/`,
 //! auto-categorized by modality (text / vision / audio / embedding). Rust-native (ureq +
 //! rustls, no Python `hf` CLI), with skip-existing, byte-range resume, and a progress line.
 //!
@@ -36,19 +35,39 @@ struct Sibling {
 fn category_for(pipeline: Option<&str>) -> &'static str {
     match pipeline {
         Some(
-            "text-generation" | "text2text-generation" | "fill-mask" | "text-classification"
-            | "token-classification" | "question-answering" | "summarization" | "translation"
-            | "zero-shot-classification" | "table-question-answering",
+            "text-generation"
+            | "text2text-generation"
+            | "fill-mask"
+            | "text-classification"
+            | "token-classification"
+            | "question-answering"
+            | "summarization"
+            | "translation"
+            | "zero-shot-classification"
+            | "table-question-answering",
         ) => "text-models",
         Some(
-            "image-text-to-text" | "image-to-text" | "visual-question-answering"
-            | "image-classification" | "object-detection" | "image-segmentation"
-            | "depth-estimation" | "image-to-image" | "zero-shot-image-classification"
-            | "video-text-to-text" | "text-to-image" | "image-feature-extraction" | "any-to-any",
+            "image-text-to-text"
+            | "image-to-text"
+            | "visual-question-answering"
+            | "image-classification"
+            | "object-detection"
+            | "image-segmentation"
+            | "depth-estimation"
+            | "image-to-image"
+            | "zero-shot-image-classification"
+            | "video-text-to-text"
+            | "text-to-image"
+            | "image-feature-extraction"
+            | "any-to-any",
         ) => "vision-models",
         Some(
-            "automatic-speech-recognition" | "audio-classification" | "text-to-speech"
-            | "text-to-audio" | "audio-to-audio" | "voice-activity-detection",
+            "automatic-speech-recognition"
+            | "audio-classification"
+            | "text-to-speech"
+            | "text-to-audio"
+            | "audio-to-audio"
+            | "voice-activity-detection",
         ) => "audio-models",
         Some("feature-extraction" | "sentence-similarity") => "embedding-models",
         _ => "other-models",
@@ -85,9 +104,9 @@ fn fetch_model_info(repo: &str, token: Option<&str>) -> Result<ModelInfo> {
 
 fn describe_ureq_err(what: &str, repo: &str, e: ureq::Error) -> String {
     match e {
-        ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => format!(
-            "{what} for {repo}: unauthorized — set HF_TOKEN for a gated/private repo"
-        ),
+        ureq::Error::Status(401, _) | ureq::Error::Status(403, _) => {
+            format!("{what} for {repo}: unauthorized — set HF_TOKEN for a gated/private repo")
+        }
         ureq::Error::Status(404, _) => format!("{what} for {repo}: not found (check the repo id)"),
         ureq::Error::Status(code, _) => format!("{what} for {repo}: HTTP {code}"),
         ureq::Error::Transport(t) => format!("{what} for {repo}: transport error: {t}"),
@@ -134,7 +153,10 @@ fn download_file(
 
     let part_path = final_path.with_extension(format!(
         "{}.part",
-        final_path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        final_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
     ));
     let resume_from = fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
 
@@ -196,7 +218,13 @@ fn download_file(
 }
 
 /// The live line for the file currently downloading: spinner + name + bar + %/size/speed/ETA.
-fn print_progress(name: &str, done: u64, total_bytes: Option<u64>, started: Instant, resume_from: u64) {
+fn print_progress(
+    name: &str,
+    done: u64,
+    total_bytes: Option<u64>,
+    started: Instant,
+    resume_from: u64,
+) {
     let secs = started.elapsed().as_secs_f64().max(1e-3);
     let speed = (done.saturating_sub(resume_from)) as f64 / secs;
     let frame = crate::progress::spinner_frame((started.elapsed().as_millis() / 80) as usize);
@@ -278,7 +306,14 @@ pub fn run(
     let started = Instant::now();
     let mut downloaded = 0u64;
     for s in &info.siblings {
-        downloaded += download_file(repo, revision, &s.rfilename, s.size, &dest, token.as_deref())?;
+        downloaded += download_file(
+            repo,
+            revision,
+            &s.rfilename,
+            s.size,
+            &dest,
+            token.as_deref(),
+        )?;
     }
 
     crate::progress::print_fetch_result(
@@ -305,8 +340,14 @@ mod tests {
     fn categories_map_by_modality() {
         assert_eq!(category_for(Some("text-generation")), "text-models");
         assert_eq!(category_for(Some("image-text-to-text")), "vision-models");
-        assert_eq!(category_for(Some("automatic-speech-recognition")), "audio-models");
-        assert_eq!(category_for(Some("sentence-similarity")), "embedding-models");
+        assert_eq!(
+            category_for(Some("automatic-speech-recognition")),
+            "audio-models"
+        );
+        assert_eq!(
+            category_for(Some("sentence-similarity")),
+            "embedding-models"
+        );
         assert_eq!(category_for(None), "other-models");
         assert_eq!(category_for(Some("some-future-task")), "other-models");
     }

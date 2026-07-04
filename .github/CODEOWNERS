@@ -1,0 +1,17 @@
+# Code owners for Spissa.
+# These owners are requested for review automatically on matching pull requests.
+# See: https://docs.github.com/articles/about-code-owners
+
+# Default owner for everything in the repo.
+*                       @Erik-cpu-create
+
+# Core codec IP — extra scrutiny.
+/crates/rtc-codec/      @Erik-cpu-create
+
+# Container format & runtime.
+/crates/spissa-container/  @Erik-cpu-create
+/crates/spissa-runtime/    @Erik-cpu-create
+
+# Release / CI plumbing.
+/.github/               @Erik-cpu-create
+/scripts/               @Erik-cpu-create

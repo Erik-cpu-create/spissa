@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::StreamingSamplingConfig;
 
@@ -48,7 +47,7 @@ pub fn is_global_layer(layer_idx: usize, sliding_window_pattern: usize) -> bool 
     if sliding_window_pattern <= 1 {
         return true;
     }
-    (layer_idx + 1) % sliding_window_pattern == 0
+    (layer_idx + 1).is_multiple_of(sliding_window_pattern)
 }
 
 /// Per-layer projection-weight tensor names (the large matrices streamed from
@@ -110,9 +109,7 @@ mod tests {
         // sliding_window_pattern = 6 → 5 local : 1 global. Global layers are
         // those where (idx + 1) % 6 == 0: 5, 11, 17, 23, 29.
         let pattern = 6;
-        let globals: Vec<usize> = (0..34)
-            .filter(|&i| is_global_layer(i, pattern))
-            .collect();
+        let globals: Vec<usize> = (0..34).filter(|&i| is_global_layer(i, pattern)).collect();
         assert_eq!(globals, vec![5, 11, 17, 23, 29]);
         // Layer 33 (the last of 34) is local, not global.
         assert!(!is_global_layer(33, pattern));

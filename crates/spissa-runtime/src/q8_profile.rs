@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -125,7 +124,7 @@ pub fn q8_kernel_profile_snapshot_and_reset() -> Option<Q8KernelProfileSnapshot>
         return None;
     }
     let mut rows = std::mem::take(&mut state.rows);
-    rows.sort_by(|left, right| right.elapsed_ns.cmp(&left.elapsed_ns));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.elapsed_ns));
     Some(Q8KernelProfileSnapshot {
         ree_kernel: "REEGLASS-Q8-HOTLOOP-PROFILER",
         rows,

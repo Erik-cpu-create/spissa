@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — research instrument (REEFORM, SECRET IP).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 // HONEST STRUCTURE AUDIT of the fine-tune delta. Conditional entropy H(X|ctx) ≤ H(X) ALWAYS, so a
 // raw H1 < H0 proves nothing — the honest test is the ACTUAL coded length of an ADAPTIVE coder
@@ -172,7 +172,10 @@ fn main() -> Result<()> {
     let n = nweights as f64;
     let mant = bmant as f64;
     println!("=== REEFORM structure audit (adaptive, model-cost PAID) ===");
-    println!("weights {nweights} · nonzero Δ {nnz} ({:.2}%)", 100.0 * nnz as f64 / n);
+    println!(
+        "weights {nweights} · nonzero Δ {nnz} ({:.2}%)",
+        100.0 * nnz as f64 / n
+    );
     println!("mantissa (raw, shared)   : {:.4} bit/w", mant / n);
     println!("--- CLASS coding: class-bits/w  (+mant = total) ---");
     let pr = |label: &str, bits: f64, ref0: f64| {

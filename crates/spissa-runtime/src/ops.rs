@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::{Result, RuntimeError};
 
@@ -623,7 +622,7 @@ mod tests {
         assert!((logits[0] - 1.0).abs() < 1e-6); // 2.0 / 2.0
         assert!((logits[1] - -4.0).abs() < 1e-6); // -2.0 * 2.0
         assert!((logits[2] - 0.5).abs() < 1e-6); // untouched
-        // penalty == 1.0 is a no-op.
+                                                 // penalty == 1.0 is a no-op.
         let mut same = [2.0f32, -2.0, 0.5];
         apply_repeat_penalty(&mut same, &[0, 1, 2], 1.0);
         assert_eq!(same, [2.0, -2.0, 0.5]);

@@ -1,14 +1,13 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::{Result, RuntimeError, Tensor};
-use spissa_container::{ChunkMeta, ChunkRangeMeta, GlobalMetadata, SpissaReader, TensorMeta};
 use rtc_codec::{
     BitplaneCodec, DecodeMeta, HuffmanCodec, RansCodec, RawCodec, ReebornForCodec, RleCodec,
     TensorCodec,
 };
 use sha2::{Digest, Sha256};
+use spissa_container::{ChunkMeta, ChunkRangeMeta, GlobalMetadata, SpissaReader, TensorMeta};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -249,8 +248,8 @@ pub(crate) fn verify_tensor_checksum(tensor_meta: &TensorMeta, decoded: &[u8]) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spissa_container::{DType, SpissaWriter};
     use rtc_codec::{EncodeMeta, RleCodec};
+    use spissa_container::{DType, SpissaWriter};
 
     fn sha256_array(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()

@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::lazy::runtime_f32_bytes_for_tensor;
 use crate::{LazySpissaModel, Result, RuntimeError};
@@ -110,7 +109,10 @@ impl RuntimePlan {
     }
 }
 
-pub fn build_runtime_plan(model: &LazySpissaModel, config: RuntimePlanConfig) -> Result<RuntimePlan> {
+pub fn build_runtime_plan(
+    model: &LazySpissaModel,
+    config: RuntimePlanConfig,
+) -> Result<RuntimePlan> {
     let shape_hints = infer_shape_hints(model);
     let metadata_index_bytes_estimate = estimate_metadata_index_bytes(model);
     let activation_window_bytes =
@@ -374,8 +376,8 @@ fn parse_layer_id(name: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spissa_container::{DType, GlobalMetadata, SpissaWriter};
     use sha2::{Digest, Sha256};
+    use spissa_container::{DType, GlobalMetadata, SpissaWriter};
 
     fn sha256_array(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()

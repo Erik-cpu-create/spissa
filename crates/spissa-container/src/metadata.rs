@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! Tensor and chunk metadata structures
 
@@ -60,11 +59,11 @@ impl DType {
     pub fn byte_size_for_elements(&self, count: usize) -> usize {
         match self {
             DType::Q4_0 => {
-                let blocks = (count + 31) / 32;
+                let blocks = count.div_ceil(32);
                 blocks * 18
             }
             DType::Q8_0 => {
-                let blocks = (count + 31) / 32;
+                let blocks = count.div_ceil(32);
                 blocks * 34
             }
             _ => count * self.size_bytes(),

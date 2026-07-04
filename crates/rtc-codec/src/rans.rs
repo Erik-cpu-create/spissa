@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 //! rtc-rans-v1: static range-ANS (rANS) entropy coder for the bit-plane exponent
 //! symbols (R152).
@@ -48,7 +47,10 @@ pub fn normalize_freqs(counts: &[u32; 256]) -> [u32; 256] {
     } else {
         let mut excess = sum - M;
         while excess > 0 {
-            let s = (0..256).filter(|&s| freq[s] > 1).max_by_key(|&s| freq[s]).unwrap();
+            let s = (0..256)
+                .filter(|&s| freq[s] > 1)
+                .max_by_key(|&s| freq[s])
+                .unwrap();
             let take = excess.min(freq[s] - 1);
             freq[s] -= take;
             excess -= take;
@@ -155,7 +157,11 @@ pub struct RansDecodeTables {
 pub fn rans_build_tables(freq: &[u32; 256]) -> RansDecodeTables {
     let cum = cum_table(freq);
     let slot2sym = slot_table(&cum);
-    RansDecodeTables { freq: *freq, cum, slot2sym }
+    RansDecodeTables {
+        freq: *freq,
+        cum,
+        slot2sym,
+    }
 }
 
 /// Decode `n` symbols from a 4-lane interleaved stream (inverse of
@@ -184,8 +190,12 @@ pub fn rans_decode_interleaved4_into(
     let init = |s: &[u8]| -> u32 {
         (s[0] as u32) | (s[1] as u32) << 8 | (s[2] as u32) << 16 | (s[3] as u32) << 24
     };
-    let (mut x0, mut x1, mut x2, mut x3) =
-        (init(streams[0]), init(streams[1]), init(streams[2]), init(streams[3]));
+    let (mut x0, mut x1, mut x2, mut x3) = (
+        init(streams[0]),
+        init(streams[1]),
+        init(streams[2]),
+        init(streams[3]),
+    );
     let (mut p0, mut p1, mut p2, mut p3) = (4usize, 4usize, 4usize, 4usize);
     let (s0, s1, s2, s3) = (streams[0], streams[1], streams[2], streams[3]);
 
@@ -263,14 +273,21 @@ pub fn rans_decode_interleaved8_into(
         (s[0] as u32) | (s[1] as u32) << 8 | (s[2] as u32) << 16 | (s[3] as u32) << 24
     };
     let (mut x0, mut x1, mut x2, mut x3, mut x4, mut x5, mut x6, mut x7) = (
-        init(streams[0]), init(streams[1]), init(streams[2]), init(streams[3]),
-        init(streams[4]), init(streams[5]), init(streams[6]), init(streams[7]),
+        init(streams[0]),
+        init(streams[1]),
+        init(streams[2]),
+        init(streams[3]),
+        init(streams[4]),
+        init(streams[5]),
+        init(streams[6]),
+        init(streams[7]),
     );
-    let (mut p0, mut p1, mut p2, mut p3, mut p4, mut p5, mut p6, mut p7) =
-        (4usize, 4usize, 4usize, 4usize, 4usize, 4usize, 4usize, 4usize);
+    let (mut p0, mut p1, mut p2, mut p3, mut p4, mut p5, mut p6, mut p7) = (
+        4usize, 4usize, 4usize, 4usize, 4usize, 4usize, 4usize, 4usize,
+    );
     let (s0, s1, s2, s3, s4, s5, s6, s7) = (
-        streams[0], streams[1], streams[2], streams[3],
-        streams[4], streams[5], streams[6], streams[7],
+        streams[0], streams[1], streams[2], streams[3], streams[4], streams[5], streams[6],
+        streams[7],
     );
     macro_rules! step {
         ($x:ident, $p:ident, $s:ident, $idx:expr) => {
@@ -312,7 +329,11 @@ pub fn rans_decode_interleaved8(streams: [&[u8]; 8], n: usize, freq: &[u32; 256]
 /// decoded on its OWN thread, then the four subsequences are interleaved. ~4× the
 /// single-thread `rans_decode_interleaved4` on large chunks — the container decode
 /// path is otherwise single-threaded and dominates rANS inference (R158c).
-pub fn rans_decode_interleaved4_parallel(streams: [&[u8]; 4], n: usize, freq: &[u32; 256]) -> Vec<u8> {
+pub fn rans_decode_interleaved4_parallel(
+    streams: [&[u8]; 4],
+    n: usize,
+    freq: &[u32; 256],
+) -> Vec<u8> {
     let counts = [0usize, 1, 2, 3].map(|j| if j < n { (n - j).div_ceil(4) } else { 0 });
     let subs: Vec<Vec<u8>> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..4)
@@ -371,11 +392,15 @@ impl TensorCodec for RansCodec {
         data.extend_from_slice(b"RTCR");
         data.push(1);
         // Raw fallback only for odd-length chunks (no bf16 pairing).
-        if input.len() % 2 != 0 {
+        if !input.len().is_multiple_of(2) {
             data.push(RANS_FLAG_RAW);
             data.extend_from_slice(&(input.len() as u64).to_le_bytes());
             data.extend_from_slice(input);
-            return Ok(EncodedChunk { codec_id: Self::ID.into(), data, original_size: input.len() as u64 });
+            return Ok(EncodedChunk {
+                codec_id: Self::ID.into(),
+                data,
+                original_size: input.len() as u64,
+            });
         }
         let n = input.len() / 2;
         let mut exp = vec![0u8; n];
@@ -399,7 +424,11 @@ impl TensorCodec for RansCodec {
             data.extend_from_slice(l);
         }
         data.extend_from_slice(&res);
-        Ok(EncodedChunk { codec_id: Self::ID.into(), data, original_size: input.len() as u64 })
+        Ok(EncodedChunk {
+            codec_id: Self::ID.into(),
+            data,
+            original_size: input.len() as u64,
+        })
     }
 
     fn decode(&self, encoded: &[u8], _meta: &DecodeMeta) -> CodecResult<Vec<u8>> {
@@ -411,7 +440,10 @@ impl TensorCodec for RansCodec {
         let n = u64::from_le_bytes(encoded[6..14].try_into().map_err(|_| err())?) as usize;
         let mut off = RANS_HEADER;
         if flags & RANS_FLAG_RAW != 0 {
-            return encoded.get(off..off + n).map(|s| s.to_vec()).ok_or_else(err);
+            return encoded
+                .get(off..off + n)
+                .map(|s| s.to_vec())
+                .ok_or_else(err);
         }
         let freq_bytes = encoded.get(off..off + 512).ok_or_else(err)?;
         let mut freq = [0u32; 256];
@@ -500,9 +532,17 @@ mod tests {
             let counts = count_symbols(&syms);
             let freq = normalize_freqs(&counts);
             let streams = rans_encode_interleaved4(&syms, &freq);
-            let sl = [&streams[0][..], &streams[1][..], &streams[2][..], &streams[3][..]];
+            let sl = [
+                &streams[0][..],
+                &streams[1][..],
+                &streams[2][..],
+                &streams[3][..],
+            ];
             let decoded = rans_decode_interleaved4(sl, syms.len(), &freq);
-            assert_eq!(decoded, syms, "interleaved-4 roundtrip must be bit-exact (len={len})");
+            assert_eq!(
+                decoded, syms,
+                "interleaved-4 roundtrip must be bit-exact (len={len})"
+            );
         }
     }
 
@@ -529,7 +569,10 @@ mod tests {
         let freq = normalize_freqs(&counts);
         let stream = rans_encode(&syms, &freq);
         let bits_per_sym = (stream.len() as f64 * 8.0) / syms.len() as f64;
-        assert!(bits_per_sym < 6.0, "rANS {bits_per_sym:.2} bits/sym should beat 6-bit fixed width");
+        assert!(
+            bits_per_sym < 6.0,
+            "rANS {bits_per_sym:.2} bits/sym should beat 6-bit fixed width"
+        );
         assert_eq!(rans_decode(&stream, syms.len(), &freq), syms);
     }
 
@@ -547,11 +590,22 @@ mod tests {
                 .collect();
             let freq = normalize_freqs(&count_symbols(&syms));
             let streams = rans_encode_interleaved4(&syms, &freq);
-            let sl = [&streams[0][..], &streams[1][..], &streams[2][..], &streams[3][..]];
+            let sl = [
+                &streams[0][..],
+                &streams[1][..],
+                &streams[2][..],
+                &streams[3][..],
+            ];
             let serial = rans_decode_interleaved4(sl, len, &freq);
             let parallel = rans_decode_interleaved4_parallel(sl, len, &freq);
-            assert_eq!(parallel, serial, "parallel decode must equal serial (len={len})");
-            assert_eq!(parallel, syms, "parallel decode must be lossless (len={len})");
+            assert_eq!(
+                parallel, serial,
+                "parallel decode must equal serial (len={len})"
+            );
+            assert_eq!(
+                parallel, syms,
+                "parallel decode must be lossless (len={len})"
+            );
         }
     }
 
@@ -570,22 +624,49 @@ mod tests {
             let bits = (((state >> 31) & 1) as u16) << 15 | (exp << 7) | (state & 0x7F) as u16;
             bytes.extend_from_slice(&bits.to_le_bytes());
         }
-        let meta = EncodeMeta { name: "w".into(), shape: vec![n as u64], dtype: "bf16".into() };
+        let meta = EncodeMeta {
+            name: "w".into(),
+            shape: vec![n as u64],
+            dtype: "bf16".into(),
+        };
         let enc = RansCodec.encode(&bytes, &meta).unwrap();
         assert_eq!(enc.codec_id, "rtc-rans-v1");
-        assert!(enc.data.len() < bytes.len(), "must compress: {} >= {}", enc.data.len(), bytes.len());
-        let dmeta = DecodeMeta { codec_id: "rtc-rans-v1".into(), uncompressed_size: bytes.len() as u64 };
-        assert_eq!(RansCodec.decode(&enc.data, &dmeta).unwrap(), bytes, "bf16 roundtrip must be bit-exact");
+        assert!(
+            enc.data.len() < bytes.len(),
+            "must compress: {} >= {}",
+            enc.data.len(),
+            bytes.len()
+        );
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-rans-v1".into(),
+            uncompressed_size: bytes.len() as u64,
+        };
+        assert_eq!(
+            RansCodec.decode(&enc.data, &dmeta).unwrap(),
+            bytes,
+            "bf16 roundtrip must be bit-exact"
+        );
     }
 
     // Odd-length chunks fall back to raw and still round-trip.
     #[test]
     fn rans_codec_raw_fallback_roundtrip() {
         let bytes: Vec<u8> = (0..1235u32).map(|x| (x * 7) as u8).collect(); // ODD length => raw fallback
-        let meta = EncodeMeta { name: "idx".into(), shape: vec![bytes.len() as u64], dtype: "u8".into() };
+        let meta = EncodeMeta {
+            name: "idx".into(),
+            shape: vec![bytes.len() as u64],
+            dtype: "u8".into(),
+        };
         let enc = RansCodec.encode(&bytes, &meta).unwrap();
-        let dmeta = DecodeMeta { codec_id: "rtc-rans-v1".into(), uncompressed_size: bytes.len() as u64 };
-        assert_eq!(RansCodec.decode(&enc.data, &dmeta).unwrap(), bytes, "raw-fallback roundtrip must be bit-exact");
+        let dmeta = DecodeMeta {
+            codec_id: "rtc-rans-v1".into(),
+            uncompressed_size: bytes.len() as u64,
+        };
+        assert_eq!(
+            RansCodec.decode(&enc.data, &dmeta).unwrap(),
+            bytes,
+            "raw-fallback roundtrip must be bit-exact"
+        );
     }
 
     #[test]
@@ -603,11 +684,20 @@ mod tests {
             let freq = normalize_freqs(&count_symbols(&syms));
             let streams = rans_encode_interleaved8(&syms, &freq);
             let sl = [
-                &streams[0][..], &streams[1][..], &streams[2][..], &streams[3][..],
-                &streams[4][..], &streams[5][..], &streams[6][..], &streams[7][..],
+                &streams[0][..],
+                &streams[1][..],
+                &streams[2][..],
+                &streams[3][..],
+                &streams[4][..],
+                &streams[5][..],
+                &streams[6][..],
+                &streams[7][..],
             ];
             let decoded = rans_decode_interleaved8(sl, syms.len(), &freq);
-            assert_eq!(decoded, syms, "interleaved-8 roundtrip must be bit-exact (len={len})");
+            assert_eq!(
+                decoded, syms,
+                "interleaved-8 roundtrip must be bit-exact (len={len})"
+            );
         }
     }
 
@@ -626,7 +716,11 @@ mod tests {
                 state ^= state >> 17;
                 state ^= state << 5;
                 // realistic bf16 exponent peak: ~70% on 118..120, rest spread 104..127
-                if state % 100 < 70 { (118 + (state % 3)) as u8 } else { (104 + (state % 24)) as u8 }
+                if state % 100 < 70 {
+                    (118 + (state % 3)) as u8
+                } else {
+                    (104 + (state % 24)) as u8
+                }
             })
             .collect();
         let freq = normalize_freqs(&count_symbols(&syms));
@@ -654,8 +748,14 @@ mod tests {
         let l4 = gw(t1.elapsed().as_secs_f64());
 
         let sl8 = [
-            &s8[0][..], &s8[1][..], &s8[2][..], &s8[3][..],
-            &s8[4][..], &s8[5][..], &s8[6][..], &s8[7][..],
+            &s8[0][..],
+            &s8[1][..],
+            &s8[2][..],
+            &s8[3][..],
+            &s8[4][..],
+            &s8[5][..],
+            &s8[6][..],
+            &s8[7][..],
         ];
         let t2 = Instant::now();
         for _ in 0..reps {
@@ -663,13 +763,26 @@ mod tests {
             std::hint::black_box(&out);
         }
         let l8 = gw(t2.elapsed().as_secs_f64());
-        assert_eq!(&out[..n], &syms[..], "8-lane decode must stay bit-exact in the bench");
+        assert_eq!(
+            &out[..n],
+            &syms[..],
+            "8-lane decode must stay bit-exact in the bench"
+        );
 
         let bits = (s1.len() as f64 * 8.0) / n as f64;
-        eprintln!("\n########## REEBORN edge lane bench ({n} exp symbols, {bits:.3} bits/sym) ##########");
+        eprintln!(
+            "\n########## REEBORN edge lane bench ({n} exp symbols, {bits:.3} bits/sym) ##########"
+        );
         eprintln!("  scalar   (1 lane)  = {scalar:.3} Gweight/s/core");
-        eprintln!("  interleaved4       = {l4:.3} Gweight/s/core  ({:.2}x vs scalar)", l4 / scalar);
-        eprintln!("  interleaved8       = {l8:.3} Gweight/s/core  ({:.2}x vs scalar, {:.2}x vs 4-lane)", l8 / scalar, l8 / l4);
+        eprintln!(
+            "  interleaved4       = {l4:.3} Gweight/s/core  ({:.2}x vs scalar)",
+            l4 / scalar
+        );
+        eprintln!(
+            "  interleaved8       = {l8:.3} Gweight/s/core  ({:.2}x vs scalar, {:.2}x vs 4-lane)",
+            l8 / scalar,
+            l8 / l4
+        );
         eprintln!("##########");
     }
 }

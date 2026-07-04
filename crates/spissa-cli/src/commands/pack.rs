@@ -1,23 +1,22 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::commands::common::parse_size;
 use crate::progress::{bar, print_pack_result, Spinner};
 use anyhow::{Context, Result};
-use std::time::Instant;
-use spissa_container::{ChunkRangeSpec, DType, GlobalMetadata, SpissaWriter, TensorMeta};
-use spissa_import::{
-    read_model_config_metadata, read_tokenizer_metadata, SafetensorsReader,
-    ShardedSafetensorsReader,
-};
 use rtc_codec::{
     BitplaneCodec, EncodeMeta, HuffmanCodec, RansCodec, RawCodec, ReebornForCodec, RleCodec,
     TensorCodec, CODEC_BITPLANE_V1, CODEC_HUFF_V1, CODEC_RANS_V1, CODEC_RAW_V1,
     CODEC_REEBORN_FOR_V1, CODEC_RLE_V1,
 };
 use sha2::{Digest, Sha256};
+use spissa_container::{ChunkRangeSpec, DType, GlobalMetadata, SpissaWriter, TensorMeta};
+use spissa_import::{
+    read_model_config_metadata, read_tokenizer_metadata, SafetensorsReader,
+    ShardedSafetensorsReader,
+};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PackCodecPolicy {
@@ -228,6 +227,8 @@ impl TensorSource {
         }
     }
 
+    // Needs &mut self: the underlying reader hashes tensor data as it streams it.
+    #[allow(clippy::wrong_self_convention)]
     fn to_rllm_meta(&mut self, name: &str) -> Result<TensorMeta> {
         match self {
             Self::Single(r) => Ok(r.to_rllm_meta(name)?),
@@ -248,11 +249,13 @@ impl TensorSource {
 /// (the two intermediate-size halves). The row ranges are derived purely from config, so the loop
 /// can slice each block out of the source tensor's raw bytes. Returns 3-tuples
 /// `(packed_name, source_name, Some((row_start, row_end)))`; non-fused tensors get `None`.
+#[allow(clippy::type_complexity)]
 fn expand_fused_phi3(
     tensors: Vec<(String, String)>,
     config: Option<&spissa_container::ModelConfigMetadata>,
 ) -> Result<Vec<(String, String, Option<(usize, usize)>)>> {
-    let c = config.context("Phi-3 pack needs config.json (heads / head_dim / intermediate_size)")?;
+    let c =
+        config.context("Phi-3 pack needs config.json (heads / head_dim / intermediate_size)")?;
     let nh = c.num_attention_heads.context("phi3: num_attention_heads")? as usize;
     let nkv = c
         .num_key_value_heads
@@ -262,18 +265,34 @@ fn expand_fused_phi3(
     let hd = c
         .head_dim
         .map(|h| h as usize)
-        .unwrap_or(if nh > 0 { hs / nh } else { 0 });
+        .unwrap_or(hs.checked_div(nh).unwrap_or(0));
     let inter = c.intermediate_size.context("phi3: intermediate_size")? as usize;
     let (q, kv) = (nh * hd, nkv * hd);
     let mut out = Vec::with_capacity(tensors.len());
     for (mapped, src) in tensors {
         if let Some(base) = mapped.strip_suffix("qkv_proj.weight") {
             out.push((format!("{base}q_proj.weight"), src.clone(), Some((0, q))));
-            out.push((format!("{base}k_proj.weight"), src.clone(), Some((q, q + kv))));
-            out.push((format!("{base}v_proj.weight"), src, Some((q + kv, q + 2 * kv))));
+            out.push((
+                format!("{base}k_proj.weight"),
+                src.clone(),
+                Some((q, q + kv)),
+            ));
+            out.push((
+                format!("{base}v_proj.weight"),
+                src,
+                Some((q + kv, q + 2 * kv)),
+            ));
         } else if let Some(base) = mapped.strip_suffix("gate_up_proj.weight") {
-            out.push((format!("{base}gate_proj.weight"), src.clone(), Some((0, inter))));
-            out.push((format!("{base}up_proj.weight"), src, Some((inter, 2 * inter))));
+            out.push((
+                format!("{base}gate_proj.weight"),
+                src.clone(),
+                Some((0, inter)),
+            ));
+            out.push((
+                format!("{base}up_proj.weight"),
+                src,
+                Some((inter, 2 * inter)),
+            ));
         } else {
             out.push((mapped, src, None));
         }
@@ -392,6 +411,7 @@ pub fn run(
     // Phi-3 packs q/k/v as one fused `qkv_proj` and gate/up as one `gate_up_proj`; split them at
     // import so the runtime sees a standard LLaMA model (separately-named projection tensors). Each
     // entry is (packed_name, source_name, Some(row_start..row_end)) for a split, None otherwise.
+    #[allow(clippy::type_complexity)]
     let tensors: Vec<(String, String, Option<(usize, usize)>)> = if architecture == "phi3" {
         expand_fused_phi3(mapped, model_config.as_ref())?
     } else {
@@ -669,7 +689,7 @@ pub fn run(
             .unwrap_or(output);
         print_pack_result(
             filename,
-            &codec_policy.metadata_label(),
+            codec_policy.metadata_label(),
             total_tensors,
             chunk_count,
             total_original,
@@ -704,8 +724,10 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
     let base_sha = sha256_array(&std::fs::read(base_spsa)?);
     let mut base = LazySpissaModel::open(base_spsa)
         .map_err(|e| anyhow::anyhow!("Failed to open base .spsa {base_spsa}: {e}"))?;
-    let base_shapes: std::collections::HashMap<String, Vec<u64>> =
-        base.tensors().map(|t| (t.name.clone(), t.shape.clone())).collect();
+    let base_shapes: std::collections::HashMap<String, Vec<u64>> = base
+        .tensors()
+        .map(|t| (t.name.clone(), t.shape.clone()))
+        .collect();
 
     // Fine-tune source + arch/config/tokenizer (the delta `.spsa` carries the FT's own metadata).
     let mut source = TensorSource::open(ft_path)
@@ -761,7 +783,10 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
         let meta = source.to_rllm_meta(src)?;
         let ftb = source.read_tensor(src)?;
         let eligible = meta.dtype == DType::Bf16
-            && base_shapes.get(mapped).map(|s| *s == meta.shape).unwrap_or(false);
+            && base_shapes
+                .get(mapped)
+                .map(|s| *s == meta.shape)
+                .unwrap_or(false);
         if eligible {
             let bb = base
                 .decode_tensor_raw_bytes(mapped)
@@ -816,7 +841,13 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
     };
     let mut writer = SpissaWriter::new(output, metadata)?;
     let mut next_id = 0u64;
-    let mut add = |w: &mut SpissaWriter, name: String, shape: Vec<u64>, dtype: DType, n: u64, sha: [u8; 32]| -> u64 {
+    let mut add = |w: &mut SpissaWriter,
+                   name: String,
+                   shape: Vec<u64>,
+                   dtype: DType,
+                   n: u64,
+                   sha: [u8; 32]|
+     -> u64 {
         let tid = next_id;
         next_id += 1;
         w.add_tensor(TensorMeta {
@@ -834,7 +865,14 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
     };
 
     // synthetic global-table tensor (raw) — one per model, read back by the loader.
-    let tid = add(&mut writer, dc::DELTA_TABLE_TENSOR.to_string(), vec![table_bytes.len() as u64], DType::U8, table_bytes.len() as u64, sha256_array(&table_bytes));
+    let tid = add(
+        &mut writer,
+        dc::DELTA_TABLE_TENSOR.to_string(),
+        vec![table_bytes.len() as u64],
+        DType::U8,
+        table_bytes.len() as u64,
+        sha256_array(&table_bytes),
+    );
     writer.write_chunk(tid, CODEC_RAW_V1, &table_bytes, &table_bytes, 0)?;
 
     // delta tensors (single chunk each, base-exponent-conditioned reeform-delta-v1).
@@ -844,12 +882,26 @@ pub fn run_delta(ft: &str, base_spsa: &str, output: &str, verbose: bool) -> Resu
             .decode_tensor_raw_bytes(&it.mapped)
             .map_err(|e| anyhow::anyhow!("decode base tensor {}: {e}", it.mapped))?;
         let enc = dc::encode_tensor_bx(&ftb, &bb, &codebook);
-        let tid = add(&mut writer, it.mapped.clone(), it.shape.clone(), DType::Bf16, ftb.len() as u64, it.ft_sha);
+        let tid = add(
+            &mut writer,
+            it.mapped.clone(),
+            it.shape.clone(),
+            DType::Bf16,
+            ftb.len() as u64,
+            it.ft_sha,
+        );
         writer.write_chunk(tid, dc::CODEC_DELTA_V1, &enc, &ftb, 0)?;
     }
     // raw passthrough tensors.
     for it in &ritems {
-        let tid = add(&mut writer, it.mapped.clone(), it.shape.clone(), it.dtype, it.bytes.len() as u64, it.sha);
+        let tid = add(
+            &mut writer,
+            it.mapped.clone(),
+            it.shape.clone(),
+            it.dtype,
+            it.bytes.len() as u64,
+            it.sha,
+        );
         writer.write_chunk(tid, CODEC_RAW_V1, &it.bytes, &it.bytes, 0)?;
     }
     writer.finalize()?;
@@ -1188,7 +1240,10 @@ mod tests {
         let mapped = map_tensor_names(&raw, "gemma3");
         assert_eq!(mapped.len(), 1, "vision tower dropped, LM kept");
         assert_eq!(mapped[0].0, "model.layers.0.self_attn.q_proj.weight");
-        assert_eq!(mapped[0].1, "language_model.model.layers.0.self_attn.q_proj.weight");
+        assert_eq!(
+            mapped[0].1,
+            "language_model.model.layers.0.self_attn.q_proj.weight"
+        );
     }
 
     #[test]
@@ -1218,7 +1273,10 @@ mod tests {
             .find(|(_, src)| src.ends_with("layers.0.linear_attn.in_proj_qkv.weight"))
             .expect("linear_attn tensor kept");
         assert_eq!(qkv.0, "model.layers.0.linear_attn.in_proj_qkv.weight");
-        assert_eq!(qkv.1, "model.language_model.layers.0.linear_attn.in_proj_qkv.weight");
+        assert_eq!(
+            qkv.1,
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight"
+        );
     }
 
     #[test]

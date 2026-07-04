@@ -1,6 +1,10 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
+#![allow(
+    clippy::needless_range_loop,
+    clippy::iter_cloned_collect,
+    unused_parens
+)]
 
 // R151 EXPERIMENT — Shannon-entropy floor of real bf16 weights.
 //
@@ -67,7 +71,7 @@ fn analyze(name: &str, bytes: &[u8], row_len: usize) {
             let i = r * row_len + c;
             let bits = u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]);
             let exp = ((bits >> 7) & 0xFF) as usize;
-            let sign = ((bits >> 15) & 1) as u16;
+            let sign = ((bits >> 15) & 1);
             let mant = bits & 0x7F;
             let res = ((sign << 7) | mant) as usize;
             exp_hist[exp] += 1;
@@ -104,10 +108,17 @@ fn analyze(name: &str, bytes: &[u8], row_len: usize) {
     eprintln!("\n=== {name}  ({n} weights, row_len={row_len}) ===");
     eprintln!("  exponent: {distinct_exp} distinct  H(exp)={h_exp:.3} bits  (bit-plane fixed width w={w})");
     eprintln!("  H(delta-exp along row) = {h_delta:.3} bits   (2D-structure headroom)");
-    eprintln!("  H(residual byte=sign+mantissa) = {h_res:.3} bits  (bit-plane stores this as 8 raw)");
+    eprintln!(
+        "  H(residual byte=sign+mantissa) = {h_res:.3} bits  (bit-plane stores this as 8 raw)"
+    );
     eprintln!(
         "  per-bit entropy: sign={h_sign:.3}  mantissa[m6..m0]=[{}]  (sum mantissa={mant_sum:.3})",
-        mant_bits.iter().rev().map(|x| format!("{x:.3}")).collect::<Vec<_>>().join(", ")
+        mant_bits
+            .iter()
+            .rev()
+            .map(|x| format!("{x:.3}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     eprintln!("  --- bits/weight comparison ---");
     eprintln!("  raw bf16:            16.000");
@@ -172,8 +183,8 @@ fn conditional_analysis(name: &str, bytes: &[u8], row_len: usize) {
             pr = Some(res);
         }
     }
-    let h_exp = shannon_bits(&exp_hist.iter().map(|&c| c).collect::<Vec<_>>());
-    let h_res = shannon_bits(&res_hist.iter().map(|&c| c).collect::<Vec<_>>());
+    let h_exp = shannon_bits(&exp_hist.iter().copied().collect::<Vec<_>>());
+    let h_res = shannon_bits(&res_hist.iter().copied().collect::<Vec<_>>());
     let exp_joint: [u64; 65536] = exp_joint.try_into().unwrap();
     let res_joint: [u64; 65536] = res_joint.try_into().unwrap();
     let er_joint: [u64; 65536] = er_joint.try_into().unwrap();
@@ -184,14 +195,26 @@ fn conditional_analysis(name: &str, bytes: &[u8], row_len: usize) {
     let mi_er = h_exp + h_res - joint_entropy(&er_joint);
 
     eprintln!("\n=== {name}  context/conditional entropy ===");
-    eprintln!("  H(exp)            = {h_exp:.3}   H(exp | exp_prev) = {h_exp_cond:.3}  (gain {:.3})", h_exp - h_exp_cond);
-    eprintln!("  H(residual)       = {h_res:.3}   H(res | res_prev) = {h_res_cond:.3}  (gain {:.3})", h_res - h_res_cond);
-    eprintln!("  I(exp ; residual) = {mi_er:.4} bits  (mutual info; >0 means joint-coding could save)");
+    eprintln!(
+        "  H(exp)            = {h_exp:.3}   H(exp | exp_prev) = {h_exp_cond:.3}  (gain {:.3})",
+        h_exp - h_exp_cond
+    );
+    eprintln!(
+        "  H(residual)       = {h_res:.3}   H(res | res_prev) = {h_res_cond:.3}  (gain {:.3})",
+        h_res - h_res_cond
+    );
+    eprintln!(
+        "  I(exp ; residual) = {mi_er:.4} bits  (mutual info; >0 means joint-coding could save)"
+    );
     eprintln!(
         "  => order-1 floor ≈ {:.3} bits/weight (order-0 was {:.3}); ceiling {} move",
         h_exp_cond + h_res_cond,
         h_exp + h_res,
-        if (h_exp - h_exp_cond) + (h_res - h_res_cond) + mi_er > 0.1 { "COULD" } else { "does NOT" }
+        if (h_exp - h_exp_cond) + (h_res - h_res_cond) + mi_er > 0.1 {
+            "COULD"
+        } else {
+            "does NOT"
+        }
     );
 }
 
@@ -226,9 +249,8 @@ fn weight_entropy_floor_real_weights() {
     // Pick representative tensors: the tied embedding/lm-head + a few 2D body
     // projections (attention + MLP), whichever names exist.
     let names: Vec<String> = m.tensor_names().iter().map(|s| s.to_string()).collect();
-    let pick = |needle: &str| -> Option<String> {
-        names.iter().find(|n| n.contains(needle)).cloned()
-    };
+    let pick =
+        |needle: &str| -> Option<String> { names.iter().find(|n| n.contains(needle)).cloned() };
     let targets: Vec<String> = [
         "embed_tokens.weight",
         "layers.0.self_attn.q_proj.weight",
@@ -238,7 +260,11 @@ fn weight_entropy_floor_real_weights() {
     .iter()
     .filter_map(|t| pick(t))
     .collect();
-    assert!(!targets.is_empty(), "no target tensors found; names sample: {:?}", &names[..names.len().min(8)]);
+    assert!(
+        !targets.is_empty(),
+        "no target tensors found; names sample: {:?}",
+        &names[..names.len().min(8)]
+    );
 
     eprintln!("\n########## R151 weight-entropy floor (model: {MODEL}) ##########");
     for name in &targets {

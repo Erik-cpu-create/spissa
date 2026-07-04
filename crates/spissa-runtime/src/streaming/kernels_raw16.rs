@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // Dense fused raw bf16/fp16/16-bit matmul (rle + chunk/batch1/row-blocked) + SiLU-gate-up
 // + 16-bit dot-segment helpers. sparse -> kernels_raw16_sparse.rs, multiply-into ->
@@ -477,7 +476,7 @@ fn accumulate_fused_raw_bf16_chunk_batch_n(
     let mut local = 0usize;
     let mut global = element_start;
     // prologue: tail of a row begun in a previous chunk.
-    while local < chunk_elems && global % n != 0 {
+    while local < chunk_elems && !global.is_multiple_of(n) {
         let row_len = (n - global % n).min(chunk_elems - local);
         partial(output, local, global, row_len);
         local += row_len;

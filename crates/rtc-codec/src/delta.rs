@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — REEFORM lossless fine-tune delta codec (SECRET IP).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 // A fine-tune is its base plus a gentle update, so `Δ = W_ft − W_base` (on the bf16 bit patterns,
 // int-subtract mod 2^16, exactly reversible) clusters tightly around 0 and codes far below the full
@@ -272,6 +272,7 @@ fn table_len(t: &Tables) -> usize {
 }
 fn est_bits(hist: &[u64], t: &Tables) -> f64 {
     let mut bits = 0.0;
+    #[allow(clippy::needless_range_loop)] // s indexes the 2^16 symbol histogram directly
     for s in 0..65536 {
         if hist[s] > 0 {
             let p = t.freq[s] as f64 / PROB_SCALE as f64;

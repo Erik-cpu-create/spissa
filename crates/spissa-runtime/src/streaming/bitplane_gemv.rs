@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 // Fused REEPLANE decode -> bfdot GEMV (R144, Phase C).
 //
@@ -207,7 +206,7 @@ mod bitplane_gemv_tests {
         let mut off = 16;
         let palette = &enc.data[off..off + p];
         off += p;
-        let idx_bytes = (vocab * hidden * 5 + 7) / 8;
+        let idx_bytes = (vocab * hidden * 5).div_ceil(8);
         let idx_plane = &enc.data[off..off + idx_bytes];
         off += idx_bytes;
         let residuals = &enc.data[off..off + vocab * hidden];
@@ -253,7 +252,7 @@ mod bitplane_gemv_tests {
         let mut off = 16;
         let palette = enc.data[off..off + p].to_vec();
         off += p;
-        let idx_bytes = (n_weights * 5 + 7) / 8;
+        let idx_bytes = (n_weights * 5).div_ceil(8);
         let idx_plane = enc.data[off..off + idx_bytes].to_vec();
         off += idx_bytes;
         let residuals = enc.data[off..off + n_weights].to_vec();
@@ -349,7 +348,7 @@ mod bitplane_gemv_tests {
         let mut off = 16;
         let palette = enc.data[off..off + p].to_vec();
         off += p;
-        let idx_bytes = (n_weights * 5 + 7) / 8;
+        let idx_bytes = (n_weights * 5).div_ceil(8);
         let idx_plane = enc.data[off..off + idx_bytes].to_vec();
         off += idx_bytes;
         let residuals = enc.data[off..off + n_weights].to_vec();
@@ -402,7 +401,7 @@ mod bitplane_gemv_tests {
         let mut off = 16;
         let palette = enc.data[off..off + p].to_vec();
         off += p;
-        let idx_bytes = (n_weights * 5 + 7) / 8;
+        let idx_bytes = (n_weights * 5).div_ceil(8);
         let idx_plane = enc.data[off..off + idx_bytes].to_vec();
         off += idx_bytes;
         let residuals = enc.data[off..off + n_weights].to_vec();
@@ -463,7 +462,7 @@ mod bitplane_gemv_tests {
         let mut off = 16;
         let palette = &enc.data[off..off + p];
         off += p;
-        let idx_bytes = (vocab * hidden * 5 + 7) / 8;
+        let idx_bytes = (vocab * hidden * 5).div_ceil(8);
         let idx_plane = &enc.data[off..off + idx_bytes];
         off += idx_bytes;
         let residuals = &enc.data[off..off + vocab * hidden];

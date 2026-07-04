@@ -4,9 +4,11 @@ First Android bring-up. The compute kernels are ARM64 (NEON / `sdot` / `smmla`),
 ISA family as Android phones, so RLLM builds and runs natively in **Termux** — no
 cross-compilation needed. This is the easiest path: build on the phone, run on the phone.
 
-> Status: the code is ARM-portable and the macOS-specific bits (P-core detection via
-> `sysctl`) are `cfg`-gated with Android/Linux fallbacks (R172 adds big.LITTLE detection
-> from sysfs). The aarch64-android cross-build is **verified to compile** (R174, ~3.9 MB
+> Status: the code is ARM-portable. Big.LITTLE performance-core detection helpers
+> (macOS `sysctl` / Linux-Android sysfs) exist and are `cfg`-gated, but they are
+> **not currently wired into the worker-thread count** — decode parallelizes across
+> all cores the OS reports (`available_parallelism()`), capped by `RLLM_THREADS`.
+> The aarch64-android cross-build is **verified to compile** (R174, ~3.9 MB
 > stripped ELF, Bionic libc); it has NOT yet been run on physical hardware — report what breaks.
 
 ## Two ways to run
@@ -117,10 +119,11 @@ Type a message at `you> `, Enter to send. `/exit` to quit, `/reset` for a new co
 
 ## Android performance notes
 
-- **big.LITTLE is handled (R172):** the q8 decode path defaults to the phone's
-  performance cores (read from `/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq`,
-  excluding the slow efficiency tier) — same 2.2× win measured on Apple Silicon. Override
-  with `RLLM_THREADS=<n>` if the auto-detection is wrong on your SoC.
+- **Thread count:** the decode path spreads work across all cores the OS reports.
+  Performance-core detection helpers exist (sysfs `cpuinfo_max_freq` on Android) but
+  are not yet wired into the thread-count decision, so on big.LITTLE SoCs the
+  efficiency cores are also used. Tune with `RLLM_THREADS=<n>` — setting it to the
+  number of performance cores is the manual way to get the P-core-only behavior.
 - **mlock** (`--fast` enables it) may fail in Termux without privileges — that is
   non-fatal (the run continues, just without pinning). Drop `--fast` to skip it.
 - **RAM:** a 1B model needs ~1.7–2.3 GB resident. If the phone is tight, the OS will

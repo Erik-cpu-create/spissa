@@ -1,6 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. Unauthorized copying, use, or
-// distribution of this file, via any medium, is strictly prohibited.
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 
 use crate::RamaGenerationTiming;
 use crate::{
@@ -8,7 +7,7 @@ use crate::{
     streaming_echo_transformer_generate_from_model, streaming_embedding_lookup_from_model,
     streaming_tile_linear_argmax_from_model, streaming_tile_linear_from_model,
     streaming_transformer_block_with_runtime_and_timing_from_model, LazySpissaModel, MemoryBudget,
-    RamaContextState, Result, SpissaTokenizer, RuntimeError, StreamingAttentionRuntime,
+    RamaContextState, Result, RuntimeError, SpissaTokenizer, StreamingAttentionRuntime,
     StreamingBlockConfig, StreamingBlockParameters, StreamingBlockRuntime,
     StreamingBlockTensorNames, StreamingBlockTiming, StreamingEchoGenerationResult,
     StreamingEchoTransformerConfig, StreamingEchoTransformerParameters,
@@ -1785,14 +1784,15 @@ fn validate_layer_decode_state(
 mod tests {
     use super::*;
     use crate::{
-        streaming_echo_transformer_generate_from_model, LazySpissaModel, MemoryBudget, SpissaTokenizer,
-        StreamingBlockParameters, StreamingBlockTensorNames, StreamingEchoTransformerParameters,
-        StreamingEchoTransformerTensorNames, StreamingSamplingConfig,
+        streaming_echo_transformer_generate_from_model, LazySpissaModel, MemoryBudget,
+        SpissaTokenizer, StreamingBlockParameters, StreamingBlockTensorNames,
+        StreamingEchoTransformerParameters, StreamingEchoTransformerTensorNames,
+        StreamingSamplingConfig,
     };
+    use sha2::{Digest, Sha256};
     use spissa_container::{
         DType, GlobalMetadata, ModelConfigMetadata, SpissaWriter, TensorMeta, TokenizerMetadata,
     };
-    use sha2::{Digest, Sha256};
 
     const NUM_LAYERS: usize = 2;
     const VOCAB_SIZE: usize = 3;

@@ -1,13 +1,40 @@
 # Contributing to Spissa — MANDATORY Process / Proses WAJIB
 
-> This document is **mandatory** (`dokumen wajib`). Every change to this
-> repository **must** follow the rules below. CI enforces them; pull requests
-> that violate them will not be merged.
+> This document describes the **mandatory** process for changes to this
+> repository. Every change **must** follow the rules below. CI enforces them;
+> pull requests that violate them will not be merged.
 
-Spissa is proprietary software (see [`LICENSE`](LICENSE)). These rules exist so
-that every change is **versioned automatically** and recorded in a
-**changelog**, and so the runtime keeps building (including the Android
-cross-compile artifacts).
+Spissa is open source under the [MIT License](LICENSE). Contributions are very
+welcome. These rules exist so that every change is **versioned automatically**
+and recorded in a **changelog**, and so the runtime keeps building (including the
+Android cross-compile artifacts).
+
+---
+
+## 0. Licensing & Developer Certificate of Origin (DCO)
+
+By contributing to Spissa you agree that your contributions are licensed under
+the project's [MIT License](LICENSE) (inbound = outbound).
+
+We use the [Developer Certificate of Origin](https://developercertificate.org/)
+(DCO) instead of a CLA. It is a lightweight, one-line attestation that you wrote
+the patch or otherwise have the right to submit it under the project license.
+
+**Every commit must be signed off.** Add the `-s` flag when you commit:
+
+```bash
+git commit -s -m "fix(tokenizer): group digits in runs of <=3"
+```
+
+This appends a line to your commit message:
+
+```
+Signed-off-by: Your Name <your.email@example.com>
+```
+
+The name/email must be real and match your Git identity. Forgot to sign off?
+Amend the last commit with `git commit --amend -s`, or for a whole branch:
+`git rebase --signoff main`.
 
 ---
 
@@ -83,13 +110,16 @@ docs: fix a typo [revision]                         # revision bump
 ## 3. Before you push (local gates)
 
 ```bash
-cargo fmt --all          # format
-cargo build --workspace  # must compile
-cargo test --workspace   # must pass
-git diff --check         # no whitespace errors
+cargo fmt --all                              # format (CI enforces --check)
+cargo clippy --workspace --all-targets -- -D warnings  # lint (enforced in CI)
+cargo build --workspace                      # must compile
+cargo test --workspace                       # must pass
+git diff --check                             # no whitespace errors
 ```
 
-CI (`.github/workflows/ci.yml`) re-runs build + test on every push and PR.
+CI (`.github/workflows/ci.yml`) re-runs fmt (blocking), clippy (blocking, `-D
+warnings`), build, and test on every push and PR, and checks that every commit
+in a PR is **signed off** (DCO, see §0).
 
 ---
 

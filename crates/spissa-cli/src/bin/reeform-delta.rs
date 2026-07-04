@@ -1,5 +1,5 @@
-// Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
-// Proprietary and confidential — see LICENSE. CONFIDENTIAL RESEARCH (REEFORM).
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Rama Erik Esprada
 //
 //! REEFORM fine-tune-delta probe: a fine-tune (Instruct) is the SAME weights as its base
 //! after gentle training, so `W_ft` should be close to `W_base`. If the lossless delta
@@ -30,22 +30,35 @@ fn h0(syms: &[u32]) -> f64 {
         *hist.entry(s).or_insert(0) += 1;
     }
     let n = syms.len() as f64;
-    -hist.values().map(|&c| { let p = c as f64 / n; p * p.log2() }).sum::<f64>()
+    -hist
+        .values()
+        .map(|&c| {
+            let p = c as f64 / n;
+            p * p.log2()
+        })
+        .sum::<f64>()
 }
 
 fn read_u16(r: &mut SafetensorsReader, name: &str) -> anyhow::Result<Vec<u16>> {
     let b = r.read_tensor(name)?;
-    Ok((0..b.len() / 2).map(|i| u16::from_le_bytes([b[2 * i], b[2 * i + 1]])).collect())
+    Ok((0..b.len() / 2)
+        .map(|i| u16::from_le_bytes([b[2 * i], b[2 * i + 1]]))
+        .collect())
 }
 
 fn main() -> anyhow::Result<()> {
-    let base = std::env::args().nth(1).unwrap_or_else(|| "models/smollm2-135m/model.safetensors".into());
-    let ft = std::env::args().nth(2).unwrap_or_else(|| "models/downloads/smollm2-135m-instruct/model.safetensors".into());
+    let base = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "models/smollm2-135m/model.safetensors".into());
+    let ft = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "models/downloads/smollm2-135m-instruct/model.safetensors".into());
     eprintln!("[reeform-delta] base={base}\n               ft  ={ft}");
     let mut rb = SafetensorsReader::open(&base)?;
     let mut rf = SafetensorsReader::open(&ft)?;
     let bnames: Vec<String> = rb.list_tensors().iter().map(|s| s.to_string()).collect();
-    let fset: std::collections::HashSet<String> = rf.list_tensors().iter().map(|s| s.to_string()).collect();
+    let fset: std::collections::HashSet<String> =
+        rf.list_tensors().iter().map(|s| s.to_string()).collect();
 
     let (mut w, mut hft, mut hxor, mut hint, mut hval) = (0u64, 0.0f64, 0.0, 0.0, 0.0);
     let mut zeros = 0u64;
@@ -101,7 +114,10 @@ fn main() -> anyhow::Result<()> {
     let int_rate = hint / wf;
     let val_rate = hval / wf;
     println!("\n=== REEFORM fine-tune delta — {nmatch} matched bf16 matrices, {w} weights ===\n");
-    println!("  weights IDENTICAL base==ft : {:.2}%", zeros as f64 / wf * 100.0);
+    println!(
+        "  weights IDENTICAL base==ft : {:.2}%",
+        zeros as f64 / wf * 100.0
+    );
     println!("  H0(W_ft)        baseline   = {base_rate:.4} bit/weight   <- floor (ship full ft)");
     println!("  H0(XOR delta)              = {xor_rate:.4} bit/weight   (lossless: ft = base ⊕ Δ)");
     println!("  H0(int-sub delta)          = {int_rate:.4} bit/weight");
@@ -109,21 +125,33 @@ fn main() -> anyhow::Result<()> {
     let best = int_rate.min(xor_rate).min(val_rate);
     let win = base_rate - best;
     println!("\n--- LOSSLESS PROOF ---");
-    println!("  round-trip ft = base + Δ (mod 2^16): {roundtrip_mismatches} mismatches / {w} weights");
+    println!(
+        "  round-trip ft = base + Δ (mod 2^16): {roundtrip_mismatches} mismatches / {w} weights"
+    );
     let lossless = roundtrip_mismatches == 0;
     println!(
         "  {} reconstruction is {}",
         if lossless { "✅" } else { "❌" },
-        if lossless { "BIT-EXACT (provably lossless)" } else { "NOT exact (BUG)" }
+        if lossless {
+            "BIT-EXACT (provably lossless)"
+        } else {
+            "NOT exact (BUG)"
+        }
     );
     println!("\n--- VERDICT ---");
     if win > 0.05 && lossless {
         println!("  ✅✅ SUCCESS — fine-tune Δ is {win:.4} bit/weight smaller than the full model");
-        println!("      = {:.1}% LOSSLESS reduction ({best:.3} vs {base_rate:.3} bit/weight)", win / base_rate * 100.0);
+        println!(
+            "      = {:.1}% LOSSLESS reduction ({best:.3} vs {base_rate:.3} bit/weight)",
+            win / base_rate * 100.0
+        );
         println!("      Ship base once + bit-exact Δ. Per extra fine-tune: {best:.3} not {base_rate:.3} bit/weight.");
         println!("      Novel: nobody ships fine-tunes as lossless integer-deltas from base.");
     } else {
-        println!("  ❌ delta {:+.4} or not lossless — not a lever here.", -win);
+        println!(
+            "  ❌ delta {:+.4} or not lossless — not a lever here.",
+            -win
+        );
     }
     Ok(())
 }

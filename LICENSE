@@ -1,38 +1,21 @@
-Copyright (c) 2026 Rama Erik Esprada. All Rights Reserved.
+MIT License
 
-Spissa (Runtime-compressed Local LLM, formerly RLLM) and all associated source code, codecs,
-algorithms, kernels, benchmarks, documentation, and related materials in this
-repository (the "Software") are the proprietary and confidential intellectual
-property of Rama Erik Esprada (the "Owner").
+Copyright (c) 2026 Rama Erik Esprada
 
-NO LICENSE IS GRANTED. Unless you have a separate written agreement signed by the
-Owner, you may NOT, in whole or in part:
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-  - copy, reproduce, or store the Software;
-  - use, run, or execute the Software for any purpose;
-  - modify, adapt, translate, or create derivative works of the Software;
-  - distribute, publish, sublicense, sell, lease, or transfer the Software;
-  - reverse engineer, decompile, or disassemble the Software, except to the
-    limited extent that applicable law expressly permits despite this prohibition;
-  - remove, obscure, or alter any copyright, attribution, or proprietary notice.
-
-The Software contains original inventions of the Owner, including without
-limitation the rtc-bitplane-v1, rtc-rans-v1, and rtc-dfloat-v1 lossless tensor
-codecs, the REE-lineage execution kernels (e.g. REEPLANE, REESTREAM, REESTREAM-PAR,
-REEPLANE-W6), and the associated runtime-compressed streaming architecture. All
-right, title, and interest in and to the Software, including all intellectual
-property rights therein, are and shall remain exclusively with the Owner. No
-rights are granted by implication, estoppel, or otherwise.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE OWNER BE
-LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF
-CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
-SOFTWARE OR ITS USE OR OTHER DEALINGS.
-
-Unauthorized use, reproduction, or distribution of the Software, or any portion
-of it, may result in severe civil and criminal penalties, and will be prosecuted
-to the maximum extent possible under applicable law.
-
-For licensing inquiries, contact the Owner.
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
