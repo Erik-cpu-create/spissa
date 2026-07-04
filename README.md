@@ -453,10 +453,9 @@ the full rules.
 
 1. **Lossless by default** — decoded weights must be bit-identical to originals
 2. **Honest metrics** — report actual compression ratios, never overclaim
-3. **From scratch** — no wrapping Ollama/llama.cpp
-4. **Custom codecs** — compression codecs are in-house RTC codecs unless explicitly approved otherwise
-5. **Incremental** — build phase by phase, verify each step
-6. **Test everything** — round-trip tests for every codec, checksums everywhere
+3. **Custom codecs** — compression codecs are in-house RTC codecs unless explicitly approved otherwise
+4. **Incremental** — build phase by phase, verify each step
+5. **Test everything** — round-trip tests for every codec, checksums everywhere
 
 ## License
 
