@@ -7,6 +7,10 @@
 // scalar plane-bench said no (decode additive); this tests the real pooled+NEON regime.
 // If fused wins here, the runtime bit-plane-fused path is worth building.
 
+// The fused bit-plane decode call is `#[cfg(target_arch = "aarch64")]`, so on other
+// targets the buffers feeding it (and the `mut` scratch it fills) read as unused.
+#![allow(unused_variables, unused_mut)]
+
 use rtc_codec::{BitplaneCodec, EncodeMeta, TensorCodec};
 use std::time::Instant;
 

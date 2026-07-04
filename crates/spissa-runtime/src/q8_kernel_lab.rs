@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Rama Erik Esprada
 #![allow(clippy::needless_range_loop)] // experimental kernel lab: index loops mirror the GEMM index math
+#![allow(dead_code)] // experimental lab: several kernels are aarch64-only or bench-only
 
 use serde::Serialize;
 #[cfg(target_arch = "aarch64")]

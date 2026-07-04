@@ -15,6 +15,7 @@ fn accumulate_q8_0_chunk_panel_smmla(
     config: StreamingLinearConfig,
 ) -> Result<bool> {
     #[cfg(not(target_arch = "aarch64"))]
+    #[allow(clippy::needless_return)] // `return` required: the aarch64 block below is the fn tail
     {
         let _ = (input, output, q8_bytes, element_start, config);
         return Ok(false);

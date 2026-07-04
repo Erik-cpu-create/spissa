@@ -392,6 +392,11 @@ pub unsafe fn decode16_w5_into(
 /// the SIMD kernels reproduce; used as their byte-aligned tail and as the
 /// dispatcher fallback for widths without a SIMD path. Mirrors the inner loop of
 /// `BitplaneCodec::decode` exactly (MSB-first `BufferedBitReader`).
+///
+/// Only the aarch64 SIMD dispatch (`decode_bitplane_row_into` / `decode16_w6_into`)
+/// calls this; on other targets `BitplaneCodec::decode` inlines the scalar loop, so
+/// gate it to aarch64 to avoid a dead-code warning there.
+#[cfg(target_arch = "aarch64")]
 fn decode_scalar_w(
     palette: &[u8],
     idx_plane: &[u8],

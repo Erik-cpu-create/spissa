@@ -310,6 +310,7 @@ fn bf16_row_dot_f32(hid: &[f32], wrow: &[u8], hidden: usize) -> f32 {
 #[cfg(not(target_arch = "aarch64"))]
 fn bf16_row_dot_f32_scalar(hid: &[f32], wrow: &[u8], hidden: usize) -> f32 {
     let mut sum = 0.0f32;
+    #[allow(clippy::needless_range_loop)] // h indexes hid[h] and wrow[h*2..] together
     for h in 0..hidden {
         let off = h * 2;
         let bits = u16::from_le_bytes([wrow[off], wrow[off + 1]]);
