@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "rtc-codec"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "log",
  "serde",
@@ -871,7 +871,7 @@ checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "spissa-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "spissa-container"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "libc",
  "log",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "spissa-import"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "log",
  "serde",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "spissa-runtime"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "log",
  "rtc-codec",

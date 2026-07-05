@@ -9,6 +9,12 @@ four-part `A.B.C.D` scheme (see [`CONTRIBUTING.md`](CONTRIBUTING.md)).
 
 <!-- BUMP:INSERT -->
 
+## [0.1.9.0] - 2026-07-05
+
+### Build & CI
+- bump the cargo-minor-patch group with 4 updates
+
+
 ## [0.1.8.0] - 2026-07-04
 
 ### Fixes
